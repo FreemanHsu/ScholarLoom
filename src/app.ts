@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { parseArxivReference } from "./domain/arxiv.js";
 import { ImportStore } from "./storage/import-store.js";
 import type { RepositoryAdapter } from "./adapters/git-repository.js";
+import type { StorageLayout } from "./storage/layout.js";
 
 export type ResolvedPaper = {
   arxivId: string;
@@ -28,11 +29,8 @@ export type CodexRunner = {
 
 export type CreateAppOptions = {
   paperSource: PaperSource;
-  databasePath?: string;
-  assetRoot?: string;
-  knowledgeRoot?: string;
+  storageLayout: StorageLayout;
   codexRunner?: CodexRunner;
-  repositoryRoot?: string;
   repositoryAdapter?: RepositoryAdapter;
   knowledgeWriteFailurePoint?: "staged" | "renamed" | "metadata-committed";
   clock?: { now(): Date };
@@ -40,8 +38,8 @@ export type CreateAppOptions = {
 
 export async function createApp(options: CreateAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, routerOptions: { maxParamLength: 1024 } });
-  const store = new ImportStore(options.databasePath, options.assetRoot, options.knowledgeRoot, options.repositoryRoot,
-    options.knowledgeWriteFailurePoint ?? null, options.clock ? () => options.clock!.now() : undefined);
+  const now = options.clock ? () => options.clock!.now() : undefined;
+  const store = ImportStore.open(options.storageLayout, options.knowledgeWriteFailurePoint ?? null, now);
   const backgroundTasks = new Set<Promise<void>>();
   app.addHook("onClose", async () => { await Promise.allSettled(backgroundTasks); store.close(); });
 

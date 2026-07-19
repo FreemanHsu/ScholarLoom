@@ -1,8 +1,4 @@
-# Local paper files are opt-in; keep the directory documentation tracked.
-assets/papers/*
-!assets/papers/README.md
-
-# Reproducible derived data and local application state.
+# Legacy runtime data remains ignored during the verified migration rollback window.
 .cache/
 .index/
 .vector-store/
