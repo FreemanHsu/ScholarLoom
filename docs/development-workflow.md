@@ -40,8 +40,10 @@ git push -u origin codex/<scope>
 
 ## 主线保护与紧急修复
 
-远端 `main` 禁止 force push 和删除，使用线性历史，并要求通过 Pull Request 合并。个人项目
-允许零审批合并，但所有自动检查和 review conversation 必须先解决。
+`main` 的仓库策略禁止 force push 和删除，使用线性历史，并要求通过 Pull Request 合并。
+个人项目允许零审批合并，但所有自动检查和 review conversation 必须先解决。GitHub 当前
+private repository 套餐不提供 branch protection，因此这些约束暂时由流程执行；升级支持
+branch protection 的套餐或将仓库改为 public 后，应立即启用平台强制保护。
 
 紧急修复仍从 `main` 创建 `codex/hotfix-<scope>`，完成与风险相称的验证后通过 Pull Request
 合并。只有 GitHub 或 Pull Request 机制不可用、且生产恢复不能等待时，仓库所有者才可采用
