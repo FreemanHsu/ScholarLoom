@@ -1,0 +1,44 @@
+{
+  "name": "scholarloom",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "dev:server": "SCHOLARLOOM_FIXTURE=1 tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "build": "vite build",
+    "migrate": "tsx src/cli.ts migrate",
+    "diagnostics": "tsx src/cli.ts diagnostics",
+    "rebuild-index": "tsx src/cli.ts rebuild-index",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.0",
+    "ajv": "^8.20.0",
+    "better-sqlite3": "^12.11.1",
+    "fastify": "^5.0.0",
+    "pdfjs-dist": "^6.1.200",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@playwright/cli": "^0.1.17",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "pdf-lib": "^1.17.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^7.3.6",
+    "vitest": "^3.0.0"
+  }
+}
