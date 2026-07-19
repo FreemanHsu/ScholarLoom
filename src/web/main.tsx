@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { importMonitor } from "./import-monitor.js";
 import "./styles.css";
 
 type Paper = { id: string; title: string; arxivId: string; version: number };
@@ -79,18 +80,7 @@ function App() {
       const response = await fetch("/api/imports", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ arxivUrl: url }) });
       const body = await response.json();
       if (!response.ok) throw new Error(body.code ?? "导入失败");
-      await new Promise<void>((resolve, reject) => {
-        const events = new EventSource(`/api/events?scope=${encodeURIComponent(body.importRequest.id)}`);
-        const timeout = window.setTimeout(() => { events.close(); reject(new Error("导入超时，可从状态页重试")); }, 120_000);
-        events.addEventListener("job-progress", (event) => {
-          const job = JSON.parse((event as MessageEvent).data) as { state: string };
-          setProgress(job.state);
-          if (job.state === "succeeded" || job.state === "failed") {
-            window.clearTimeout(timeout); events.close();
-            if (job.state === "succeeded") resolve(); else reject(new Error("导入失败，请重试"));
-          }
-        });
-      });
+      await importMonitor.wait(body.importRequest.id, setProgress);
       await refresh(); await openPaper(body.paper.id);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "导入失败"); }
     finally { setBusy(false); setProgress(null); }
