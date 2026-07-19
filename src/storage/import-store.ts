@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
@@ -11,6 +11,7 @@ import type { ResolvedPaper } from "../app.js";
 import { migrate } from "./migrations.js";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { RepositoryAdapter } from "../adapters/git-repository.js";
+import type { StorageLayout } from "./layout.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -36,21 +37,25 @@ type ImportStatus = {
 
 export class ImportStore {
   readonly #database: Database.Database;
-  readonly #assetRoot: string;
+  readonly #artifactRoot: string;
   readonly #knowledgeRoot: string;
   readonly #repositoryRoot: string;
   readonly #failurePoint: "staged" | "renamed" | "metadata-committed" | null;
   readonly #now: () => Date;
 
-  constructor(path = ":memory:", assetRoot = join(process.cwd(), ".scholarloom", "assets"), knowledgeRoot = process.cwd(),
-    repositoryRoot = join(process.cwd(), ".scholarloom", "repositories"), failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
+  static open(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
+    now?: () => Date): ImportStore {
+    return new ImportStore(layout, failurePoint, now);
+  }
+
+  private constructor(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
     now: () => Date = () => new Date()) {
-    this.#assetRoot = assetRoot;
-    this.#knowledgeRoot = knowledgeRoot;
-    this.#repositoryRoot = repositoryRoot;
+    this.#artifactRoot = layout.root;
+    this.#knowledgeRoot = layout.vaultRoot;
+    this.#repositoryRoot = layout.repositoryRoot;
     this.#failurePoint = failurePoint;
     this.#now = now;
-    this.#database = new Database(path);
+    this.#database = new Database(layout.databasePath);
     this.#database.pragma("foreign_keys = ON");
     this.#database.pragma("journal_mode = WAL");
     this.#database.pragma("busy_timeout = 5000");
@@ -71,13 +76,14 @@ export class ImportStore {
     const now = new Date().toISOString();
     const bytes = new Uint8Array(input.pdfBytes);
     const hash = createHash("sha256").update(bytes).digest("hex");
-    const storageRef = join("papers", hash.slice(0, 2), `${hash}.pdf`);
-    const absolutePdf = join(this.#assetRoot, storageRef);
+    const storageRef = join("originals", "papers", hash.slice(0, 2), `${hash}.pdf`);
+    const absolutePdf = join(this.#artifactRoot, storageRef);
     mkdirSync(dirname(absolutePdf), { recursive: true });
     if (!existsSync(absolutePdf)) {
       const stagedPdf = `${absolutePdf}.staged-${randomUUID()}`;
       writeFileSync(stagedPdf, bytes);
       renameSync(stagedPdf, absolutePdf);
+      chmodSync(absolutePdf, 0o400);
     }
     const artifactId = `artifact:pdf:${hash}`;
     const versionId = `paper-version:${input.paper.id}:arxiv:v${input.paper.version}`;
@@ -359,7 +365,7 @@ export class ImportStore {
   getPdf(versionId: string): Uint8Array | null {
     const row = this.#database.prepare(`SELECT a.storage_ref FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id WHERE v.id=?`).get(versionId) as
       { storage_ref: string } | undefined;
-    return row ? readFileSync(join(this.#assetRoot, row.storage_ref)) : null;
+    return row ? readFileSync(join(this.#artifactRoot, row.storage_ref)) : null;
   }
 
   startConversation(paperId: string): unknown | null {
@@ -631,13 +637,17 @@ export class ImportStore {
     const interruptedJobs = (this.#database.prepare("SELECT count(*) count FROM job_runs WHERE state='interrupted'").get() as { count: number }).count;
     const openWrites = (this.#database.prepare("SELECT count(*) count FROM knowledge_write_requests WHERE phase NOT IN ('complete','failed','conflicted')").get() as { count: number }).count;
     const pendingIndex = (this.#database.prepare("SELECT count(*) count FROM index_outbox WHERE state='pending'").get() as { count: number }).count;
-    const missingArtifacts = (this.#database.prepare("SELECT storage_ref FROM artifacts").all() as Array<{ storage_ref: string }>).filter((row) => !existsSync(join(this.#assetRoot, row.storage_ref))).map((row) => row.storage_ref);
+    const artifactGaps = (this.#database.prepare("SELECT storage_ref,retention_class FROM artifacts").all() as
+      Array<{ storage_ref: string; retention_class: string }>).filter((row) => !existsSync(join(this.#artifactRoot, row.storage_ref)));
+    const missingArtifacts = artifactGaps.filter((row) => row.retention_class === "irreplaceable").map((row) => row.storage_ref);
+    const missingRebuildableArtifacts = artifactGaps.filter((row) => row.retention_class !== "irreplaceable").map((row) => row.storage_ref);
     const missingMarkdown = [
       ...(this.#database.prepare("SELECT markdown_path FROM summary_revisions").all() as Array<{ markdown_path: string }>),
       ...(this.#database.prepare("SELECT markdown_path FROM takeaway_revisions").all() as Array<{ markdown_path: string }>),
     ].filter((row) => !existsSync(join(this.#knowledgeRoot, row.markdown_path))).map((row) => row.markdown_path);
     return { schemaVersion, integrity, foreignKeyViolations: foreignKeys, interruptedJobs, openWrites, pendingIndex,
-      missingArtifacts, missingMarkdown, healthy: integrity.every((value) => value === "ok") && foreignKeys.length === 0 && missingArtifacts.length === 0 && missingMarkdown.length === 0 };
+      missingArtifacts, missingRebuildableArtifacts, missingMarkdown,
+      healthy: integrity.every((value) => value === "ok") && foreignKeys.length === 0 && missingArtifacts.length === 0 && missingMarkdown.length === 0 };
   }
 
   #recordAgentRun(taskKind: string, paperId: string | null, contextSnapshotId: string | null, context: unknown, output: unknown, skillPath: string | null): string {
@@ -660,7 +670,7 @@ export class ImportStore {
     createdById: string | null, parentArtifactId: string | null): void {
     const hash = createHash("sha256").update(bytes).digest("hex");
     const storageRef = join("derived", artifactType, hash.slice(0, 2), `${hash}.${extension}`);
-    const absolute = join(this.#assetRoot, storageRef);
+    const absolute = join(this.#artifactRoot, storageRef);
     mkdirSync(dirname(absolute), { recursive: true });
     if (!existsSync(absolute)) {
       const staged = `${absolute}.staged-${randomUUID()}`;

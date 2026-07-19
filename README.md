@@ -2,16 +2,16 @@
 
 一个面向个人论文阅读、知识沉淀与交互式问答的 AI-native 知识库。
 
-这里把 Markdown 当作长期事实源：论文笔记记录证据，概念笔记沉淀可复用知识，
+这里把外部数据目录中的 Markdown 当作长期事实源：论文笔记记录证据，概念笔记沉淀可复用知识，
 主题地图负责导航，问题笔记追踪未知，综合文章形成跨论文观点。未来的全文检索、
 向量检索、知识图谱或 Web UI 都应从这些文件派生，而不是取代它们。
 
 ## 从这里开始
 
-1. 把论文链接、DOI、PDF 路径或临时想法放进 [`inbox/README.md`](inbox/README.md)。
+1. 把论文链接、DOI、PDF 路径或临时想法放进数据 vault 的 `inbox/README.md`。
 2. 让 AI “摄取这篇论文”，它会根据 [`templates/paper.md`](templates/paper.md)
    创建规范化论文笔记并连接概念与主题。
-3. 从 [`HOME.md`](HOME.md) 浏览当前阅读、开放问题和近期综合。
+3. 从 `/Users/jun/ScholarLoomData/vault/HOME.md` 浏览当前阅读、开放问题和近期综合。
 4. 直接提问，例如：
    - “知识库里关于 RAG 评估有哪些共识和争议？”
    - “对比这三篇论文的方法、数据和局限。”
@@ -49,9 +49,13 @@ Codex CLI，不引入向量数据库。
 ```bash
 npm install
 npm run build
+npm run data:init
 npm run migrate
 npm start
 ```
+
+`data:init` 默认创建 `/Users/jun/ScholarLoomData`。生产启动不会静默创建数据目录，
+也不会退回仓库内的 `.scholarloom/`。可用 `SCHOLARLOOM_DATA_ROOT` 显式选择另一已初始化根目录。
 
 应用只监听 `127.0.0.1:3000`。本地 fixture 旅程不访问 arXiv 或 Codex，仍使用真实
 SQLite、filesystem、PDF.js 和 Git：
@@ -72,6 +76,21 @@ npm run build
 npm run diagnostics
 npm run rebuild-index
 ```
+
+## 数据快照与恢复
+
+ScholarLoom 只负责生成一致性快照、校验和非覆盖恢复；当前不启用自动调度或远端传输。
+创建快照前必须停止服务：
+
+```bash
+npm run backup -- /path/to/new-snapshot
+npm run backup -- /path/to/new-snapshot-with-derived --include-derived
+npm run backup:verify -- /path/to/new-snapshot
+npm run restore -- /path/to/new-snapshot /path/to/new-empty-data-root
+```
+
+默认快照包含 `vault/`、`originals/`、SQLite Online Backup 与 SHA-256 manifest，
+排除 `derived/`、`cache/`、`logs/` 和 `tmp/`。恢复永不覆盖现有数据根。
 
 `diagnostics` 是只读的，报告 migration 版本、SQLite integrity/foreign-key check、
 中断 Job、未完成知识写入、缺失 Artifact/Markdown 和待处理索引。`rebuild-index` 会只从

@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
+import { initializeDataRoot } from "../src/storage/layout.js";
+
+async function testLayout() {
+  return initializeDataRoot(join(await mkdtemp(join(tmpdir(), "scholarloom-import-")), "data"));
+}
 
 describe("POST /api/imports", () => {
   it("imports an explicit arXiv version without silently upgrading it", async () => {
     const app = await createApp({
+      storageLayout: await testLayout(),
       paperSource: {
         async resolve() {
           return {
@@ -36,6 +42,7 @@ describe("POST /api/imports", () => {
   it("resolves a bare arXiv ID once to the source's latest version", async () => {
     let latestVersion = 3;
     const app = await createApp({
+      storageLayout: await testLayout(),
       paperSource: {
         async resolve() {
           return { arxivId: "2401.12345", latestVersion, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 };
@@ -60,14 +67,14 @@ describe("POST /api/imports", () => {
 
   it("keeps one Paper after the process restarts", async () => {
     const directory = await mkdtemp(join(tmpdir(), "scholarloom-import-"));
-    const databasePath = join(directory, "scholarloom.sqlite3");
+    const storageLayout = initializeDataRoot(join(directory, "data"));
     const paperSource = {
       async resolve() {
         return { arxivId: "2401.12345", latestVersion: 3, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 };
       },
     };
 
-    const firstApp = await createApp({ paperSource, databasePath });
+    const firstApp = await createApp({ paperSource, storageLayout });
     await firstApp.inject({
       method: "POST",
       url: "/api/imports",
@@ -75,7 +82,7 @@ describe("POST /api/imports", () => {
     });
     await firstApp.close();
 
-    const restartedApp = await createApp({ paperSource, databasePath });
+    const restartedApp = await createApp({ paperSource, storageLayout });
     const papers = await restartedApp.inject({ method: "GET", url: "/api/papers" });
 
     expect(papers.statusCode).toBe(200);
@@ -92,7 +99,7 @@ describe("POST /api/imports", () => {
         return { arxivId: "2401.12345", latestVersion: 3, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 };
       },
     };
-    const app = await createApp({ paperSource });
+    const app = await createApp({ paperSource, storageLayout: await testLayout() });
 
     const first = await app.inject({
       method: "POST",

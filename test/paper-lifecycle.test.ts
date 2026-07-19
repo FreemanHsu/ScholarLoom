@@ -11,6 +11,7 @@ import type { FastifyInstance } from "fastify";
 
 import { createApp } from "../src/app.js";
 import { GitRepositoryAdapter } from "../src/adapters/git-repository.js";
+import { initializeDataRoot } from "../src/storage/layout.js";
 
 const exec = promisify(execFile);
 
@@ -36,10 +37,9 @@ async function fixturePdf(): Promise<Uint8Array> {
 describe("paper ingestion lifecycle", () => {
   it("stores a PDF, extracts page evidence, and activates a schema-valid Summary", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-lifecycle-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
     const app = await createApp({
-      databasePath: join(root, "scholarloom.sqlite3"),
-      assetRoot: join(root, "assets"),
-      knowledgeRoot: join(root, "knowledge"),
+      storageLayout,
       paperSource: {
         async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
         async fetchPdf() { return fixturePdf(); },
@@ -88,6 +88,7 @@ describe("paper ingestion lifecycle", () => {
 
   it("automatically pins and indexes an explicitly linked repository without executing it", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-git-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
     const working = join(root, "working");
     const bare = join(root, "fixture.git");
     await exec("git", ["init", working]);
@@ -101,8 +102,7 @@ describe("paper ingestion lifecycle", () => {
     await exec("git", ["clone", "--bare", working, bare]);
 
     const app = await createApp({
-      databasePath: join(root, "scholarloom.sqlite3"), assetRoot: join(root, "assets"), knowledgeRoot: join(root, "knowledge"),
-      repositoryRoot: join(root, "repositories"),
+      storageLayout,
       repositoryAdapter: new GitRepositoryAdapter({ "https://github.com/example/fixture": bare }),
       paperSource: { async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; }, async fetchPdf() { return fixturePdf(); } },
       codexRunner: {
@@ -154,8 +154,8 @@ describe("paper ingestion lifecycle", () => {
     expect(firstDecision.statusCode).toBe(201);
     expect(retry.json()).toEqual(firstDecision.json());
     expect(firstDecision.json()).toMatchObject({ takeaway: { reviewStatus: "confirmed", revision: 1 } });
-    const summaryMarkdown = await readFile(join(root, "knowledge", workspace.json().summary.markdownPath), "utf8");
-    const takeawayMarkdown = await readFile(join(root, "knowledge", firstDecision.json().takeaway.markdownPath), "utf8");
+    const summaryMarkdown = await readFile(join(storageLayout.vaultRoot, workspace.json().summary.markdownPath), "utf8");
+    const takeawayMarkdown = await readFile(join(storageLayout.vaultRoot, firstDecision.json().takeaway.markdownPath), "utf8");
     const frontmatter = (markdown: string) => parse(markdown.split("---")[1]!) as Record<string, unknown>;
     expect(frontmatter(summaryMarkdown)).toMatchObject({ summary_revision_id: workspace.json().summary.id, paper_version_id: workspace.json().paper.versionId });
     expect(frontmatter(takeawayMarkdown)).toMatchObject({ id: firstDecision.json().takeaway.id, revision_id: firstDecision.json().takeaway.revisionId, review_status: "confirmed" });
@@ -188,8 +188,9 @@ describe("paper ingestion lifecycle", () => {
     const phases = ["staged", "renamed", "metadata-committed"] as const;
     for (const phase of phases) {
       const root = await mkdtemp(join(tmpdir(), `scholarloom-recover-${phase}-`));
+      const storageLayout = initializeDataRoot(join(root, "data"));
       const options = {
-        databasePath: join(root, "scholarloom.sqlite3"), assetRoot: join(root, "assets"), knowledgeRoot: join(root, "knowledge"),
+        storageLayout,
         paperSource: { async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; }, async fetchPdf() { return fixturePdf(); } },
         codexRunner: { async runSummary() { return { sections: [{ key: "overview", title: "概述", body: "recoverable" }], claims: [{ voice: "paper-evidence" as const, claim: "Table 1 reports accuracy 91.2.", sourceHandle: "pdf-page:2" }], readStatus: "read" as const }; } },
       };
@@ -205,8 +206,9 @@ describe("paper ingestion lifecycle", () => {
     }
 
     const root = await mkdtemp(join(tmpdir(), "scholarloom-conflict-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
     const options = {
-      databasePath: join(root, "scholarloom.sqlite3"), assetRoot: join(root, "assets"), knowledgeRoot: join(root, "knowledge"),
+      storageLayout,
       paperSource: { async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; }, async fetchPdf() { return fixturePdf(); } },
       codexRunner: { async runSummary() { return { sections: [{ key: "overview", title: "概述", body: "recoverable" }], claims: [{ voice: "paper-evidence" as const, claim: "Table 1 reports accuracy 91.2.", sourceHandle: "pdf-page:2" }], readStatus: "read" as const }; } },
     };
@@ -214,7 +216,7 @@ describe("paper ingestion lifecycle", () => {
     const conflictedImport = await interrupted.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
     await waitForImport(interrupted, conflictedImport.json().importRequest.id, "failed");
     await interrupted.close();
-    const target = join(root, "knowledge", "library", "papers", "fixture-paper", "summary-v2-r1.md");
+    const target = join(storageLayout.vaultRoot, "library", "papers", "fixture-paper", "summary-v2-r1.md");
     await writeFile(target, "external owner edit", "utf8");
     const restarted = await createApp(options);
     const proposals = await restarted.inject({ method: "GET", url: "/api/proposals" });
@@ -231,9 +233,10 @@ describe("paper ingestion lifecycle", () => {
 
   it("safely retries after Summary generation fails without duplicating the Paper", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-summary-retry-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
     let attempts = 0;
     const app = await createApp({
-      databasePath: join(root, "scholarloom.sqlite3"), assetRoot: join(root, "assets"), knowledgeRoot: join(root, "knowledge"),
+      storageLayout,
       paperSource: { async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; }, async fetchPdf() { return fixturePdf(); } },
       codexRunner: { async runSummary() { attempts += 1; if (attempts === 1) throw new Error("fixture-codex-interrupted");
         return { sections: [{ key: "overview", title: "概述", body: "retry complete" }], claims: [{ voice: "paper-evidence" as const, claim: "Table 1 reports accuracy 91.2.", sourceHandle: "pdf-page:2" }], readStatus: "read" as const }; } },

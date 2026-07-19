@@ -79,22 +79,26 @@ clients resume with `Last-Event-ID`; if an event cannot be replayed they refresh
 corresponding read model. A lost stream never implies that a Proposal was accepted or
 that a KnowledgeWriteRequest advanced.
 
-The runtime owns these local roots:
+Application code and user data have independent lifecycles. The runtime owns one
+external, explicitly initialized data root:
 
 ```text
-repository/
-├── library/ and knowledge/       durable Markdown knowledge
-└── .scholarloom/                 ignored local runtime data
-    ├── scholarloom.sqlite3
-    ├── assets/
-    ├── repositories/
-    ├── jobs/
-    ├── logs/
-    └── tmp/
+/Users/jun/ScholarLoomData/
+├── scholarloom-data.json         versioned layout manifest
+├── vault/                        durable Markdown/YAML and independent Git history
+├── originals/papers/             immutable content-addressed PDFs
+├── state/scholarloom.sqlite3     operational authority
+├── derived/                      rebuildable extraction and Agent artifacts
+├── cache/repositories/           rebuildable fixed-commit clones
+├── logs/
+└── tmp/
 ```
 
 Writes use a temporary sibling followed by an atomic rename. Paths stored in SQLite
-are repository-relative; callers never construct storage paths themselves.
+are data-root- or vault-relative; callers never construct storage paths themselves.
+Normal startup fails closed if the root was not created by `data:init` or is incomplete.
+Snapshot creation requires the runtime write lock to be absent and uses SQLite Online
+Backup plus SHA-256 file manifests. Restore always targets a new directory.
 
 ## 4. Module map
 
