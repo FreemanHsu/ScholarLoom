@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { isRetryableImportJobState, type ImportJobError, type ImportJobState } from "../domain/import-job.js";
 import { importMonitor } from "./import-monitor.js";
 import "./styles.css";
 
@@ -9,8 +10,7 @@ type Workspace = {
   pdf: { pageCount: number } | null;
   summary: null | { status: string; sections: Array<{ key: string; title: string; body: string }>;
     claims: Array<{ claim: string; evidence: { page: number; verified: boolean } }> };
-  processing: null | { jobId: string; state: string; progress: number; attempt: number;
-    error: null | { code: string; message: string; stage: string; retryable: boolean; action: string | null } };
+  processing: null | { jobId: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null };
 };
 type Proposal = { id: string; claim: string; oneClickEligible: boolean; sourceHandles: string[] };
 
@@ -107,13 +107,13 @@ function App() {
     <header className="topbar"><button className="ghost" onClick={() => setWorkspace(null)}>← 论文库</button><div><span className="eyebrow">PAPER WORKSPACE</span><h1>{workspace.paper.title}</h1></div><span className="version">arXiv v{workspace.paper.version}</span></header>
     <div className={`reading-grid ${pdfOpen ? "split" : ""}`}>
       <article className="summary-pane">
-        <div className="pane-title"><div><span className="status">{workspace.summary ? "Summary Ready" : ["failed", "interrupted"].includes(workspace.processing?.state ?? "") ? "Import Failed" : "Processing"}</span><h2>技术精读</h2></div>
+        <div className="pane-title"><div><span className="status">{workspace.summary ? "Summary Ready" : workspace.processing?.state === "cancelled" ? "Import Cancelled" : isRetryableImportJobState(workspace.processing?.state) ? "Import Failed" : "Processing"}</span><h2>技术精读</h2></div>
           <button disabled={!workspace.pdf} onClick={() => setPdfOpen((value) => !value)}>{pdfOpen ? "隐藏原文" : "打开原文"}</button></div>
         {!workspace.summary && <section className="import-state"><span className="section-no">IMPORT STATUS</span>
-          <h3>{["failed", "interrupted"].includes(workspace.processing?.state ?? "") ? "论文处理未完成" : "正在生成 Paper Summary"}</h3>
+          <h3>{workspace.processing?.state === "cancelled" ? "论文处理已取消" : isRetryableImportJobState(workspace.processing?.state) ? "论文处理未完成" : "正在生成 Paper Summary"}</h3>
           {workspace.processing?.error && <><p>{workspace.processing.error.stage} · {workspace.processing.error.code}</p>
             <p>{workspace.processing.error.message}</p></>}
-          {workspace.processing && ["failed", "interrupted"].includes(workspace.processing.state) && <button disabled={busy} onClick={() => void retryImport()}>
+          {isRetryableImportJobState(workspace.processing?.state) && <button disabled={busy} onClick={() => void retryImport()}>
             {busy ? `重试中 · ${progress ?? "queued"}` : workspace.processing.error?.action === "repair-data-root-permissions" ? "修复存储权限后重试" : "重试 Paper Summary 流程"}
           </button>}
           {error && <p className="error">{error}</p>}

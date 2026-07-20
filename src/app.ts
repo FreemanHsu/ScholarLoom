@@ -4,7 +4,8 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { parseArxivReference } from "./domain/arxiv.js";
-import { ImportStore, type ImportStage } from "./storage/import-store.js";
+import type { ImportStage } from "./domain/import-job.js";
+import { ImportStore } from "./storage/import-store.js";
 import type { RepositoryAdapter } from "./adapters/git-repository.js";
 import type { StorageLayout } from "./storage/layout.js";
 import { assertDataRootWritable } from "./storage/layout.js";

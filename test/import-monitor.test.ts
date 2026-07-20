@@ -34,4 +34,15 @@ describe("import progress monitoring", () => {
     await expect(createImportMonitor(adapter).wait("import:interrupted", () => undefined))
       .rejects.toThrow("导入中断，请重试");
   });
+
+  it("treats a cancelled import as terminal without suggesting retry", async () => {
+    const adapter: ImportProgressAdapter = {
+      subscribe() { return () => undefined; },
+      async read() { return "cancelled"; },
+      repeat(callback) { void callback(); return () => undefined; },
+    };
+
+    await expect(createImportMonitor(adapter).wait("import:cancelled", () => undefined))
+      .rejects.toThrow("导入已取消");
+  });
 });

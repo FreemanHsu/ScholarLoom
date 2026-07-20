@@ -11,6 +11,7 @@ import type { ResolvedPaper } from "../app.js";
 import { migrate } from "./migrations.js";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { RepositoryAdapter } from "../adapters/git-repository.js";
+import { isRetryableImportJobState, requireImportJobState, type ImportJobError, type ImportJobState, type ImportStage } from "../domain/import-job.js";
 import { inspectDataRootAccess, type StorageLayout } from "./layout.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
@@ -32,12 +33,10 @@ export type EntryResult = { answer: string; sourceHandles: string[]; uncertainty
 
 type ImportStatus = {
   importRequest: { id: string; paperId: string; resolutionStatus: string };
-  jobs: Array<{ id: string; jobType: string; state: string; progress: number; attempt: number; error: ImportJobError | null }>;
+  jobs: Array<{ id: string; jobType: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null }>;
 };
 
-export type ImportStage = "pdf-download" | "pdf-storage" | "pdf-extraction" | "paper-summary" | "knowledge-write";
-export type ImportJobError = { code: string; message: string; stage: ImportStage; retryable: boolean; action: string | null };
-type ImportJobHandle = { id: string; attempt: number; state: "running" | "succeeded" | "failed" | "interrupted" };
+type ImportJobHandle = { id: string; attempt: number; state: ImportJobState };
 type ImportExecution = { paper: StoredPaper; arxivId: string; version: number; importRequest: StoredImportRequest; job: ImportJobHandle };
 type RetryImportResult = { ok: true; execution: ImportExecution; replayed: boolean } |
   { ok: false; code: "job-not-found" | "job-not-retryable" | "job-already-active" | "idempotency-key-conflict" };
@@ -90,8 +89,7 @@ export class ImportStore {
     const storageRef = join("originals", "papers", hash.slice(0, 2), `${hash}.pdf`);
     const absolutePdf = join(this.#artifactRoot, storageRef);
     mkdirSync(dirname(absolutePdf), { recursive: true });
-    const existingPdfValid = existsSync(absolutePdf) && readFileSync(absolutePdf).byteLength === bytes.byteLength &&
-      createHash("sha256").update(readFileSync(absolutePdf)).digest("hex") === hash;
+    const existingPdfValid = this.#fileMatches(absolutePdf, hash, bytes.byteLength);
     if (!existingPdfValid) {
       const stagedPdf = `${absolutePdf}.staged-${randomUUID()}`;
       writeFileSync(stagedPdf, bytes);
@@ -374,7 +372,7 @@ export class ImportStore {
       pdf: extraction ? { pageCount: extraction.page_count } : null,
       summary: summary ? { id: summary.id, status: summary.status, readStatus: summary.read_status,
         markdownPath: summary.markdown_path, ...JSON.parse(summary.structured_json) as object } : null,
-      processing: latestJob ? { jobId: latestJob.id, state: latestJob.state, progress: latestJob.progress,
+      processing: latestJob ? { jobId: latestJob.id, state: requireImportJobState(latestJob.state), progress: latestJob.progress,
         attempt: latestJob.attempt, error: parseStoredImportError(latestJob.error_json) } : null,
       repository: repository ? { url: repository.canonical_url, commitSha: repository.commit_sha,
         status: repository.status === "confirmed" ? "ready" : "failed", files } : null,
@@ -743,10 +741,7 @@ export class ImportStore {
     const storageRef = join("derived", artifactType, hash.slice(0, 2), `${hash}.${extension}`);
     const absolute = join(this.#artifactRoot, storageRef);
     mkdirSync(dirname(absolute), { recursive: true });
-    const existingValid = existsSync(absolute) && (() => {
-      const current = readFileSync(absolute);
-      return current.byteLength === bytes.byteLength && createHash("sha256").update(current).digest("hex") === hash;
-    })();
+    const existingValid = this.#fileMatches(absolute, hash, bytes.byteLength);
     if (!existingValid) {
       const staged = `${absolute}.staged-${randomUUID()}`;
       writeFileSync(staged, bytes);
@@ -763,10 +758,13 @@ export class ImportStore {
     const artifact = this.#database.prepare("SELECT storage_ref,content_hash,byte_size FROM artifacts WHERE id=?").get(id) as
       { storage_ref: string; content_hash: string; byte_size: number } | undefined;
     if (!artifact) return false;
-    const path = join(this.#artifactRoot, artifact.storage_ref);
+    return this.#fileMatches(join(this.#artifactRoot, artifact.storage_ref), artifact.content_hash, artifact.byte_size);
+  }
+
+  #fileMatches(path: string, expectedHash: string, expectedSize: number): boolean {
     if (!existsSync(path)) return false;
     const bytes = readFileSync(path);
-    return bytes.byteLength === artifact.byte_size && createHash("sha256").update(bytes).digest("hex") === artifact.content_hash;
+    return bytes.byteLength === expectedSize && createHash("sha256").update(bytes).digest("hex") === expectedHash;
   }
 
   #knowledgePath(relativePath: string): string { return join(this.#knowledgeRoot, relativePath); }
@@ -860,9 +858,9 @@ export class ImportStore {
     if (replay) return { ok: true, replayed: true, execution: {
       paper: { id: row.paper_id, arxivId, title: row.title, version }, arxivId, version,
       importRequest: { id: row.import_request_id, paperId: row.paper_id, status: "resolved" },
-      job: { id: replay.id, attempt: replay.attempt, state: replay.state as ImportJobHandle["state"] },
+      job: { id: replay.id, attempt: replay.attempt, state: requireImportJobState(replay.state) },
     } };
-    if (row.state !== "failed" && row.state !== "interrupted") return { ok: false, code: "job-not-retryable" };
+    if (!isRetryableImportJobState(row.state)) return { ok: false, code: "job-not-retryable" };
     const completed = this.#database.prepare("SELECT 1 FROM job_runs WHERE import_request_id=? AND job_type='paper-import' AND state='succeeded'").get(row.import_request_id);
     if (completed) return { ok: false, code: "job-not-retryable" };
     const active = this.#database.prepare("SELECT 1 FROM job_runs WHERE import_request_id=? AND job_type='paper-import' AND state IN ('queued','running')").get(row.import_request_id);
@@ -891,7 +889,7 @@ export class ImportStore {
     const jobs = this.#database.prepare(`SELECT id,job_type,state,progress,attempt,error_json FROM job_runs WHERE import_request_id=? ORDER BY attempt,queued_at,id`).all(id) as
       Array<{ id: string; job_type: string; state: string; progress: number; attempt: number; error_json: string | null }>;
     return { importRequest: { id: row.id, paperId: row.resolved_paper_id, resolutionStatus: row.resolution_status },
-      jobs: jobs.map((job) => ({ id: job.id, jobType: job.job_type, state: job.state, progress: job.progress,
+      jobs: jobs.map((job) => ({ id: job.id, jobType: job.job_type, state: requireImportJobState(job.state), progress: job.progress,
         attempt: job.attempt, error: parseStoredImportError(job.error_json) })) };
   }
 

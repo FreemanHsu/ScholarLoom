@@ -132,9 +132,13 @@ flowchart TD
 Interface:
 
 ```ts
+type ImportReceipt =
+  | { importRequest: ImportRequestRef; paper: PaperRef }
+  | { importRequest: ImportRequestRef; job: JobRunRef }
+
 submit(input: { source: string }): Promise<ImportReceipt>
 getImport(importRequestId: string): ImportStatus
-retry(jobRunId: string): Promise<void>
+retry(jobRunId: string, idempotencyKey: string): Promise<ImportReceipt>
 ```
 
 It hides URL normalization, idempotency, Paper upsert, job graph creation, PDF and
