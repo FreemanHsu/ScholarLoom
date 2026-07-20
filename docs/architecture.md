@@ -141,6 +141,14 @@ It hides URL normalization, idempotency, Paper upsert, job graph creation, PDF a
 repository acquisition, extraction, Summary generation, activation rules, and error
 recovery. Callers never invoke individual pipeline steps.
 
+Each failed or interrupted retry creates a new Job Run attempt and preserves the prior
+attempt for audit. The Command requires an `Idempotency-Key`; replay returns the same
+attempt. Job input freezes the Paper Version so retry cannot drift to a newer current
+version. It resumes an open KnowledgeWriteRequest without rerunning Codex Summary and
+reuses PDF/Extraction only after recorded size, hash, output Artifact, and page-element
+checks pass. A completed import cannot be retried through an older failed attempt.
+Storage permission errors require a successful data-root write preflight first.
+
 ### 4.2 PaperLibrary
 
 Interface:
@@ -343,6 +351,7 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | POST | `/api/imports` | Submit an arXiv link |
 | GET | `/api/imports/:id` | Read import and child-job status |
 | GET | `/api/events?scope=...` | Stream durable progress over SSE |
+| POST | `/api/jobs/:id/retry` | Retry a failed or interrupted import as a new Job attempt |
 | GET | `/api/papers` | List Paper read models |
 | GET | `/api/papers/:id` | Load Paper workspace read model |
 | GET | `/api/paper-versions/:id/pdf` | Stream the accepted PDF asset |
@@ -404,7 +413,8 @@ SQLite settings:
   whether they return to `queued`.
 - Artifact integrity checks compare size and content hash before activation.
 - A diagnostic command reports schema version, stale projections, interrupted jobs,
-  missing files, and invalid Markdown without changing state.
+  missing files, invalid Markdown, and unwritable authoritative directories without
+  changing state.
 
 ## 10. Dependency direction
 

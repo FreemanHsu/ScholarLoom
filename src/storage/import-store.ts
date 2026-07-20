@@ -11,7 +11,7 @@ import type { ResolvedPaper } from "../app.js";
 import { migrate } from "./migrations.js";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { RepositoryAdapter } from "../adapters/git-repository.js";
-import type { StorageLayout } from "./layout.js";
+import { inspectDataRootAccess, type StorageLayout } from "./layout.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -32,10 +32,18 @@ export type EntryResult = { answer: string; sourceHandles: string[]; uncertainty
 
 type ImportStatus = {
   importRequest: { id: string; paperId: string; resolutionStatus: string };
-  jobs: Array<{ id: string; jobType: string; state: string; progress: number }>;
+  jobs: Array<{ id: string; jobType: string; state: string; progress: number; attempt: number; error: ImportJobError | null }>;
 };
 
+export type ImportStage = "pdf-download" | "pdf-storage" | "pdf-extraction" | "paper-summary" | "knowledge-write";
+export type ImportJobError = { code: string; message: string; stage: ImportStage; retryable: boolean; action: string | null };
+type ImportJobHandle = { id: string; attempt: number; state: "running" | "succeeded" | "failed" | "interrupted" };
+type ImportExecution = { paper: StoredPaper; arxivId: string; version: number; importRequest: StoredImportRequest; job: ImportJobHandle };
+type RetryImportResult = { ok: true; execution: ImportExecution; replayed: boolean } |
+  { ok: false; code: "job-not-found" | "job-not-retryable" | "job-already-active" | "idempotency-key-conflict" };
+
 export class ImportStore {
+  readonly #layout: StorageLayout;
   readonly #database: Database.Database;
   readonly #artifactRoot: string;
   readonly #knowledgeRoot: string;
@@ -50,6 +58,7 @@ export class ImportStore {
 
   private constructor(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
     now: () => Date = () => new Date()) {
+    this.#layout = layout;
     this.#artifactRoot = layout.root;
     this.#knowledgeRoot = layout.vaultRoot;
     this.#repositoryRoot = layout.repositoryRoot;
@@ -70,16 +79,20 @@ export class ImportStore {
   async ingestPaper(input: {
     paper: StoredPaper;
     pdfBytes: Uint8Array;
+    onStage?: (stage: Exclude<ImportStage, "pdf-download">) => void;
     runSummary(context: { paperId: string; title: string; pages: Array<{ handle: string; page: number; text: string }> }): Promise<SummaryResult>;
     repositoryAdapter?: RepositoryAdapter;
   }): Promise<void> {
+    input.onStage?.("pdf-storage");
     const now = new Date().toISOString();
     const bytes = new Uint8Array(input.pdfBytes);
     const hash = createHash("sha256").update(bytes).digest("hex");
     const storageRef = join("originals", "papers", hash.slice(0, 2), `${hash}.pdf`);
     const absolutePdf = join(this.#artifactRoot, storageRef);
     mkdirSync(dirname(absolutePdf), { recursive: true });
-    if (!existsSync(absolutePdf)) {
+    const existingPdfValid = existsSync(absolutePdf) && readFileSync(absolutePdf).byteLength === bytes.byteLength &&
+      createHash("sha256").update(readFileSync(absolutePdf)).digest("hex") === hash;
+    if (!existingPdfValid) {
       const stagedPdf = `${absolutePdf}.staged-${randomUUID()}`;
       writeFileSync(stagedPdf, bytes);
       renameSync(stagedPdf, absolutePdf);
@@ -94,25 +107,59 @@ export class ImportStore {
       .run(artifactId, now, versionId);
 
     const extractionId = `extraction:${versionId}:pdfjs`;
-    this.#database.prepare(`INSERT INTO extraction_runs(id,paper_version_id,source_artifact_id,extractor_name,extractor_version,status,started_at)
-      VALUES (?,?,?,'pdfjs','5','running',?) ON CONFLICT(id) DO NOTHING`).run(extractionId, versionId, artifactId, now);
-    const document = await getDocument({ data: bytes, standardFontDataUrl }).promise;
-    const pages: Array<{ handle: string; page: number; text: string }> = [];
-    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
-      const page = await document.getPage(pageNumber);
-      const content = await page.getTextContent();
-      const text = content.items.map((item) => "str" in item ? item.str : "").join(" ").trim();
-      const elementId = `document-element:${extractionId}:page:${pageNumber}`;
-      this.#database.prepare(`INSERT INTO document_elements(id,extraction_run_id,element_type,page_number,ordinal,text_content,bbox_json)
-        VALUES (?,?,'page',?,0,?,'{}') ON CONFLICT(extraction_run_id,page_number,ordinal) DO UPDATE SET text_content=excluded.text_content`)
-        .run(elementId, extractionId, pageNumber, text);
-      pages.push({ handle: `pdf-page:${pageNumber}`, page: pageNumber, text });
+    const completedExtraction = this.#database.prepare(`SELECT output_artifact_id,page_count FROM extraction_runs
+      WHERE id=? AND status='succeeded'`).get(extractionId) as { output_artifact_id: string | null; page_count: number | null } | undefined;
+    const storedPageCount = (this.#database.prepare("SELECT count(*) count FROM document_elements WHERE extraction_run_id=? AND element_type='page'")
+      .get(extractionId) as { count: number }).count;
+    const extractionReusable = Boolean(completedExtraction?.output_artifact_id && completedExtraction.page_count === storedPageCount &&
+      storedPageCount > 0 && this.#artifactIsValid(completedExtraction.output_artifact_id));
+    let pages: Array<{ handle: string; page: number; text: string }>;
+    if (extractionReusable) {
+      pages = (this.#database.prepare(`SELECT page_number,text_content FROM document_elements
+        WHERE extraction_run_id=? AND element_type='page' ORDER BY page_number,ordinal`).all(extractionId) as
+        Array<{ page_number: number; text_content: string }>).map((page) =>
+        ({ handle: `pdf-page:${page.page_number}`, page: page.page_number, text: page.text_content }));
+    } else {
+      this.#database.prepare(`INSERT INTO extraction_runs(id,paper_version_id,source_artifact_id,extractor_name,extractor_version,status,started_at)
+        VALUES (?,?,?,'pdfjs','5','running',?) ON CONFLICT(id) DO UPDATE SET status='running',started_at=excluded.started_at`)
+        .run(extractionId, versionId, artifactId, now);
+      input.onStage?.("pdf-extraction");
+      const document = await getDocument({ data: bytes, standardFontDataUrl }).promise;
+      pages = [];
+      for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+        const page = await document.getPage(pageNumber);
+        const content = await page.getTextContent();
+        const text = content.items.map((item) => "str" in item ? item.str : "").join(" ").trim();
+        const elementId = `document-element:${extractionId}:page:${pageNumber}`;
+        this.#database.prepare(`INSERT INTO document_elements(id,extraction_run_id,element_type,page_number,ordinal,text_content,bbox_json)
+          VALUES (?,?,'page',?,0,?,'{}') ON CONFLICT(extraction_run_id,page_number,ordinal) DO UPDATE SET text_content=excluded.text_content`)
+          .run(elementId, extractionId, pageNumber, text);
+        pages.push({ handle: `pdf-page:${pageNumber}`, page: pageNumber, text });
+      }
+      const extractionArtifactId = `artifact:${extractionId}`;
+      this.#storeArtifact(extractionArtifactId, "document-extraction", Buffer.from(JSON.stringify(pages)), "json", "job-run", null, artifactId);
+      this.#database.prepare("UPDATE extraction_runs SET status='succeeded',page_count=?,completed_at=?,output_artifact_id=? WHERE id=?")
+        .run(document.numPages, now, extractionArtifactId, extractionId);
     }
-    const extractionArtifactId = `artifact:${extractionId}`;
-    this.#storeArtifact(extractionArtifactId, "document-extraction", Buffer.from(JSON.stringify(pages)), "json", "job-run", null, artifactId);
-    this.#database.prepare("UPDATE extraction_runs SET status='succeeded',page_count=?,completed_at=? WHERE id=?")
-      .run(document.numPages, now, extractionId);
-    this.#database.prepare("UPDATE extraction_runs SET output_artifact_id=? WHERE id=?").run(extractionArtifactId, extractionId);
+
+    const summaryId = `summary:${versionId}:r1`;
+    const existingWrite = this.#database.prepare("SELECT phase,payload_json FROM knowledge_write_requests WHERE id=?")
+      .get(`knowledge-write:${summaryId}`) as { phase: string; payload_json: string } | undefined;
+    if (existingWrite) {
+      input.onStage?.("knowledge-write");
+      if (existingWrite.phase === "conflicted") throw new Error("knowledge-write-conflicted");
+      if (existingWrite.phase === "failed") {
+        const payload = JSON.parse(existingWrite.payload_json) as { markdown?: string };
+        if (!payload.markdown) throw new Error("knowledge-write-recovery-unavailable");
+        this.#database.prepare("UPDATE knowledge_write_requests SET phase='reserved',error_code=NULL,updated_at=? WHERE id=?")
+          .run(new Date().toISOString(), `knowledge-write:${summaryId}`);
+      }
+      this.#advanceSummaryWrite(`knowledge-write:${summaryId}`);
+      const resumed = this.#database.prepare("SELECT phase FROM knowledge_write_requests WHERE id=?")
+        .get(`knowledge-write:${summaryId}`) as { phase: string };
+      if (resumed.phase !== "complete") throw new Error(`knowledge-write-incomplete:${resumed.phase}`);
+      return;
+    }
 
     const explicitUrl = pages.map((page) => page.text).join("\n").match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/)?.[0]?.replace(/[.,;)]$/, "");
     const repositoryWork = input.repositoryAdapter && explicitUrl
@@ -120,6 +167,7 @@ export class ImportStore {
         this.#recordRepositoryFailure(input.paper.id, explicitUrl, error, now))
       : Promise.resolve();
     const summaryContext = { paperId: input.paper.id, title: input.paper.title, pages };
+    input.onStage?.("paper-summary");
     const result = await input.runSummary(summaryContext);
     if (!result.sections.length || !result.claims.length || !["abstract", "skimmed", "read"].includes(result.readStatus)) {
       throw new Error("codex-output-invalid");
@@ -142,13 +190,13 @@ export class ImportStore {
     const relativePath = join("library", "papers", slug, `summary-v${input.paper.version}-r1.md`);
     const targetPath = join(this.#knowledgeRoot, relativePath);
     const skillHash = createHash("sha256").update(readFileSync(join(process.cwd(), "skills/paper-reading/SKILL.md"))).digest("hex");
-    const summaryId = `summary:${versionId}:r1`;
     const markdown = renderSummary({ summaryId, paper: input.paper, versionId, extractionId, agentRunId, skillHash, result: structured, date: now.slice(0, 10) });
     const markdownHash = createHash("sha256").update(markdown).digest("hex");
     const stagedPath = `${targetPath}.staged`;
     const writeId = `knowledge-write:${summaryId}`;
     mkdirSync(dirname(targetPath), { recursive: true });
-    const writePayload = { summaryId, paperId: input.paper.id, paperTitle: input.paper.title, versionId, extractionId,
+    input.onStage?.("knowledge-write");
+    const writePayload = { summaryId, paperId: input.paper.id, paperTitle: input.paper.title, versionId, extractionId, markdown,
       readStatus: result.readStatus, relativePath, markdownHash, structured, skillHash, agentRunId, claims, now };
     this.#database.prepare(`INSERT INTO knowledge_write_requests(id,request_type,target_path,staged_path,result_hash,phase,created_at,updated_at,payload_json)
       VALUES (?,'summary',?,?,?,'reserved',?,?,?) ON CONFLICT(id) DO NOTHING`).run(writeId, relativePath, `${relativePath}.staged`, markdownHash, now, now, JSON.stringify(writePayload));
@@ -179,12 +227,26 @@ export class ImportStore {
   #advanceSummaryWrite(writeId: string): void {
     const row = this.#database.prepare(`SELECT target_path,staged_path,result_hash,phase,payload_json FROM knowledge_write_requests WHERE id=?`).get(writeId) as
       { target_path: string; staged_path: string; result_hash: string; phase: string; payload_json: string };
-    const payload = JSON.parse(row.payload_json) as { summaryId: string; paperId: string; paperTitle: string; versionId: string; extractionId: string;
+    const payload = JSON.parse(row.payload_json) as { summaryId: string; paperId: string; paperTitle: string; versionId: string; extractionId: string; markdown?: string;
       readStatus: string; relativePath: string; markdownHash: string; structured: SummaryResult; skillHash: string;
       claims: Array<{ evidenceAnchorId: string }>; agentRunId: string; now: string };
     let phase = row.phase;
     const targetPath = this.#knowledgePath(row.target_path);
     const stagedPath = this.#knowledgePath(row.staged_path);
+    if ((phase === "reserved" || phase === "staged") && !existsSync(stagedPath) && !existsSync(targetPath) && payload.markdown) {
+      const recoveredHash = createHash("sha256").update(payload.markdown).digest("hex");
+      if (recoveredHash === row.result_hash) writeFileSync(stagedPath, payload.markdown, "utf8");
+    }
+    if (phase === "reserved" && existsSync(stagedPath)) {
+      const stagedHash = createHash("sha256").update(readFileSync(stagedPath)).digest("hex");
+      if (stagedHash !== row.result_hash) {
+        this.#database.prepare("UPDATE knowledge_write_requests SET phase='failed',error_code='staged-hash-mismatch',updated_at=? WHERE id=?")
+          .run(new Date().toISOString(), writeId);
+        return;
+      }
+      this.#database.prepare("UPDATE knowledge_write_requests SET phase='staged',updated_at=? WHERE id=?").run(new Date().toISOString(), writeId);
+      phase = "staged";
+    }
     if (phase === "staged") {
       if (existsSync(targetPath)) {
         const finalHash = createHash("sha256").update(readFileSync(targetPath)).digest("hex");
@@ -293,8 +355,12 @@ export class ImportStore {
     const versionId = `paper-version:${paper.id}:arxiv:v${paper.version}`;
     const extraction = this.#database.prepare("SELECT id,page_count FROM extraction_runs WHERE paper_version_id=? AND status='succeeded'").get(versionId) as
       { id: string; page_count: number } | undefined;
-    const summary = this.#database.prepare("SELECT id,status,read_status,markdown_path,structured_json FROM summary_revisions WHERE paper_id=? AND status='active'").get(id) as
+    const summary = this.#database.prepare(`SELECT id,status,read_status,markdown_path,structured_json FROM summary_revisions
+      WHERE paper_id=? AND paper_version_id=? AND status='active' ORDER BY revision DESC LIMIT 1`).get(id, versionId) as
       { id: string; status: string; read_status: string; markdown_path: string; structured_json: string } | undefined;
+    const latestJob = this.#database.prepare(`SELECT id,state,progress,attempt,error_json FROM job_runs
+      WHERE paper_id=? AND job_type='paper-import' ORDER BY attempt DESC,queued_at DESC,id DESC LIMIT 1`).get(id) as
+      { id: string; state: string; progress: number; attempt: number; error_json: string | null } | undefined;
     const repository = this.#database.prepare(`SELECT cr.canonical_url,rs.commit_sha,rs.id snapshot_id,pcl.status
       FROM paper_code_links pcl JOIN code_repositories cr ON cr.id=pcl.code_repository_id
       LEFT JOIN repository_snapshots rs ON rs.id=pcl.repository_snapshot_id WHERE pcl.paper_id=? ORDER BY pcl.created_at DESC LIMIT 1`).get(id) as
@@ -308,6 +374,8 @@ export class ImportStore {
       pdf: extraction ? { pageCount: extraction.page_count } : null,
       summary: summary ? { id: summary.id, status: summary.status, readStatus: summary.read_status,
         markdownPath: summary.markdown_path, ...JSON.parse(summary.structured_json) as object } : null,
+      processing: latestJob ? { jobId: latestJob.id, state: latestJob.state, progress: latestJob.progress,
+        attempt: latestJob.attempt, error: parseStoredImportError(latestJob.error_json) } : null,
       repository: repository ? { url: repository.canonical_url, commitSha: repository.commit_sha,
         status: repository.status === "confirmed" ? "ready" : "failed", files } : null,
     };
@@ -363,15 +431,16 @@ export class ImportStore {
   }
 
   getPdf(versionId: string): Uint8Array | null {
-    const row = this.#database.prepare(`SELECT a.storage_ref FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id WHERE v.id=?`).get(versionId) as
-      { storage_ref: string } | undefined;
-    return row ? readFileSync(join(this.#artifactRoot, row.storage_ref)) : null;
+    const row = this.#database.prepare(`SELECT a.id,a.storage_ref FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id WHERE v.id=?`).get(versionId) as
+      { id: string; storage_ref: string } | undefined;
+    return row && this.#artifactIsValid(row.id) ? readFileSync(join(this.#artifactRoot, row.storage_ref)) : null;
   }
 
   startConversation(paperId: string): unknown | null {
     const now = new Date().toISOString();
     const row = this.#database.prepare(`SELECT p.current_version_id,s.id summary_id,s.extraction_run_id
-      FROM papers p LEFT JOIN summary_revisions s ON s.paper_id=p.id AND s.status='active' WHERE p.id=?`).get(paperId) as
+      FROM papers p LEFT JOIN summary_revisions s ON s.paper_id=p.id AND s.paper_version_id=p.current_version_id AND s.status='active'
+      WHERE p.id=?`).get(paperId) as
       { current_version_id: string; summary_id: string | null; extraction_run_id: string | null } | undefined;
     if (!row) return null;
     const repositories = this.#database.prepare(`SELECT rs.id,rs.commit_sha FROM paper_code_links pcl
@@ -631,6 +700,7 @@ export class ImportStore {
   }
 
   diagnostics(): unknown {
+    const access = inspectDataRootAccess(this.#layout);
     const integrity = (this.#database.pragma("integrity_check") as Array<{ integrity_check: string }>).map((row) => row.integrity_check);
     const foreignKeys = this.#database.pragma("foreign_key_check") as unknown[];
     const schemaVersion = (this.#database.prepare("SELECT max(version) version FROM schema_migrations").get() as { version: number }).version;
@@ -647,7 +717,8 @@ export class ImportStore {
     ].filter((row) => !existsSync(join(this.#knowledgeRoot, row.markdown_path))).map((row) => row.markdown_path);
     return { schemaVersion, integrity, foreignKeyViolations: foreignKeys, interruptedJobs, openWrites, pendingIndex,
       missingArtifacts, missingRebuildableArtifacts, missingMarkdown,
-      healthy: integrity.every((value) => value === "ok") && foreignKeys.length === 0 && missingArtifacts.length === 0 && missingMarkdown.length === 0 };
+      unwritablePaths: access.unwritablePaths,
+      healthy: access.writable && integrity.every((value) => value === "ok") && foreignKeys.length === 0 && missingArtifacts.length === 0 && missingMarkdown.length === 0 };
   }
 
   #recordAgentRun(taskKind: string, paperId: string | null, contextSnapshotId: string | null, context: unknown, output: unknown, skillPath: string | null): string {
@@ -672,7 +743,11 @@ export class ImportStore {
     const storageRef = join("derived", artifactType, hash.slice(0, 2), `${hash}.${extension}`);
     const absolute = join(this.#artifactRoot, storageRef);
     mkdirSync(dirname(absolute), { recursive: true });
-    if (!existsSync(absolute)) {
+    const existingValid = existsSync(absolute) && (() => {
+      const current = readFileSync(absolute);
+      return current.byteLength === bytes.byteLength && createHash("sha256").update(current).digest("hex") === hash;
+    })();
+    if (!existingValid) {
       const staged = `${absolute}.staged-${randomUUID()}`;
       writeFileSync(staged, bytes);
       renameSync(staged, absolute);
@@ -684,10 +759,20 @@ export class ImportStore {
       VALUES (?,?,'derived-from',0)`).run(id, parentArtifactId);
   }
 
+  #artifactIsValid(id: string): boolean {
+    const artifact = this.#database.prepare("SELECT storage_ref,content_hash,byte_size FROM artifacts WHERE id=?").get(id) as
+      { storage_ref: string; content_hash: string; byte_size: number } | undefined;
+    if (!artifact) return false;
+    const path = join(this.#artifactRoot, artifact.storage_ref);
+    if (!existsSync(path)) return false;
+    const bytes = readFileSync(path);
+    return bytes.byteLength === artifact.byte_size && createHash("sha256").update(bytes).digest("hex") === artifact.content_hash;
+  }
+
   #knowledgePath(relativePath: string): string { return join(this.#knowledgeRoot, relativePath); }
 
   importPaper(input: { originalInput: string; resolved: ResolvedPaper; version: number; processing?: boolean }): {
-    paper: StoredPaper; importRequest: StoredImportRequest;
+    paper: StoredPaper; importRequest: StoredImportRequest; job: ImportJobHandle;
   } {
     const now = new Date().toISOString();
     const author = input.resolved.authors[0]!.trim().split(/\s+/).at(-1)!.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
@@ -709,8 +794,7 @@ export class ImportStore {
         VALUES (?,?, 'arxiv',?,?,?,'accepted',?,?,?) ON CONFLICT(paper_id,source_type,source_version) DO NOTHING`)
         .run(versionId, paperId, `v${input.version}`, `https://arxiv.org/abs/${input.resolved.arxivId}v${input.version}`,
           now, now, now, now);
-      this.#database.prepare("UPDATE papers SET current_version_id = COALESCE(current_version_id, ?) WHERE id = ?")
-        .run(versionId, paperId);
+      this.#database.prepare("UPDATE papers SET current_version_id=?,updated_at=? WHERE id=?").run(versionId, now, paperId);
 
       const importId = `import:${randomUUID()}`;
       this.#database.prepare(`INSERT INTO import_requests
@@ -720,36 +804,95 @@ export class ImportStore {
       const jobId = `job:${randomUUID()}`;
       this.#database.prepare(`INSERT INTO job_runs
         (id,job_type,import_request_id,paper_id,state,progress,idempotency_key,input_json,output_json,queued_at,started_at,completed_at,heartbeat_at)
-        VALUES (?,'paper-import',?,?,?, ?,?,'{}','{}',?,?,?,?)`)
+        VALUES (?,'paper-import',?,?,?, ?,?,?,'{}',?,?,?,?)`)
         .run(jobId, importId, paperId, input.processing ? "running" : "succeeded", input.processing ? 0.1 : 1,
-          `paper-import:${importId}`, now, now, input.processing ? null : now, now);
+          `paper-import:${importId}`, JSON.stringify({ versionId, arxivId: input.resolved.arxivId, version: input.version }),
+          now, now, input.processing ? null : now, now);
       this.#event(importId, "job-progress", { jobId, jobType: "paper-import", state: input.processing ? "running" : "succeeded", progress: input.processing ? 0.1 : 1 });
 
       return {
         paper: { id: paperId, arxivId: input.resolved.arxivId, title: input.resolved.title, version: input.version },
         importRequest: { id: importId, paperId, status: "resolved" as const },
+        job: { id: jobId, attempt: 1, state: "running" as const },
       };
     })();
   }
 
-  finishImport(importId: string, error?: unknown): void {
+  finishImport(jobId: string, error?: unknown, stage: ImportStage = "knowledge-write"): void {
     const now = new Date().toISOString();
     const state = error ? "failed" : "succeeded";
     const progress = error ? 0.1 : 1;
-    const errorJson = error ? JSON.stringify({ message: error instanceof Error ? error.message : "import-failed" }) : null;
+    const errorJson = error ? JSON.stringify(classifyImportError(error, stage)) : null;
     const job = this.#database.prepare(`UPDATE job_runs SET state=?,progress=?,error_json=?,completed_at=?,heartbeat_at=?
-      WHERE import_request_id=? AND job_type='paper-import' RETURNING id`).get(state, progress, errorJson, now, now, importId) as { id: string } | undefined;
-    if (job) this.#event(importId, "job-progress", { jobId: job.id, jobType: "paper-import", state, progress });
+      WHERE id=? AND job_type='paper-import' RETURNING id,import_request_id,paper_id,input_json`).get(state, progress, errorJson, now, now, jobId) as
+      { id: string; import_request_id: string; paper_id: string; input_json: string } | undefined;
+    if (job) {
+      if (error) {
+        const input = JSON.parse(job.input_json) as { versionId?: string };
+        const versionId = input.versionId ?? (this.#database.prepare("SELECT current_version_id FROM papers WHERE id=?")
+          .get(job.paper_id) as { current_version_id: string }).current_version_id;
+        this.#database.prepare("UPDATE paper_versions SET processing_status='failed',updated_at=? WHERE id=?").run(now, versionId);
+      }
+      this.#event(job.import_request_id, "job-progress", { jobId: job.id, jobType: "paper-import", state, progress });
+    }
+  }
+
+  retryImportJob(jobId: string, idempotencyKey: string): RetryImportResult {
+    const row = this.#database.prepare(`SELECT j.state,j.import_request_id,j.paper_id,j.input_json,i.resolution_status,p.title,
+      x.normalized_value arxiv_id,p.current_version_id
+      FROM job_runs j JOIN import_requests i ON i.id=j.import_request_id JOIN papers p ON p.id=j.paper_id
+      JOIN paper_external_identities x ON x.paper_id=p.id AND x.identity_type='arxiv'
+      WHERE j.id=? AND j.job_type='paper-import'`).get(jobId) as
+      { state: string; import_request_id: string; paper_id: string; input_json: string; resolution_status: string; title: string;
+        arxiv_id: string; current_version_id: string } | undefined;
+    if (!row) return { ok: false, code: "job-not-found" };
+    const input = JSON.parse(row.input_json) as { versionId?: string; arxivId?: string; version?: number };
+    const versionId = input.versionId ?? row.current_version_id;
+    const versionRow = this.#database.prepare("SELECT source_version FROM paper_versions WHERE id=? AND paper_id=?").get(versionId, row.paper_id) as
+      { source_version: string } | undefined;
+    if (!versionRow) return { ok: false, code: "job-not-retryable" };
+    const version = input.version ?? Number.parseInt(versionRow.source_version.replace(/^v/, ""), 10);
+    const arxivId = input.arxivId ?? row.arxiv_id;
+    const replay = this.#database.prepare(`SELECT id,attempt,state,import_request_id FROM job_runs
+      WHERE idempotency_key=?`).get(idempotencyKey) as
+      { id: string; attempt: number; state: string; import_request_id: string | null } | undefined;
+    if (replay && replay.import_request_id !== row.import_request_id) return { ok: false, code: "idempotency-key-conflict" };
+    if (replay) return { ok: true, replayed: true, execution: {
+      paper: { id: row.paper_id, arxivId, title: row.title, version }, arxivId, version,
+      importRequest: { id: row.import_request_id, paperId: row.paper_id, status: "resolved" },
+      job: { id: replay.id, attempt: replay.attempt, state: replay.state as ImportJobHandle["state"] },
+    } };
+    if (row.state !== "failed" && row.state !== "interrupted") return { ok: false, code: "job-not-retryable" };
+    const completed = this.#database.prepare("SELECT 1 FROM job_runs WHERE import_request_id=? AND job_type='paper-import' AND state='succeeded'").get(row.import_request_id);
+    if (completed) return { ok: false, code: "job-not-retryable" };
+    const active = this.#database.prepare("SELECT 1 FROM job_runs WHERE import_request_id=? AND job_type='paper-import' AND state IN ('queued','running')").get(row.import_request_id);
+    if (active) return { ok: false, code: "job-already-active" };
+    const attempt = (this.#database.prepare("SELECT max(attempt) attempt FROM job_runs WHERE import_request_id=? AND job_type='paper-import'").get(row.import_request_id) as { attempt: number }).attempt + 1;
+    const retryId = `job:${randomUUID()}`;
+    const now = this.#now().toISOString();
+    this.#database.prepare(`INSERT INTO job_runs
+      (id,job_type,import_request_id,paper_id,state,progress,attempt,idempotency_key,input_json,output_json,queued_at,started_at,heartbeat_at)
+      VALUES (?,'paper-import',?,?,'running',0.1,?,?,?,'{}',?,?,?)`)
+      .run(retryId, row.import_request_id, row.paper_id, attempt, idempotencyKey,
+        JSON.stringify({ versionId, arxivId, version }), now, now, now);
+    this.#database.prepare("UPDATE paper_versions SET processing_status='processing',updated_at=? WHERE id=?").run(now, versionId);
+    this.#event(row.import_request_id, "job-progress", { jobId: retryId, jobType: "paper-import", state: "running", progress: 0.1, attempt });
+    return { ok: true, replayed: false, execution: {
+      paper: { id: row.paper_id, arxivId, title: row.title, version }, arxivId, version,
+      importRequest: { id: row.import_request_id, paperId: row.paper_id, status: "resolved" },
+      job: { id: retryId, attempt, state: "running" },
+    } };
   }
 
   getImport(id: string): ImportStatus | null {
     const row = this.#database.prepare(`SELECT id,resolved_paper_id,resolution_status FROM import_requests WHERE id=?`).get(id) as
       { id: string; resolved_paper_id: string; resolution_status: string } | undefined;
     if (!row) return null;
-    const jobs = this.#database.prepare(`SELECT id,job_type,state,progress FROM job_runs WHERE import_request_id=? ORDER BY queued_at,id`).all(id) as
-      Array<{ id: string; job_type: string; state: string; progress: number }>;
+    const jobs = this.#database.prepare(`SELECT id,job_type,state,progress,attempt,error_json FROM job_runs WHERE import_request_id=? ORDER BY attempt,queued_at,id`).all(id) as
+      Array<{ id: string; job_type: string; state: string; progress: number; attempt: number; error_json: string | null }>;
     return { importRequest: { id: row.id, paperId: row.resolved_paper_id, resolutionStatus: row.resolution_status },
-      jobs: jobs.map((job) => ({ id: job.id, jobType: job.job_type, state: job.state, progress: job.progress })) };
+      jobs: jobs.map((job) => ({ id: job.id, jobType: job.job_type, state: job.state, progress: job.progress,
+        attempt: job.attempt, error: parseStoredImportError(job.error_json) })) };
   }
 
   listEvents(scope: string, afterId: number): Array<{ id: number; type: string; data: unknown }> {
@@ -808,4 +951,26 @@ function renderSummary(input: { summaryId: string; paper: StoredPaper; versionId
   const sections = input.result.sections.map((section, index) => `## ${index + 1}. ${section.title}\n\n${section.body}`).join("\n\n");
   const claims = input.result.claims.map((claim) => `| ${claim.voice} | ${claim.claim} | p. ${claim.page} |`).join("\n");
   return `---\nartifact_id: "artifact:${input.summaryId}"\ntype: paper-summary\npaper_id: "${input.paper.id}"\npaper_version_id: "${input.versionId}"\nextraction_run_id: "${input.extractionId}"\nsummary_revision_id: "${input.summaryId}"\nrevision: 1\nstatus: active\nread_status: ${input.result.readStatus}\nskill_path: skills/paper-reading/SKILL.md\nskill_content_hash: "${input.skillHash}"\nagent_run_id: "${input.agentRunId}"\ngenerated_at: ${input.date}\ncreated: ${input.date}\nupdated: ${input.date}\n---\n\n# ${input.paper.title} — Paper Summary\n\n${sections}\n\n## Key Claims\n\n| Voice | Claim | Evidence Anchor |\n|---|---|---|\n${claims}\n`;
+}
+
+function classifyImportError(error: unknown, stage: ImportStage): ImportJobError {
+  const message = error instanceof Error ? error.message : "import-failed";
+  const filesystemCode = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+  if (filesystemCode === "EACCES" || filesystemCode === "EPERM" || /permission denied/i.test(message)) {
+    return { code: "storage-permission-denied", message, stage, retryable: false, action: "repair-data-root-permissions" };
+  }
+  const code = stage === "pdf-download" ? "pdf-download-failed"
+    : stage === "pdf-storage" ? "pdf-storage-failed"
+      : stage === "pdf-extraction" ? "pdf-extraction-failed"
+        : stage === "paper-summary" ? "summary-generation-failed" : "knowledge-write-failed";
+  return { code, message, stage, retryable: true, action: "retry" };
+}
+
+function parseStoredImportError(errorJson: string | null): ImportJobError | null {
+  if (!errorJson) return null;
+  const parsed = JSON.parse(errorJson) as Partial<ImportJobError> & { message?: string };
+  if (parsed.code && parsed.stage && typeof parsed.retryable === "boolean") return parsed as ImportJobError;
+  const message = parsed.message ?? "import-failed";
+  const stage: ImportStage = /originals[\\/]papers|pdf/i.test(message) ? "pdf-storage" : "knowledge-write";
+  return classifyImportError(new Error(message), stage);
 }

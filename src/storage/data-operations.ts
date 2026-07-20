@@ -9,8 +9,8 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import Database from "better-sqlite3";
 
-import { DATA_FORMAT_VERSION, DATA_MANIFEST_NAME, initializeDataRoot, openDataRoot, type StorageLayout } from "./layout.js";
-import { acquireRuntimeLock } from "./runtime-lock.js";
+import { assertDataRootWritable, DATA_FORMAT_VERSION, DATA_MANIFEST_NAME, initializeDataRoot, openDataRoot, type StorageLayout } from "./layout.js";
+import { acquireRuntimeLock, assertRuntimeStopped } from "./runtime-lock.js";
 
 const SNAPSHOT_FORMAT_VERSION = 1;
 const SNAPSHOT_MANIFEST_NAME = "snapshot-manifest.json";
@@ -132,8 +132,31 @@ export function restoreSnapshot(snapshotRoot: string, targetRoot: string): Stora
   for (const directory of ["derived", "cache/repositories", "logs", "tmp"]) {
     mkdirSync(join(staged, directory), { recursive: true, mode: 0o700 });
   }
+  normalizeDataRootPermissions(staged);
+  assertDataRootWritable(openDataRoot(staged));
   renameSync(staged, target);
   return openDataRoot(target);
+}
+
+function normalizeDataRootPermissions(root: string): void {
+  const normalizeTree = (path: string, fileMode: number) => {
+    const details = lstatSync(path);
+    if (details.isDirectory()) {
+      for (const name of readdirSync(path)) normalizeTree(join(path, name), fileMode);
+      chmodSync(path, 0o700);
+    } else if (details.isFile()) chmodSync(path, fileMode);
+  };
+  chmodSync(join(root, DATA_MANIFEST_NAME), 0o600);
+  normalizeTree(join(root, "vault"), 0o600);
+  normalizeTree(join(root, "originals"), 0o400);
+  normalizeTree(join(root, "state"), 0o600);
+  for (const directory of ["derived", "cache", "logs", "tmp"]) normalizeTree(join(root, directory), 0o600);
+}
+
+export function repairDataRootPermissions(layout: StorageLayout): void {
+  assertRuntimeStopped(layout);
+  normalizeDataRootPermissions(layout.root);
+  assertDataRootWritable(layout);
 }
 
 export async function migrateLegacyData(repositoryRoot: string, targetRoot: string, now = new Date()): Promise<StorageLayout> {

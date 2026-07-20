@@ -80,6 +80,18 @@ npm run diagnostics
 npm run rebuild-index
 ```
 
+生产启动和新导入会检查 authoritative directories 是否可写。若 diagnostics 报告
+`unwritablePaths`，先停止服务，再运行：
+
+```bash
+npm run data:repair-permissions
+```
+
+该命令把数据目录恢复为 owner-writable，同时保持 `originals/` 中的源文件只读；它不会
+删除或重写知识内容。失败或中断的 Paper Import 会保留原 Job Run，可在 Paper workspace
+中创建绑定原 Paper Version 的幂等 retry attempt；系统只复用通过完整性检查的 PDF/解析
+产物，并优先恢复未完成的 KnowledgeWriteRequest。
+
 ## 数据快照与恢复
 
 ScholarLoom 只负责生成一致性快照、校验和非覆盖恢复；当前不启用自动调度或远端传输。
@@ -96,7 +108,7 @@ npm run restore -- /path/to/new-snapshot /path/to/new-empty-data-root
 排除 `derived/`、`cache/`、`logs/` 和 `tmp/`。恢复永不覆盖现有数据根。
 
 `diagnostics` 是只读的，报告 migration 版本、SQLite integrity/foreign-key check、
-中断 Job、未完成知识写入、缺失 Artifact/Markdown 和待处理索引。`rebuild-index` 会只从
+中断 Job、未完成知识写入、缺失 Artifact/Markdown、不可写目录和待处理索引。`rebuild-index` 会只从
 active Paper Summary 与 confirmed Takeaway 确定性重建 `global-curated` FTS；PDF、Message
 与 Code Element 没有进入这个接口的路径。
 

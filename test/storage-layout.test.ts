@@ -1,10 +1,10 @@
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { initializeDataRoot, openDataRoot } from "../src/storage/layout.js";
+import { assertDataRootWritable, initializeDataRoot, inspectDataRootAccess, openDataRoot } from "../src/storage/layout.js";
 
 describe("ScholarLoom data layout", () => {
   it("fails closed when the production data root has not been initialized", async () => {
@@ -43,5 +43,17 @@ describe("ScholarLoom data layout", () => {
     await rm(layout.vaultRoot, { recursive: true });
 
     expect(() => openDataRoot(root)).toThrow(/incomplete/);
+  });
+
+  it("fails the write preflight when an authoritative directory is read-only", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "scholarloom-layout-readonly-"));
+    const layout = initializeDataRoot(join(parent, "data"));
+    await chmod(join(layout.originalsRoot, "papers"), 0o500);
+
+    expect(inspectDataRootAccess(layout)).toMatchObject({
+      writable: false,
+      unwritablePaths: ["originals/papers"],
+    });
+    expect(() => assertDataRootWritable(layout)).toThrow(/originals\/papers/);
   });
 });

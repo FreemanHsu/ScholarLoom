@@ -23,4 +23,15 @@ describe("import progress monitoring", () => {
     expect(unsubscribe).toHaveBeenCalledOnce();
     expect(stopPolling).toHaveBeenCalledOnce();
   });
+
+  it("treats an interrupted import as retryable terminal state", async () => {
+    const adapter: ImportProgressAdapter = {
+      subscribe() { return () => undefined; },
+      async read() { return "interrupted"; },
+      repeat(callback) { void callback(); return () => undefined; },
+    };
+
+    await expect(createImportMonitor(adapter).wait("import:interrupted", () => undefined))
+      .rejects.toThrow("导入中断，请重试");
+  });
 });

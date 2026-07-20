@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 export const DATA_FORMAT_VERSION = 1;
 export const DATA_MANIFEST_NAME = "scholarloom-data.json";
@@ -19,6 +19,8 @@ export type StorageLayout = {
   logsRoot: string;
   tmpRoot: string;
 };
+
+export type DataRootAccessReport = { writable: boolean; unwritablePaths: string[] };
 
 export function defaultDataRoot(): string {
   return join(homedir(), "ScholarLoomData");
@@ -80,4 +82,24 @@ export function openDataRoot(root = defaultDataRoot()): StorageLayout {
   try { execFileSync("git", ["-C", layout.vaultRoot, "rev-parse", "--git-dir"], { stdio: "ignore" }); }
   catch { throw new Error(`ScholarLoom vault Git repository is invalid: ${layout.vaultRoot}`); }
   return layout;
+}
+
+export function inspectDataRootAccess(layout: StorageLayout): DataRootAccessReport {
+  const unwritablePaths: string[] = [];
+  const visit = (directory: string) => {
+    try { accessSync(directory, constants.W_OK); }
+    catch { unwritablePaths.push(relative(layout.root, directory)); }
+    for (const name of readdirSync(directory)) {
+      const child = join(directory, name);
+      if (lstatSync(child).isDirectory()) visit(child);
+    }
+  };
+  for (const root of [layout.vaultRoot, layout.originalsRoot, dirname(layout.databasePath), layout.derivedRoot,
+    dirname(layout.repositoryRoot), layout.logsRoot, layout.tmpRoot]) visit(root);
+  return { writable: unwritablePaths.length === 0, unwritablePaths: unwritablePaths.sort() };
+}
+
+export function assertDataRootWritable(layout: StorageLayout): void {
+  const report = inspectDataRootAccess(layout);
+  if (!report.writable) throw new Error(`ScholarLoom data root is not writable: ${report.unwritablePaths.join(", ")}`);
 }

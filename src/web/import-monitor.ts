@@ -1,4 +1,4 @@
-export type ImportJobState = "queued" | "running" | "succeeded" | "failed";
+export type ImportJobState = "queued" | "running" | "succeeded" | "failed" | "interrupted";
 
 export interface ImportProgressAdapter {
   subscribe(importId: string, onState: (state: ImportJobState) => void): () => void;
@@ -15,11 +15,11 @@ export function createImportMonitor(adapter: ImportProgressAdapter) {
         const finish = (state: ImportJobState) => {
           if (settled) return;
           onProgress(state);
-          if (state !== "succeeded" && state !== "failed") return;
+          if (state !== "succeeded" && state !== "failed" && state !== "interrupted") return;
           settled = true;
           cleanup.forEach((stop) => stop());
           if (state === "succeeded") resolve();
-          else reject(new Error("导入失败，请重试"));
+          else reject(new Error(state === "interrupted" ? "导入中断，请重试" : "导入失败，请重试"));
         };
         const checkStatus = async () => {
           try { finish(await adapter.read(importId)); }
@@ -44,7 +44,7 @@ const browserAdapter: ImportProgressAdapter = {
     events.addEventListener("job-progress", (event) => {
       try {
         const job = JSON.parse((event as MessageEvent).data) as { state?: unknown };
-        if (job.state === "queued" || job.state === "running" || job.state === "succeeded" || job.state === "failed") {
+        if (job.state === "queued" || job.state === "running" || job.state === "succeeded" || job.state === "failed" || job.state === "interrupted") {
           onState(job.state);
         }
       } catch { /* Ignore malformed events and let status polling remain authoritative. */ }
@@ -55,8 +55,8 @@ const browserAdapter: ImportProgressAdapter = {
     const response = await fetch(`/api/imports/${encodeURIComponent(importId)}`);
     if (!response.ok) throw new Error("import-status-unavailable");
     const status = await response.json() as { jobs?: Array<{ jobType?: string; state?: unknown }> };
-    const state = status.jobs?.find((job) => job.jobType === "paper-import")?.state;
-    if (state === "queued" || state === "running" || state === "succeeded" || state === "failed") return state;
+    const state = status.jobs?.filter((job) => job.jobType === "paper-import").at(-1)?.state;
+    if (state === "queued" || state === "running" || state === "succeeded" || state === "failed" || state === "interrupted") return state;
     throw new Error("import-status-invalid");
   },
   repeat(callback) {

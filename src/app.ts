@@ -4,9 +4,10 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { parseArxivReference } from "./domain/arxiv.js";
-import { ImportStore } from "./storage/import-store.js";
+import { ImportStore, type ImportStage } from "./storage/import-store.js";
 import type { RepositoryAdapter } from "./adapters/git-repository.js";
 import type { StorageLayout } from "./storage/layout.js";
+import { assertDataRootWritable } from "./storage/layout.js";
 
 export type ResolvedPaper = {
   arxivId: string;
@@ -43,6 +44,24 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   const backgroundTasks = new Set<Promise<void>>();
   app.addHook("onClose", async () => { await Promise.allSettled(backgroundTasks); store.close(); });
 
+  const startImport = (execution: { paper: import("./storage/import-store.js").StoredPaper; arxivId: string; version: number;
+    importRequest: { id: string }; job: { id: string } }) => {
+    let stage: ImportStage = "pdf-download";
+    let task: Promise<void>;
+    task = Promise.resolve().then(async () => {
+      try {
+        const versionId = `paper-version:${execution.paper.id}:arxiv:v${execution.version}`;
+        const pdfBytes = store.getPdf(versionId) ?? await options.paperSource.fetchPdf!(execution.arxivId, execution.version);
+        await store.ingestPaper({ paper: execution.paper, pdfBytes,
+          onStage(nextStage) { stage = nextStage; },
+          runSummary: (context) => options.codexRunner!.runSummary(context),
+          ...(options.repositoryAdapter ? { repositoryAdapter: options.repositoryAdapter } : {}) });
+        store.finishImport(execution.job.id);
+      } catch (error) { store.finishImport(execution.job.id, error, stage); }
+    }).finally(() => backgroundTasks.delete(task));
+    backgroundTasks.add(task);
+  };
+
   app.post<{ Body: { arxivUrl?: unknown } }>("/api/imports", async (request, reply) => {
     if (typeof request.body?.arxivUrl !== "string") {
       return reply.code(400).send({ code: "invalid-arxiv-reference" });
@@ -52,29 +71,21 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     if (!reference) {
       return reply.code(400).send({ code: "invalid-arxiv-reference" });
     }
+    try { assertDataRootWritable(options.storageLayout); }
+    catch (error) { return reply.code(503).send({ code: "data-root-not-writable", detail: (error as Error).message }); }
 
     const frozen = reference.explicitVersion === null ? store.findFrozenArxiv(reference.arxivId) : null;
     const resolved = frozen ? store.getResolvedMetadata(frozen.id)!
       : await options.paperSource.resolve(reference.arxivId);
     const version = reference.explicitVersion ?? resolved.latestVersion;
     const processing = Boolean(options.paperSource.fetchPdf && options.codexRunner);
-    const { paper, importRequest } = store.importPaper({
+    const { paper, importRequest, job } = store.importPaper({
       originalInput: request.body.arxivUrl,
       resolved,
       version,
       processing,
     });
-    if (processing) {
-      const task = Promise.resolve().then(async () => {
-        try {
-          const pdfBytes = await options.paperSource.fetchPdf!(reference.arxivId, version);
-          await store.ingestPaper({ paper, pdfBytes, runSummary: (context) => options.codexRunner!.runSummary(context),
-            ...(options.repositoryAdapter ? { repositoryAdapter: options.repositoryAdapter } : {}) });
-          store.finishImport(importRequest.id);
-        } catch (error) { store.finishImport(importRequest.id, error); }
-      }).finally(() => backgroundTasks.delete(task));
-      backgroundTasks.add(task);
-    }
+    if (processing) startImport({ paper, arxivId: reference.arxivId, version, importRequest, job });
 
     return reply.code(202).send({
       importRequest,
@@ -82,6 +93,18 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
         ...paper,
       },
     });
+  });
+
+  app.post<{ Params: { id: string } }>("/api/jobs/:id/retry", async (request, reply) => {
+    if (!options.paperSource.fetchPdf || !options.codexRunner) return reply.code(503).send({ code: "import-runner-unavailable" });
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    try { assertDataRootWritable(options.storageLayout); }
+    catch (error) { return reply.code(503).send({ code: "data-root-not-writable", detail: (error as Error).message }); }
+    const result = store.retryImportJob(request.params.id, key);
+    if (!result.ok) return reply.code(result.code === "job-not-found" ? 404 : 409).send({ code: result.code });
+    if (!result.replayed) startImport(result.execution);
+    return reply.code(202).send({ importRequest: result.execution.importRequest, job: result.execution.job });
   });
 
   app.get("/api/papers", async () => ({ papers: store.listPapers() }));
