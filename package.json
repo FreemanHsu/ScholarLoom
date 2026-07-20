@@ -10,6 +10,7 @@
     "build": "vite build",
     "data:init": "tsx src/data-cli.ts init",
     "data:migrate": "tsx src/data-cli.ts migrate-legacy",
+    "data:repair-permissions": "tsx src/data-cli.ts repair-permissions",
     "backup": "tsx src/data-cli.ts snapshot",
     "backup:verify": "tsx src/data-cli.ts verify",
     "restore": "tsx src/data-cli.ts restore",

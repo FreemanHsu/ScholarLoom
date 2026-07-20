@@ -1,4 +1,4 @@
-import { createSnapshot, migrateLegacyData, restoreSnapshot, verifySnapshot } from "./storage/data-operations.js";
+import { createSnapshot, migrateLegacyData, repairDataRootPermissions, restoreSnapshot, verifySnapshot } from "./storage/data-operations.js";
 import { defaultDataRoot, initializeDataRoot, openDataRoot } from "./storage/layout.js";
 
 async function main(): Promise<void> {
@@ -34,7 +34,13 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ migrated: true, dataRoot: layout.root }, null, 2));
     return;
   }
-  throw new Error("Usage: tsx src/data-cli.ts <init|snapshot|verify|restore|migrate-legacy>");
+  if (command === "repair-permissions") {
+    const layout = openDataRoot(first ?? process.env.SCHOLARLOOM_DATA_ROOT ?? defaultDataRoot());
+    repairDataRootPermissions(layout);
+    console.log(JSON.stringify({ repaired: true, dataRoot: layout.root }, null, 2));
+    return;
+  }
+  throw new Error("Usage: tsx src/data-cli.ts <init|snapshot|verify|restore|migrate-legacy|repair-permissions>");
 }
 
 main().catch((error: unknown) => {

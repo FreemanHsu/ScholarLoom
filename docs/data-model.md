@@ -359,6 +359,12 @@ Invalid or failed requests do not create incomplete Papers.
 Job Run is the common observable execution record for identity resolution, download,
 extraction, clone, indexing, reconciliation, and Agent work. It records idempotency,
 inputs, outputs, progress, retry state, errors, timing, and sanitized logs.
+For Paper imports, the input freezes the concrete Paper Version. A retry creates a new
+attempt under the same Import Request, preserves earlier attempts, and never resolves
+against a newer `current_version_id`. Replaying the retry command's Idempotency-Key
+returns the same attempt. Job Run `succeeded`, `failed`, `cancelled`, and `interrupted`
+states are terminal for monitoring. `failed` and `interrupted` may create a new retry
+attempt; `cancelled` is terminal and non-retryable.
 
 Agent Run extends Job Run with model, Skill hash, Context Snapshot, token usage, and
 cost. Agent Runs are operational audit and are not Conversation Messages or knowledge.
@@ -379,10 +385,13 @@ Proposal / UI edit / external Markdown edit
 ```
 
 The intent stores target/staged paths, the expected pre-write hash, result hash, and
-planned revision. Its monotonic phases are `reserved → staged → renamed →
-metadata-committed → indexed → complete`, with terminal `failed` and `conflicted`.
-Recovery uses the byte-exact canonical and staged hashes as its only tiebreaker:
-matching state rolls forward; a mismatch preserves the file and creates a Proposal.
+planned revision. Summary intents also store byte-exact planned Markdown so an explicit
+retry can reconstruct a missing staged Summary without rerunning the Agent. Phases are
+`reserved → staged → renamed → metadata-committed → indexed → complete`, with
+terminal `failed` and `conflicted`.
+Hashes remain the only recovery tiebreaker. Matching state rolls forward; a mismatch
+preserves the file and creates a Proposal. Other write types require a matching staged
+file or Git history when their canonical file is missing.
 Agents do not directly race to edit knowledge files. Index failure does not roll back
 valid knowledge; it marks the relevant projection stale and retries.
 

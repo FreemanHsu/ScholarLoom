@@ -133,7 +133,23 @@ describe("POST /api/imports", () => {
 
     await app.close();
   });
+
+  it("rejects an import before creating Paper state when the data root is not writable", async () => {
+    const storageLayout = await testLayout();
+    await chmod(join(storageLayout.originalsRoot, "papers"), 0o500);
+    const app = await createApp({ storageLayout, paperSource: {
+      async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture", authors: ["Ada Fixture"], year: 2024 }; },
+    } });
+
+    const response = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345" } });
+    const papers = await app.inject({ method: "GET", url: "/api/papers" });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ code: "data-root-not-writable", detail: expect.stringContaining("originals/papers") });
+    expect(papers.json()).toEqual({ papers: [] });
+    await app.close();
+  });
 });
-import { mkdtemp } from "node:fs/promises";
+import { chmod, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
