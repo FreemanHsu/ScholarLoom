@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -18,16 +18,16 @@ const exec = promisify(execFile);
 async function waitForImport(app: FastifyInstance, id: string, expected = "succeeded"): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const status = await app.inject({ method: "GET", url: `/api/imports/${encodeURIComponent(id)}` });
-    if (status.json().jobs[0]?.state === expected) return;
+    if (status.json().jobs.at(-1)?.state === expected) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`import did not reach ${expected}`);
 }
 
-async function fixturePdf(): Promise<Uint8Array> {
+async function fixturePdf(label = "fixture"): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
-  pdf.addPage().drawText("ScholarLoom fixture introduction", { x: 40, y: 700, font });
+  pdf.addPage().drawText(`ScholarLoom ${label} introduction`, { x: 40, y: 700, font });
   pdf.addPage().drawText("Table 1 reports accuracy 91.2. Code: https://github.com/example/fixture", {
     x: 40, y: 700, font, size: 10,
   });
@@ -231,23 +231,151 @@ describe("paper ingestion lifecycle", () => {
     await future.close();
   });
 
-  it("safely retries after Summary generation fails without duplicating the Paper", async () => {
+  it("retries a failed import as a new Job attempt without duplicating the Paper", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-summary-retry-"));
     const storageLayout = initializeDataRoot(join(root, "data"));
     let attempts = 0;
+    let pdfFetches = 0;
     const app = await createApp({
       storageLayout,
-      paperSource: { async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; }, async fetchPdf() { return fixturePdf(); } },
+      paperSource: { async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
+        async fetchPdf() { pdfFetches += 1; return fixturePdf(); } },
       codexRunner: { async runSummary() { attempts += 1; if (attempts === 1) throw new Error("fixture-codex-interrupted");
         return { sections: [{ key: "overview", title: "概述", body: "retry complete" }], claims: [{ voice: "paper-evidence" as const, claim: "Table 1 reports accuracy 91.2.", sourceHandle: "pdf-page:2" }], readStatus: "read" as const }; } },
     });
     const first = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
     await waitForImport(app, first.json().importRequest.id, "failed");
-    const retry = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
-    await waitForImport(app, retry.json().importRequest.id, "succeeded");
+    const failedStatus = await app.inject({ method: "GET", url: `/api/imports/${first.json().importRequest.id}` });
+    expect(failedStatus.json().jobs).toMatchObject([{ state: "failed", attempt: 1,
+      error: { code: "summary-generation-failed", stage: "paper-summary", retryable: true } }]);
+    const failedWorkspace = await app.inject({ method: "GET", url: `/api/papers/${encodeURIComponent(first.json().paper.id)}` });
+    expect(failedWorkspace.json()).toMatchObject({ summary: null, processing: { state: "failed",
+      jobId: failedStatus.json().jobs[0].id, attempt: 1,
+      error: { code: "summary-generation-failed", stage: "paper-summary", retryable: true } } });
+
+    await chmod(join(storageLayout.originalsRoot, "papers"), 0o500);
+    const blockedRetry = await app.inject({ method: "POST", url: `/api/jobs/${failedStatus.json().jobs[0].id}/retry`,
+      headers: { "idempotency-key": "retry-fixture-attempt-1" } });
+    expect(blockedRetry.statusCode).toBe(503);
+    expect(blockedRetry.json()).toMatchObject({ code: "data-root-not-writable" });
+    await chmod(join(storageLayout.originalsRoot, "papers"), 0o700);
+
+    const missingKey = await app.inject({ method: "POST", url: `/api/jobs/${failedStatus.json().jobs[0].id}/retry` });
+    expect(missingKey.statusCode).toBe(400);
+    expect(missingKey.json()).toEqual({ code: "idempotency-key-required" });
+
+    const retry = await app.inject({ method: "POST", url: `/api/jobs/${failedStatus.json().jobs[0].id}/retry`,
+      headers: { "idempotency-key": "retry-fixture-attempt-1" } });
+    expect(retry.statusCode).toBe(202);
+    expect(retry.json()).toMatchObject({ importRequest: { id: first.json().importRequest.id }, job: { attempt: 2, state: "running" } });
+    await waitForImport(app, first.json().importRequest.id, "succeeded");
+    const completedStatus = await app.inject({ method: "GET", url: `/api/imports/${first.json().importRequest.id}` });
+    expect(completedStatus.json().jobs).toMatchObject([
+      { state: "failed", attempt: 1 },
+      { state: "succeeded", attempt: 2 },
+    ]);
     const papers = await app.inject({ method: "GET", url: "/api/papers" });
     expect(papers.json().papers).toHaveLength(1);
     expect(attempts).toBe(2);
+    expect(pdfFetches).toBe(1);
+    const replay = await app.inject({ method: "POST", url: `/api/jobs/${failedStatus.json().jobs[0].id}/retry`,
+      headers: { "idempotency-key": "retry-fixture-attempt-1" } });
+    expect(replay.statusCode).toBe(202);
+    expect(replay.json().job.id).toBe(retry.json().job.id);
+    const staleRetry = await app.inject({ method: "POST", url: `/api/jobs/${failedStatus.json().jobs[0].id}/retry`,
+      headers: { "idempotency-key": "retry-fixture-stale" } });
+    expect(staleRetry.statusCode).toBe(409);
+    expect(staleRetry.json()).toEqual({ code: "job-not-retryable" });
+    await app.close();
+  });
+
+  it("resumes the failed stage without rerunning Summary and keeps the Job's frozen Paper Version", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-stage-retry-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    let summaryRuns = 0;
+    const options = {
+      storageLayout,
+      paperSource: {
+        async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
+        async fetchPdf() { return fixturePdf(); },
+      },
+      codexRunner: { async runSummary() { summaryRuns += 1; return { sections: [{ key: "overview", title: "概述", body: "frozen version" }],
+        claims: [{ voice: "paper-evidence" as const, claim: "Table 1 reports accuracy 91.2.", sourceHandle: "pdf-page:2" }], readStatus: "read" as const }; } },
+    };
+    const app = await createApp({ ...options, knowledgeWriteFailurePoint: "staged" });
+    const first = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v1" } });
+    await waitForImport(app, first.json().importRequest.id, "failed");
+    await unlink(join(storageLayout.vaultRoot, "library", "papers", "fixture-paper", "summary-v1-r1.md.staged"));
+    const failed = await app.inject({ method: "GET", url: `/api/imports/${first.json().importRequest.id}` });
+    await app.close();
+    await exec("sqlite3", [storageLayout.databasePath,
+      "UPDATE knowledge_write_requests SET phase='reserved',error_code=NULL WHERE request_type='summary';"]);
+    const resumed = await createApp(options);
+    const retry = await resumed.inject({ method: "POST", url: `/api/jobs/${failed.json().jobs[0].id}/retry`,
+      headers: { "idempotency-key": "resume-staged-v1" } });
+    await waitForImport(resumed, first.json().importRequest.id, "succeeded");
+    expect(retry.statusCode).toBe(202);
+    expect(summaryRuns).toBe(1);
+    expect(await readFile(join(storageLayout.vaultRoot, "library", "papers", "fixture-paper", "summary-v1-r1.md"), "utf8"))
+      .toContain("frozen version");
+    await resumed.close();
+
+    const versionedRoot = await mkdtemp(join(tmpdir(), "scholarloom-frozen-version-retry-"));
+    const versionedStorage = initializeDataRoot(join(versionedRoot, "data"));
+    let failV1 = true;
+    const versions: number[] = [];
+    const versioned = await createApp({ storageLayout: versionedStorage,
+      paperSource: { ...options.paperSource, async fetchPdf(_id: string, version: number) { versions.push(version); return fixturePdf(`v${version}`); } },
+      codexRunner: { async runSummary() { if (failV1) { failV1 = false; throw new Error("v1-summary-failed"); }
+        return { sections: [{ key: "overview", title: "概述", body: "version complete" }],
+          claims: [{ voice: "paper-evidence" as const, claim: "Table 1 reports accuracy 91.2.", sourceHandle: "pdf-page:2" }], readStatus: "read" as const }; } },
+    });
+    const old = await versioned.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v1" } });
+    await waitForImport(versioned, old.json().importRequest.id, "failed");
+    const newer = await versioned.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
+    await waitForImport(versioned, newer.json().importRequest.id, "succeeded");
+    const oldStatus = await versioned.inject({ method: "GET", url: `/api/imports/${old.json().importRequest.id}` });
+    await versioned.inject({ method: "POST", url: `/api/jobs/${oldStatus.json().jobs[0].id}/retry`,
+      headers: { "idempotency-key": "retry-frozen-v1" } });
+    await waitForImport(versioned, old.json().importRequest.id, "succeeded");
+    expect(versions).toEqual([1, 2]);
+    expect(await readFile(join(versionedStorage.vaultRoot, "library", "papers", "fixture-paper", "summary-v1-r1.md"), "utf8"))
+      .toContain("arxiv:v1");
+    const currentWorkspace = await versioned.inject({ method: "GET", url: `/api/papers/${encodeURIComponent(old.json().paper.id)}` });
+    expect(currentWorkspace.json()).toMatchObject({ paper: { version: 2 }, summary: { sections: [{ body: "version complete" }] } });
+    expect(currentWorkspace.json().summary.id).toContain("arxiv:v2");
+    await versioned.close();
+  });
+
+  it("refetches a corrupt stored PDF and rebuilds an invalid extraction before retrying", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-integrity-retry-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    let summaries = 0;
+    let fetches = 0;
+    const app = await createApp({ storageLayout,
+      paperSource: { async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
+        async fetchPdf() { fetches += 1; return fixturePdf(); } },
+      codexRunner: { async runSummary() { summaries += 1; if (summaries === 1) throw new Error("summary-failed");
+        return { sections: [{ key: "overview", title: "概述", body: "integrity rebuilt" }],
+          claims: [{ voice: "paper-evidence" as const, claim: "Table 1 reports accuracy 91.2.", sourceHandle: "pdf-page:2" }], readStatus: "read" as const }; } },
+    });
+    const first = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
+    await waitForImport(app, first.json().importRequest.id, "failed");
+    const pdfDirectories = await readdir(join(storageLayout.originalsRoot, "papers"));
+    const pdfNames = await readdir(join(storageLayout.originalsRoot, "papers", pdfDirectories[0]!));
+    await chmod(join(storageLayout.originalsRoot, "papers", pdfDirectories[0]!, pdfNames[0]!), 0o600);
+    await writeFile(join(storageLayout.originalsRoot, "papers", pdfDirectories[0]!, pdfNames[0]!), "corrupt");
+    const extractionTypes = await readdir(join(storageLayout.derivedRoot, "document-extraction"));
+    const extractionNames = await readdir(join(storageLayout.derivedRoot, "document-extraction", extractionTypes[0]!));
+    await writeFile(join(storageLayout.derivedRoot, "document-extraction", extractionTypes[0]!, extractionNames[0]!), "corrupt");
+    const failed = await app.inject({ method: "GET", url: `/api/imports/${first.json().importRequest.id}` });
+    await app.inject({ method: "POST", url: `/api/jobs/${failed.json().jobs[0].id}/retry`,
+      headers: { "idempotency-key": "retry-corrupt-artifacts" } });
+    await waitForImport(app, first.json().importRequest.id, "succeeded");
+    expect(fetches).toBe(2);
+    expect(JSON.parse(await readFile(join(storageLayout.derivedRoot, "document-extraction", extractionTypes[0]!, extractionNames[0]!), "utf8")))
+      .toHaveLength(2);
+    expect((await app.inject({ method: "GET", url: "/api/diagnostics" })).json()).toMatchObject({ healthy: true, missingArtifacts: [] });
     await app.close();
   });
 });

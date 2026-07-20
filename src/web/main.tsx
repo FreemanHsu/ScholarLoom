@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { isRetryableImportJobState, type ImportJobError, type ImportJobState } from "../domain/import-job.js";
 import { importMonitor } from "./import-monitor.js";
 import "./styles.css";
 
@@ -9,6 +10,7 @@ type Workspace = {
   pdf: { pageCount: number } | null;
   summary: null | { status: string; sections: Array<{ key: string; title: string; body: string }>;
     claims: Array<{ claim: string; evidence: { page: number; verified: boolean } }> };
+  processing: null | { jobId: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null };
 };
 type Proposal = { id: string; claim: string; oneClickEligible: boolean; sourceHandles: string[] };
 
@@ -86,21 +88,45 @@ function App() {
     finally { setBusy(false); setProgress(null); }
   }
 
+  async function retryImport() {
+    if (!workspace?.processing) return;
+    setBusy(true); setError(null); setProgress("queued");
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(workspace.processing.jobId)}/retry`, {
+        method: "POST", headers: { "idempotency-key": `web-retry-${workspace.processing.jobId}` },
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail ?? body.code ?? "重试失败");
+      await importMonitor.wait(body.importRequest.id, setProgress);
+      await refresh(); await openPaper(workspace.paper.id);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "重试失败"); }
+    finally { setBusy(false); setProgress(null); }
+  }
+
   if (workspace) return <main className="app workspace">
     <header className="topbar"><button className="ghost" onClick={() => setWorkspace(null)}>← 论文库</button><div><span className="eyebrow">PAPER WORKSPACE</span><h1>{workspace.paper.title}</h1></div><span className="version">arXiv v{workspace.paper.version}</span></header>
     <div className={`reading-grid ${pdfOpen ? "split" : ""}`}>
       <article className="summary-pane">
-        <div className="pane-title"><div><span className="status">Summary Ready</span><h2>技术精读</h2></div>
-          <button onClick={() => setPdfOpen((value) => !value)}>{pdfOpen ? "隐藏原文" : "打开原文"}</button></div>
+        <div className="pane-title"><div><span className="status">{workspace.summary ? "Summary Ready" : workspace.processing?.state === "cancelled" ? "Import Cancelled" : isRetryableImportJobState(workspace.processing?.state) ? "Import Failed" : "Processing"}</span><h2>技术精读</h2></div>
+          <button disabled={!workspace.pdf} onClick={() => setPdfOpen((value) => !value)}>{pdfOpen ? "隐藏原文" : "打开原文"}</button></div>
+        {!workspace.summary && <section className="import-state"><span className="section-no">IMPORT STATUS</span>
+          <h3>{workspace.processing?.state === "cancelled" ? "论文处理已取消" : isRetryableImportJobState(workspace.processing?.state) ? "论文处理未完成" : "正在生成 Paper Summary"}</h3>
+          {workspace.processing?.error && <><p>{workspace.processing.error.stage} · {workspace.processing.error.code}</p>
+            <p>{workspace.processing.error.message}</p></>}
+          {isRetryableImportJobState(workspace.processing?.state) && <button disabled={busy} onClick={() => void retryImport()}>
+            {busy ? `重试中 · ${progress ?? "queued"}` : workspace.processing.error?.action === "repair-data-root-permissions" ? "修复存储权限后重试" : "重试 Paper Summary 流程"}
+          </button>}
+          {error && <p className="error">{error}</p>}
+        </section>}
         {workspace.summary?.sections.map((section, index) => <section key={section.key}><span className="section-no">0{index + 1}</span><h3>{section.title}</h3><p>{section.body}</p></section>)}
         <section><span className="section-no">KEY CLAIMS</span><h3>关键结论与证据</h3>
           {workspace.summary?.claims.map((claim) => <button className="claim" key={claim.claim} onClick={() => { setPage(claim.evidence.page); setPdfSrc(null); setPdfOpen(true); }}>
             <span>{claim.claim}</span><small>p. {claim.evidence.page} · {claim.evidence.verified ? "原文已核验" : "仅定位"}</small></button>)}</section>
-        <section className="conversation"><span className="section-no">DISCUSS</span><h3>围绕 Paper 继续追问</h3>
+        {workspace.summary && <section className="conversation"><span className="section-no">DISCUSS</span><h3>围绕 Paper 继续追问</h3>
           {answer && <div className="agent-answer"><b>ScholarLoom</b><p>{answer}</p></div>}
           {proposals.map((proposal) => <div className="proposal" key={proposal.id}><span>建议沉淀为 Takeaway</span><p>{proposal.claim}</p><button onClick={() => void acceptProposal(proposal)}>{proposal.oneClickEligible ? "确认沉淀" : "打开证据后确认"}</button></div>)}
           <form className="chat-form" onSubmit={askPaper}><input aria-label="Paper question" value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="论文或代码中的实现细节…"/><button>发送</button></form>
-        </section>
+        </section>}
       </article>
       {pdfOpen && <aside className="pdf-pane"><div className="pdf-toolbar"><strong>原始 PDF</strong><span>Page {page} / {workspace.pdf?.pageCount}</span></div>
         <iframe title="原始 PDF" src={pdfSrc ?? `/api/paper-versions/${encodeURIComponent(workspace.paper.versionId)}/pdf#page=${page}`} /></aside>}

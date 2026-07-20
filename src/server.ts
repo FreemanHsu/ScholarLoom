@@ -5,7 +5,7 @@ import { ArxivPaperSource } from "./adapters/arxiv.js";
 import { CodexCliRunner } from "./adapters/codex-cli.js";
 import { existsSync } from "node:fs";
 import { parsePort, requireLoopbackHost } from "./runtime-config.js";
-import { DATA_MANIFEST_NAME, defaultDataRoot, initializeDataRoot, openDataRoot } from "./storage/layout.js";
+import { assertDataRootWritable, DATA_MANIFEST_NAME, defaultDataRoot, initializeDataRoot, openDataRoot } from "./storage/layout.js";
 import { acquireRuntimeLock } from "./storage/runtime-lock.js";
 import { join } from "node:path";
 
@@ -21,6 +21,7 @@ const port = parsePort(process.env.SCHOLARLOOM_PORT ?? "3000");
 const dataRoot = process.env.SCHOLARLOOM_DATA_ROOT ?? defaultDataRoot();
 if (fixture && !existsSync(join(dataRoot, DATA_MANIFEST_NAME))) initializeDataRoot(dataRoot);
 const layout = openDataRoot(dataRoot);
+assertDataRootWritable(layout);
 const releaseRuntimeLock = acquireRuntimeLock(layout);
 try {
   const fixtureRepository = fixture ? prepareFixtureRepository(layout.tmpRoot) : null;
