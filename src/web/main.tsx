@@ -8,6 +8,7 @@ import {
 } from "../domain/import-job.js";
 import { paperHref, readBrowserRoute, type BrowserRoute } from "./browser-navigation.js";
 import { importMonitor } from "./import-monitor.js";
+import { SummaryMarkdown } from "./summary-markdown.js";
 import "./styles.css";
 
 type Paper = {
@@ -449,7 +450,10 @@ function PaperWorkspace(props: {
             {props.busy ? `重试中 · ${props.progress ?? "queued"}` : workspace.processing?.error?.action === "repair-data-root-permissions" ? "修复存储权限后重试" : "重试 Paper Summary 流程"}</button>}
         </section>}
         {workspace.summary?.sections.map((section, index) => <section key={section.key}><span className="section-no">{String(index + 1).padStart(2, "0")}</span>
-          <h3>{section.title}</h3><p>{section.body}</p></section>)}
+          <h3>{section.title}</h3><SummaryMarkdown markdown={section.body} pageCount={workspace.pdf?.pageCount ?? 0}
+            onOpenEvidence={(page) => props.onNavigate(paperHref(workspace.paper.id, {
+              pdfOpen: true, page, anchor: `page:${page}`,
+            }))} /></section>)}
         {workspace.summary && <section><span className="section-no">KEY CLAIMS</span><h3>关键结论与证据</h3>
           {workspace.summary.claims.map((claim) => <button className={`claim ${route.anchor === claim.evidence.id ? "selected" : ""}`} key={claim.claim}
             onClick={() => { props.onNavigate(paperHref(workspace.paper.id, { pdfOpen: true, page: claim.evidence.page,

@@ -95,6 +95,10 @@ If the paper does not involve inference, skip this section as a full section and
 ## Style and Rigor
 
 - Write in Chinese by default, keeping paper-specific technical terms in English when they are standard or clearer.
+- Write each structured section body as Markdown without repeating its section title. Nested headings start at `###`.
+- Use `$...$` for inline LaTeX and place `$$` delimiters on their own lines for display LaTeX. Do not use `\\(...\\)`, `\\[...\\]`, or raw HTML.
+- Put one or more `[pdf-page:N]` markers immediately after important methods, metrics, author conclusions, and limitations when those pages exist in the allowed source handles. Do not invent page numbers. If an Agent assessment has no direct page evidence, label it explicitly as an Agent assessment instead of presenting it as a Paper claim.
+- Do not emit Markdown images. Use short fenced code blocks for pseudocode or notation when they are clearer than prose.
 - Use precise terminology and explain novel paper-specific terms on first use.
 - Be objective: include both strengths and weaknesses.
 - Use equations, pseudocode, or short code blocks when they make the method clearer.
