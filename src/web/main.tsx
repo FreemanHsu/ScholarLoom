@@ -233,7 +233,7 @@ function App() {
 
   useEffect(() => {
     if (route.name !== "paper" || !route.conversationId) return;
-    const running = conversation?.messages.some((message) => message.attempts.some((attempt) => attempt.state === "running"));
+    const running = conversation?.messages.some((message) => message.attempts.some((attempt) => ["queued", "running", "canceling"].includes(attempt.state)));
     if (!running) return;
     const timer = window.setInterval(() => void refreshConversationWorkspace(route.paperId, route.conversationId), 500);
     return () => window.clearInterval(timer);
@@ -761,6 +761,7 @@ function PaperWorkspace(props: {
               <div><span>{attempt.state === "queued" ? "排队中" : attempt.state === "running" ? "正在处理…"
                 : attempt.state === "interrupted" ? "服务中断，回答未完成" : attempt.state === "succeeded"
                   ? `${formatReceiptCounts(attempt.receiptCounts)} · ${formatUsage(attempt.usage)}` : `${attempt.state} · ${attempt.error?.code ?? "未保存回答"}`}</span>
+                {attempt.runnerKind === "legacy_one_shot" && <small>Legacy one-shot</small>}
                 {attempt.activities && attempt.activities.length > 0 && <details className="activity-timeline"><summary>Agent Activity · {attempt.activities.length}</summary>
                   <ol>{attempt.activities.map((activity, activityIndex) => <li key={`${activity.type}-${activityIndex}`}><b>{activity.type}</b> {activity.text}</li>)}</ol></details>}</div>
               {(attempt.state === "queued" || attempt.state === "running") && attempt.runnerKind === "agentic_evidence" &&

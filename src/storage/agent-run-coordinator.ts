@@ -202,7 +202,7 @@ export class AgentRunCoordinator {
         workspaceRoot: workspace.root, question: input.content, signal: controller.signal,
         onActivity: (activity) => this.#activity(attempt.id, attempt.run_epoch, activity) });
       if (!result.answer || result.proposedTakeaways.length > 3) throw new Error("codex-output-invalid");
-      const gate = AnswerGroundingGate.open(workspace.root);
+      const gate = AnswerGroundingGate.open(workspace.root, this.#database, input.contextSnapshotId);
       let receipts: ReturnType<AnswerGroundingGate["verify"]>;
       try { receipts = gate.verify(result.citations); }
       catch { receipts = gate.repair(result.citations); }

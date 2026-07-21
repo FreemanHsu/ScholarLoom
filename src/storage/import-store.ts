@@ -101,10 +101,6 @@ export class ImportStore {
     this.#database.pragma("journal_mode = WAL");
     this.#database.pragma("busy_timeout = 5000");
     migrate(this.#database);
-    const unhashed = this.#database.prepare("SELECT id,structured_json FROM summary_revisions WHERE canonical_sections_hash IS NULL")
-      .all() as Array<{ id: string; structured_json: string }>;
-    const persistSectionHash = this.#database.prepare("UPDATE summary_revisions SET canonical_sections_hash=? WHERE id=?");
-    this.#database.transaction(() => unhashed.forEach((row) => persistSectionHash.run(canonicalSectionHash(row.structured_json), row.id)))();
     this.#contextSnapshots = new ContextSnapshotBuilder(this.#database, this.#now);
     this.#conversations = new ConversationStore(this.#database, this.#now);
     recoverInterruptedRuns(this.#database, this.#now().toISOString());

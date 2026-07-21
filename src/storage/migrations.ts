@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type Database from "better-sqlite3";
+import { canonicalSectionHash } from "./canonical-section-hash.js";
 
 export function migrate(database: Database.Database): void {
   database.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -21,5 +22,13 @@ export function migrate(database: Database.Database): void {
     const version = Number.parseInt(name, 10);
     const exists = database.prepare("SELECT 1 FROM schema_migrations WHERE version = ?").get(version);
     if (!exists) apply(version, name, readFileSync(join(directory, name), "utf8"));
+  }
+  const hasCanonicalHash = (database.prepare("PRAGMA table_info(summary_revisions)").all() as Array<{ name: string }>)
+    .some((column) => column.name === "canonical_sections_hash");
+  if (hasCanonicalHash) {
+    const rows = database.prepare("SELECT id,structured_json FROM summary_revisions WHERE canonical_sections_hash IS NULL")
+      .all() as Array<{ id: string; structured_json: string }>;
+    const update = database.prepare("UPDATE summary_revisions SET canonical_sections_hash=? WHERE id=?");
+    database.transaction(() => rows.forEach((row) => update.run(canonicalSectionHash(row.structured_json), row.id)))();
   }
 }

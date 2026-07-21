@@ -100,6 +100,13 @@ CREATE INDEX evidence_receipts_message ON evidence_receipts(message_id,ordinal);
 ALTER TABLE summary_revisions ADD COLUMN canonical_sections_hash TEXT;
 ALTER TABLE messages ADD COLUMN grounding_status TEXT;
 
+CREATE TRIGGER summary_revisions_canonical_hash_required
+AFTER INSERT ON summary_revisions
+WHEN NEW.canonical_sections_hash IS NULL
+BEGIN
+  SELECT RAISE(ABORT,'summary-revision-canonical-hash-required');
+END;
+
 CREATE TRIGGER summary_revisions_frozen_source_fields
 BEFORE UPDATE OF paper_id,paper_version_id,extraction_run_id,revision,markdown_path,markdown_hash,
   structured_json,skill_path,skill_content_hash,agent_run_id,canonical_sections_hash ON summary_revisions

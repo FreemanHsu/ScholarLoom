@@ -15,6 +15,8 @@ async function waitFor(app: FastifyInstance, url: string, predicate: (body: any)
     const response = await app.inject({ method: "GET", url });
     const body = response.json();
     if (predicate(body)) return body;
+    const failed = body.messages?.flatMap((message: any) => message.attempts ?? []).find((attempt: any) => attempt.state === "failed");
+    if (failed) throw new Error(JSON.stringify(failed));
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("agentic fixture did not settle");

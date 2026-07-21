@@ -139,9 +139,11 @@ export class EvidenceWorkspaceBuilder {
       const messagesPath = "conversation/recent-messages.md";
       this.#write(buildingRoot, messagesPath, `---\ncitable: false\nscope: context-only\n---\n\n${source.messagesText}`);
       manifest.sources.push({ kind: "conversation", path: messagesPath, sourceId: contextSnapshotId,
-        contentHash: source.messagesHash, citable: false });
-      this.#write(buildingRoot, "MANIFEST.json", `${JSON.stringify(manifest, null, 2)}\n`);
-      this.#write(buildingRoot, "COMPLETE", `${workspaceHash}\n${BUILDER_VERSION}\n`);
+        contentHash: source.messagesHash, citable: false, locator: { contentStartLine: 6 } });
+      const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+      this.#write(buildingRoot, "MANIFEST.json", manifestText);
+      this.#validateManifestFiles(buildingRoot, manifest);
+      this.#write(buildingRoot, "COMPLETE", `${workspaceHash}\n${BUILDER_VERSION}\n${createHash("sha256").update(manifestText).digest("hex")}\n`);
       this.#validate(buildingRoot);
       const byteSize = this.#treeSize(buildingRoot);
       this.#makeReadOnly(buildingRoot);
@@ -202,7 +204,7 @@ export class EvidenceWorkspaceBuilder {
       }),
       pages,
       messagesText,
-      messagesHash: createHash("sha256").update(messagesText).digest("hex"),
+      messagesHash: createHash("sha256").update(messagesText.replace(/\n$/, "")).digest("hex"),
     };
   }
 
@@ -286,7 +288,23 @@ export class EvidenceWorkspaceBuilder {
   }
 
   #isComplete(root: string, hash: string): boolean {
-    return existsSync(join(root, "COMPLETE")) && readFileSync(join(root, "COMPLETE"), "utf8").startsWith(`${hash}\n`);
+    if (!existsSync(join(root, "COMPLETE")) || !existsSync(join(root, "MANIFEST.json"))) return false;
+    const marker = readFileSync(join(root, "COMPLETE"), "utf8").trim().split("\n");
+    const manifestBytes = readFileSync(join(root, "MANIFEST.json"));
+    if (marker[0] !== hash || marker[1] !== BUILDER_VERSION || marker[2] !== createHash("sha256").update(manifestBytes).digest("hex")) return false;
+    try { this.#validateManifestFiles(root, JSON.parse(manifestBytes.toString("utf8")) as SourceManifest); return true; }
+    catch { return false; }
+  }
+
+  #validateManifestFiles(root: string, manifest: SourceManifest): void {
+    for (const source of manifest.sources) {
+      const path = join(root, source.path);
+      const bytes = readFileSync(path);
+      const start = typeof source.locator?.contentStartLine === "number" ? source.locator.contentStartLine : null;
+      const hash = start === null ? createHash("sha256").update(bytes).digest("hex") : createHash("sha256")
+        .update(bytes.toString("utf8").split(/\r?\n/).slice(start - 1).join("\n").replace(/\n$/, "")).digest("hex");
+      if (hash !== source.contentHash) throw new Error(`evidence-workspace-source-hash-mismatch:${source.path}`);
+    }
   }
 }
 
