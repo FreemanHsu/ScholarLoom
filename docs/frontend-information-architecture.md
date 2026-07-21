@@ -225,6 +225,9 @@ localize errors**.
 - A component request failure affects that component rather than replacing the whole
   Paper Workspace with an error page.
 - Summary failure preserves Paper metadata, PDF access, and completed artifacts.
+- Import and Summary failures display the durable stage, code, and message in the
+  immediate notification and recovery surfaces; cards include the latest reason instead
+  of showing only a generic failed label.
 - Repository failure preserves Summary reading and discussion that does not require
   code.
 - SSE loss shows reconnecting state while durable reads remain available.

@@ -172,7 +172,10 @@ The slice defines separate JSON Schemas for:
 
 Codex output never contains database IDs it invented. Context manifests provide
 opaque allowed source handles; the application resolves and validates those handles
-before persistence.
+before persistence. The Paper Summary schema narrows `claims[].sourceHandle` to a
+per-run enum of manifest handles. A Key Claim selects one representative Evidence
+Anchor; multiple inline page markers remain valid in section Markdown, while an Agent
+assessment without direct page evidence remains prose rather than a structured claim.
 
 ## 6. First-slice simplifications
 

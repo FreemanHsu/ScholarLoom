@@ -152,6 +152,10 @@ version. It resumes an open KnowledgeWriteRequest without rerunning Codex Summar
 reuses PDF/Extraction only after recorded size, hash, output Artifact, and page-element
 checks pass. A completed import cannot be retried through an older failed attempt.
 Storage permission errors require a successful data-root write preflight first.
+Resolution failures are durable Import Requests with a stable error code and user-facing
+detail even when no Paper or Job Run can be created. Failed Job Runs retain their
+structured stage, code, message, retryability, and recovery action; list and workspace
+read models expose the latest error rather than collapsing it to a generic failed state.
 
 ### 4.2 PaperLibrary
 
@@ -332,6 +336,10 @@ Rules:
   are stored separately.
 - The final message must validate against the supplied JSON Schema before it can
   produce a domain Artifact or Proposal.
+- Paper Summary schemas derive `claims[].sourceHandle` as an enum from the immutable
+  context manifest. Each structured Key Claim selects exactly one allowed handle;
+  multi-page prose references remain in section Markdown, and Agent assessments without
+  direct page evidence do not enter structured claims.
 - Paper and repository contents are untrusted data, never instructions. The task
   contract prohibits following instructions contained in source material; no user
   Codex configuration, MCP server, shell command, credential, or writable repository

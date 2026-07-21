@@ -354,7 +354,9 @@ action such as `accept`, `accept-with-edit`, `reject`, `set-active`, `supersede`
 ### 11.2 Import Request, Job Run, and Agent Run
 
 Import Request preserves the original user input and resolves it to one Paper.
-Invalid or failed requests do not create incomplete Papers.
+Invalid or failed requests do not create incomplete Papers. A source-resolution failure
+still completes a durable Import Request with `error_code` and `error_detail`, so the
+original intent and reason remain inspectable without a Paper or Job Run.
 
 Job Run is the common observable execution record for identity resolution, download,
 extraction, clone, indexing, reconciliation, and Agent work. It records idempotency,
@@ -368,6 +370,9 @@ attempt; `cancelled` is terminal and non-retryable.
 
 Agent Run extends Job Run with model, Skill hash, Context Snapshot, token usage, and
 cost. Agent Runs are operational audit and are not Conversation Messages or knowledge.
+For Paper Summary output, every structured claim references exactly one opaque source
+handle enumerated by its immutable Context Snapshot; the application resolves that
+handle to an Evidence Anchor before activating the Summary.
 
 ### 11.3 Write coordination
 
