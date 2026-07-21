@@ -52,7 +52,7 @@ try {
           }
           const code = context.sources.find((source) => source.type === "code")!;
           const summary = context.sources.find((source) => source.type === "summary")!;
-          return { answer: "固定 commit 中的 README 说明了证据与实现的连接。", citations: [
+          return { answer: "## 回答\n\n- 固定 commit 中的 `README.md` 说明了证据与实现的连接。\n- PDF 与 Summary 提供论文侧证据。", citations: [
             { sourceHandle: code.handle, locator: code.locator }, { sourceHandle: "pdf-page:2", locator: "p. 2" },
             { sourceHandle: summary.handle, locator: summary.locator }],
             proposedTakeaways: [{ claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", code.handle], quote: null }] };

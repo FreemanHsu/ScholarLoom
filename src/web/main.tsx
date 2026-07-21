@@ -9,6 +9,7 @@ import {
 import { paperHref, readBrowserRoute, type BrowserRoute } from "./browser-navigation.js";
 import { importMonitor } from "./import-monitor.js";
 import { SummaryMarkdown } from "./summary-markdown.js";
+import { ConversationMessageBody, ConversationProposalGroup } from "./conversation-message.js";
 import "./styles.css";
 
 type Paper = {
@@ -691,8 +692,16 @@ function PaperWorkspace(props: {
           <h2>{props.conversation.conversation.title}</h2></div><div className="conversation-actions"><small>{props.conversation.contextSnapshot?.repositorySnapshots.length ?? 0} repository snapshots</small>
             <button onClick={() => { const title = window.prompt("Conversation 标题", props.conversation!.conversation.title); if (title) void props.onManageConversation("rename", title); }}>重命名</button>
             <button onClick={() => void props.onManageConversation(props.conversation!.conversation.status === "archived" ? "restore" : "archive")}>{props.conversation.conversation.status === "archived" ? "恢复" : "归档"}</button></div></header>
-          <div className="message-timeline">{props.conversation.messages.map((message) => <article key={message.id} className={`message ${message.role}`}>
-            <b>{message.role === "user" ? "你" : "ScholarLoom"}</b><p>{message.content}</p>
+          <div className="message-timeline">{props.conversation.messages.map((message) => {
+            const messageProposals = discussionProposals.filter((proposal) => proposal.source.messageId === message.id);
+            const openInlineEvidence = (page: number) => props.onNavigate(paperHref(workspace.paper.id, { mode: "discussion",
+              conversationId: route.conversationId, pdfOpen: true, page,
+              anchor: props.conversation?.contextSnapshot
+                ? `evidence:${props.conversation.contextSnapshot.paperVersionId}:page:${page}:source` : null }));
+            return <article key={message.id} className={`message ${message.role}`}>
+            <b>{message.role === "user" ? "你" : "ScholarLoom"}</b>
+            <ConversationMessageBody role={message.role} content={message.content} pageCount={pdfPageCount}
+              onOpenEvidence={openInlineEvidence} />
             {message.citations.length > 0 && <div className="citation-list">{message.citations.map((citation, index) => {
               const locator = citation.locator;
               const label = locator.type === "pdf" ? `PDF · p. ${String(locator.page)}`
@@ -709,15 +718,18 @@ function PaperWorkspace(props: {
               return <a key={`${message.id}-${index}`} className="citation" href={href}
                 onClick={(event) => { event.preventDefault(); props.onNavigate(href); }}>{label}</a>;
             })}</div>}
+            <ConversationProposalGroup proposals={messageProposals}
+              onAccept={(proposal) => { const source = messageProposals.find((candidate) => candidate.id === proposal.id);
+                if (source) void props.onReviewProposal(source, "accept"); }}
+              onEdit={(proposal) => { const edited = window.prompt("编辑确认后的 Takeaway", proposal.claim);
+                const source = messageProposals.find((candidate) => candidate.id === proposal.id);
+                if (edited && source) void props.onReviewProposal(source, "edit-and-accept", edited); }}
+              onReject={(proposal) => { const source = messageProposals.find((candidate) => candidate.id === proposal.id);
+                if (source) void props.onReviewProposal(source, "reject"); }} />
             {message.attempts.slice(-1).map((attempt) => attempt.state !== "succeeded" && <div key={attempt.id} className={`attempt ${attempt.state}`}>
               <span>{attempt.state === "running" ? "正在处理…" : attempt.state === "interrupted" ? "服务中断，回答未完成" : `回答失败 · ${attempt.error?.code ?? "unknown"}`}</span>
               {(attempt.state === "failed" || attempt.state === "interrupted") && <button onClick={() => void props.onRetryMessage(message.id)}>重试</button>}
-            </div>)}</article>)}
-            {discussionProposals.map((proposal) => <article className="proposal" key={proposal.id}><span>TAKEAWAY PROPOSAL</span>
-              <p>{proposal.claim}</p><div className="review-actions">{!proposal.legacySource && <>
-                <button onClick={() => void props.onReviewProposal(proposal, "accept")}>确认</button>
-                <button onClick={() => { const edited = window.prompt("编辑确认后的 Takeaway", proposal.claim); if (edited) void props.onReviewProposal(proposal, "edit-and-accept", edited); }}>编辑后确认</button></>}
-                <button onClick={() => void props.onReviewProposal(proposal, "reject")}>拒绝</button></div></article>)}</div></>}
+            </div>)}</article>})}</div></>}
         {(!props.conversation || (props.conversation.conversation.status === "active" && props.conversation.conversation.snapshotIntegrity === "frozen")) &&
           <form className="chat-form discussion-composer" onSubmit={props.onAskPaper}><input aria-label="Paper question" value={props.question}
             onChange={(event) => props.onQuestion(event.target.value)} placeholder="论文、Summary 或固定代码快照中的问题…" disabled={running}/>

@@ -142,7 +142,11 @@ Evidence Anchors open and locate the exact PDF page or available source position
 ### 6.2 Discussion
 
 Discussion is separate from the bottom of the Summary. It owns the Conversation
-list, current Conversation, Messages, citations, and Paper-scoped proposal cards.
+list, current Conversation, Messages, citations, and Paper-scoped Proposal review.
+Assistant Messages render safe Markdown with the same inert-link, no-raw-HTML policy
+as Summary content. Pending Takeaway Proposals are grouped under their source Message
+in a compact, collapsed review disclosure; Knowledge and Review Center retain the
+expanded Paper-level and global review views.
 Opening a saved Conversation uses its stable Conversation URL and preserves the
 Context Snapshot boundary defined by the data model.
 
