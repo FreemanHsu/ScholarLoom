@@ -107,6 +107,12 @@ Required concepts:
 - Accepted `current_version_id`.
 - Origin, initially `manual-import` or `reference-discovery`.
 
+For a public direct PDF, each normalized submitted URL is an External Identity of type
+`direct-pdf-url`; a safely redirected final URL is recorded as its canonical URL. URL
+identity and immutable content identity are deliberately separate. Different URLs with
+the same verified SHA-256 PDF hash attach to one Paper and Paper Version while retaining
+both External Identities.
+
 A citation may create a metadata-only Paper. Importing it later upgrades the same
 entity rather than creating another Paper.
 
@@ -137,6 +143,13 @@ stateDiagram-v2
 
 The formally published version and arXiv versions may coexist. Date alone does not
 decide which one is current.
+
+A direct PDF Paper Version uses `source_type = direct-pdf` and
+`source_version = sha256:<content-hash>`. A known URL returning new bytes creates a
+detected Paper Version and `paper-version-update` Proposal; current content is not
+changed until review. Review opens the candidate Artifact and, on acceptance, makes it
+current before running the existing extraction and Summary lifecycle. Retry input freezes the source identity, canonical URL, content
+hash, and stored PDF Artifact.
 
 ### 5.3 Code Repository and Snapshot
 
@@ -357,6 +370,8 @@ Import Request preserves the original user input and resolves it to one Paper.
 Invalid or failed requests do not create incomplete Papers. A source-resolution failure
 still completes a durable Import Request with `error_code` and `error_detail`, so the
 original intent and reason remain inspectable without a Paper or Job Run.
+For direct PDF references, the pending request exists before DNS or HTTP acquisition;
+validated bytes are retained as an immutable Artifact even when required metadata is incomplete.
 
 Job Run is the common observable execution record for identity resolution, download,
 extraction, clone, indexing, reconciliation, and Agent work. It records idempotency,

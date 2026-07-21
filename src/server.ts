@@ -2,18 +2,32 @@ import { createApp, type PaperSource } from "./app.js";
 import { createFixturePdf, fixtureSummary, prepareFixtureRepository } from "./adapters/fixture.js";
 import { GitRepositoryAdapter } from "./adapters/git-repository.js";
 import { ArxivPaperSource } from "./adapters/arxiv.js";
+import { DirectPdfSource } from "./adapters/direct-pdf.js";
 import { CodexCliRunner } from "./adapters/codex-cli.js";
 import { existsSync } from "node:fs";
 import { parsePort, requireLoopbackHost } from "./runtime-config.js";
 import { assertDataRootWritable, DATA_MANIFEST_NAME, defaultDataRoot, initializeDataRoot, openDataRoot } from "./storage/layout.js";
 import { acquireRuntimeLock } from "./storage/runtime-lock.js";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { PaperSourceError } from "./adapters/safe-pdf-downloader.js";
 
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
 const paperSource: PaperSource = fixture ? {
   async resolve(arxivId) { return { arxivId, latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
   async fetchPdf() { return createFixturePdf(); },
 } : new ArxivPaperSource();
+const directPdfSource = fixture ? {
+  async prepare(reference: import("./domain/paper-import-reference.js").DirectPdfReference) {
+    if (reference.normalizedUrl.includes("not-a-pdf")) throw new PaperSourceError("paper-source-not-pdf");
+    const bytes = await createFixturePdf();
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    return { reference, sourceIdentity: reference.normalizedUrl, sourceType: "direct-pdf" as const,
+      sourceVersion: `sha256:${contentHash}`, canonicalUrl: reference.normalizedUrl, bytes, contentHash,
+      byteSize: bytes.byteLength, mediaType: "application/pdf",
+      metadata: { title: "Locate Anything Fixture", authors: ["Ada Fixture"], year: 2025 } };
+  },
+} : new DirectPdfSource();
 
 const host = requireLoopbackHost(process.env.SCHOLARLOOM_HOST ?? "127.0.0.1");
 const port = parsePort(process.env.SCHOLARLOOM_PORT ?? "3000");
@@ -25,7 +39,7 @@ assertDataRootWritable(layout);
 const releaseRuntimeLock = acquireRuntimeLock(layout);
 try {
   const fixtureRepository = fixture ? prepareFixtureRepository(layout.tmpRoot) : null;
-  const app = await createApp({ paperSource, storageLayout: layout, ...(fixture ? {
+  const app = await createApp({ paperSource, directPdfSource, storageLayout: layout, ...(fixture ? {
       repositoryAdapter: new GitRepositoryAdapter({ "https://github.com/example/fixture": fixtureRepository! }),
       codexRunner: {
         async runSummary() { return fixtureSummary; },

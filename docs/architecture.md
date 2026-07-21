@@ -141,7 +141,7 @@ getImport(importRequestId: string): ImportStatus
 retry(jobRunId: string, idempotencyKey: string): Promise<ImportReceipt>
 ```
 
-It hides URL normalization, idempotency, Paper upsert, job graph creation, PDF and
+It hides Paper-reference classification, URL normalization, idempotency, Paper upsert, job graph creation, PDF and
 repository acquisition, extraction, Summary generation, activation rules, and error
 recovery. Callers never invoke individual pipeline steps.
 
@@ -156,6 +156,9 @@ Resolution failures are durable Import Requests with a stable error code and use
 detail even when no Paper or Job Run can be created. Failed Job Runs retain their
 structured stage, code, message, retryability, and recovery action; list and workspace
 read models expose the latest error rather than collapsing it to a generic failed state.
+Direct PDF submission persists the pending Import Request before network acquisition.
+Once download validation succeeds, its content-addressed Artifact and hash remain frozen
+even if metadata extraction fails, so later recovery cannot drift with remote content.
 
 ### 4.2 PaperLibrary
 
@@ -285,7 +288,7 @@ Only dependencies that genuinely vary receive exposed internal ports.
 
 | Seam | Production adapter | Test adapter |
 |---|---|---|
-| `PaperSource` | arXiv HTTPS metadata/PDF adapter | deterministic fixture adapter |
+| `PaperSource` | arXiv and safe direct-PDF adapters | deterministic fixture adapters |
 | `CodexRunner` | Codex CLI subprocess adapter | schema-valid deterministic fake |
 | `Clock` | system clock | fixed clock |
 | `IdGenerator` | UUIDv7 generator | deterministic sequence |
@@ -360,7 +363,7 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/imports` | Submit an arXiv link |
+| POST | `/api/imports` | Submit an arXiv link or public HTTPS direct PDF URL |
 | GET | `/api/imports/:id` | Read import and child-job status |
 | GET | `/api/events?scope=...` | Stream durable progress over SSE |
 | POST | `/api/jobs/:id/retry` | Retry a failed or interrupted import as a new Job attempt |
@@ -376,6 +379,11 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 Commands accept an `Idempotency-Key`. Errors use stable problem codes such as
 `invalid-arxiv-reference`, `paper-source-unavailable`, `proposal-already-decided`,
 and `codex-output-invalid`.
+
+New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
+compatibility input. Direct PDF acquisition validates DNS and every redirect before
+connection, pins transport to a validated address, limits redirects/time/bytes, and
+requires an allowed media type plus PDF magic and parser validation.
 
 ## 8. Transaction and consistency model
 

@@ -179,7 +179,8 @@ assessment without direct page evidence remains prose rather than a structured c
 
 ## 6. First-slice simplifications
 
-- Only arXiv input is supported.
+- The original slice used only arXiv input. The accepted extension also supports public
+  HTTPS direct PDF URLs through the PaperSource seam while retaining all arXiv behavior.
 - Explicit arXiv `vN` imports and on-open update Proposals are required; a full update
   comparison UI beyond accept/reject is deferred.
 - PDF Evidence Anchors are page-level with optional text bounds, not full layout

@@ -67,7 +67,7 @@ CREATE TABLE paper_external_identities (
     id TEXT PRIMARY KEY,
     paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE RESTRICT,
     identity_type TEXT NOT NULL CHECK (
-        identity_type IN ('arxiv', 'doi', 'pmid', 'publisher', 'other')
+        identity_type IN ('arxiv', 'doi', 'pmid', 'publisher', 'direct-pdf-url', 'other')
     ),
     normalized_value TEXT NOT NULL,
     canonical_url TEXT,
@@ -80,7 +80,7 @@ CREATE TABLE paper_versions (
     id TEXT PRIMARY KEY,
     paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE RESTRICT,
     source_type TEXT NOT NULL CHECK (
-        source_type IN ('arxiv', 'conference', 'journal', 'publisher', 'other')
+        source_type IN ('arxiv', 'conference', 'journal', 'publisher', 'direct-pdf', 'other')
     ),
     source_version TEXT NOT NULL,
     source_url TEXT NOT NULL,
@@ -92,6 +92,8 @@ CREATE TABLE paper_versions (
         )
     ),
     pdf_artifact_id TEXT REFERENCES artifacts(id) ON DELETE RESTRICT,
+    source_content_hash TEXT,
+    source_media_type TEXT,
     accepted_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -112,8 +114,12 @@ CREATE TABLE import_requests (
     error_code TEXT,
     error_detail TEXT,
     idempotency_key TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    reference_kind TEXT,
+    frozen_input_json TEXT CHECK (frozen_input_json IS NULL OR json_valid(frozen_input_json))
 ) STRICT;
+
+CREATE INDEX idx_paper_versions_content_hash ON paper_versions(source_content_hash);
 
 CREATE UNIQUE INDEX uq_import_idempotency
     ON import_requests(idempotency_key)

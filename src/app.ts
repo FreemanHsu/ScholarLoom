@@ -3,7 +3,9 @@ import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { parseArxivReference } from "./domain/arxiv.js";
+import { parsePaperImportReference } from "./domain/paper-import-reference.js";
+import { DirectPdfPreparationError, type DirectPdfSource, type PreparedDirectPdfImport } from "./adapters/direct-pdf.js";
+import { PaperSourceError } from "./adapters/safe-pdf-downloader.js";
 import type { ImportStage } from "./domain/import-job.js";
 import { ImportStore } from "./storage/import-store.js";
 import type { RepositoryAdapter } from "./adapters/git-repository.js";
@@ -31,6 +33,7 @@ export type CodexRunner = {
 
 export type CreateAppOptions = {
   paperSource: PaperSource;
+  directPdfSource?: Pick<DirectPdfSource, "prepare"> & Partial<Pick<DirectPdfSource, "prepareDownloaded">>;
   storageLayout: StorageLayout;
   webRoot?: string;
   codexRunner?: CodexRunner;
@@ -54,6 +57,26 @@ function classifyPaperResolutionError(error: unknown): { status: 404 | 503; code
   };
 }
 
+const directPdfErrorDetail: Record<string, string> = {
+  "unsafe-source-url": "来源 URL 不安全或指向非公网地址。",
+  "paper-source-dns-failed": "无法解析 PDF 来源域名，请检查地址或稍后重试。",
+  "paper-source-timeout": "PDF 来源响应超时，请稍后重试。",
+  "paper-source-http-error": "PDF 来源返回了不可用的 HTTP 状态。",
+  "paper-source-redirect-invalid": "PDF 来源的重定向不安全、无效或次数过多。",
+  "paper-source-too-large": "PDF 超过允许的最大大小。",
+  "paper-source-not-pdf": "该地址没有直接返回有效 PDF。",
+  "paper-source-invalid-pdf": "下载内容无法解析为有效 PDF。",
+  "paper-metadata-incomplete": "PDF metadata 不完整，无法可靠创建 Paper。",
+};
+
+function classifyDirectPdfError(error: unknown): { code: string; detail: string; downloaded?: import("./adapters/safe-pdf-downloader.js").DownloadedPdf } {
+  const code = error instanceof PaperSourceError ? error.code : "paper-source-http-error";
+  const detail = error instanceof PaperSourceError && error.code === "paper-metadata-incomplete" && error.message !== error.code
+    ? `${directPdfErrorDetail[code]}${error.message.replace(/^缺少 metadata 字段：/, " 缺少：")}`
+    : directPdfErrorDetail[code] ?? "公开 PDF 导入失败。";
+  return { code, detail, ...(error instanceof DirectPdfPreparationError ? { downloaded: error.downloaded } : {}) };
+}
+
 export async function createApp(options: CreateAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, routerOptions: { maxParamLength: 1024 } });
   const now = options.clock ? () => options.clock!.now() : undefined;
@@ -61,14 +84,18 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   const backgroundTasks = new Set<Promise<void>>();
   app.addHook("onClose", async () => { await Promise.allSettled(backgroundTasks); store.close(); });
 
-  const startImport = (execution: { paper: import("./storage/import-store.js").StoredPaper; arxivId: string; version: number;
-    importRequest: { id: string }; job: { id: string } }) => {
+  const startImport = (execution: { paper: import("./storage/import-store.js").StoredPaper; arxivId?: string; version: number;
+    importRequest: { id: string }; job: { id: string }; pdfBytes?: Uint8Array }) => {
     let stage: ImportStage = "pdf-download";
     let task: Promise<void>;
     task = Promise.resolve().then(async () => {
       try {
-        const versionId = `paper-version:${execution.paper.id}:arxiv:v${execution.version}`;
-        const pdfBytes = store.getPdf(versionId) ?? await options.paperSource.fetchPdf!(execution.arxivId, execution.version);
+        const versionId = execution.paper.versionId;
+        let pdfBytes = store.getPdf(versionId) ?? execution.pdfBytes;
+        if (!pdfBytes) {
+          if (execution.paper.sourceType === "direct-pdf") throw new Error("frozen-direct-pdf-artifact-missing");
+          pdfBytes = await options.paperSource.fetchPdf!(execution.arxivId!, execution.version);
+        }
         await store.ingestPaper({ paper: execution.paper, pdfBytes,
           onStage(nextStage) { stage = nextStage; },
           runSummary: (context) => options.codexRunner!.runSummary(context),
@@ -79,17 +106,45 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     backgroundTasks.add(task);
   };
 
-  app.post<{ Body: { arxivUrl?: unknown } }>("/api/imports", async (request, reply) => {
-    if (typeof request.body?.arxivUrl !== "string") {
-      return reply.code(400).send({ code: "invalid-arxiv-reference" });
+  app.post<{ Body: { reference?: unknown; arxivUrl?: unknown } }>("/api/imports", async (request, reply) => {
+    const submitted = typeof request.body?.reference === "string" ? request.body.reference : request.body?.arxivUrl;
+    if (typeof submitted !== "string") {
+      const importRequest = store.recordFailedImport({ originalInput: String(submitted ?? ""), normalizedInput: "",
+        code: "unsupported-paper-reference", detail: "请输入 arXiv 链接或公开 HTTPS PDF 直链。" });
+      return reply.code(400).send({ code: "unsupported-paper-reference", importRequest });
     }
 
-    const reference = parseArxivReference(request.body.arxivUrl);
+    const reference = parsePaperImportReference(submitted);
     if (!reference) {
-      return reply.code(400).send({ code: "invalid-arxiv-reference" });
+      const importRequest = store.recordFailedImport({ originalInput: submitted, normalizedInput: "",
+        code: "unsupported-paper-reference", detail: "仅支持 arXiv 链接或公开 HTTPS PDF 直链。" });
+      return reply.code(400).send({ code: "unsupported-paper-reference", detail: "仅支持 arXiv 链接或公开 HTTPS PDF 直链。", importRequest });
     }
     try { assertDataRootWritable(options.storageLayout); }
     catch (error) { return reply.code(503).send({ code: "data-root-not-writable", detail: (error as Error).message }); }
+    const pendingImport = store.beginImport({ originalInput: submitted,
+      normalizedInput: reference.kind === "direct-pdf" ? reference.normalizedUrl : reference.arxivId, referenceKind: reference.kind });
+
+    if (reference.kind === "direct-pdf") {
+      const sourceJob = store.beginDirectSourceJob(pendingImport.id, reference.normalizedUrl);
+      if (!options.directPdfSource) {
+        const importRequest = store.failImport(pendingImport.id, { code: "paper-source-unavailable", detail: "公开 PDF 导入器当前不可用。", jobId: sourceJob.id });
+        return reply.code(503).send({ code: "paper-source-unavailable", importRequest });
+      }
+      let prepared: PreparedDirectPdfImport;
+      try { prepared = await options.directPdfSource.prepare(reference); }
+      catch (error) {
+        const { code, detail, downloaded } = classifyDirectPdfError(error);
+        const importRequest = store.failImport(pendingImport.id, { code, detail, jobId: sourceJob.id, ...(downloaded ? { downloaded } : {}) });
+        return reply.code(code === "unsafe-source-url" || code === "paper-source-not-pdf" || code === "paper-metadata-incomplete" ? 422 : 503)
+          .send({ code, detail, importRequest, job: sourceJob });
+      }
+      const processing = Boolean(options.codexRunner);
+      const result = store.importDirectPdf({ originalInput: submitted, prepared, processing, importRequestId: pendingImport.id, sourceJobId: sourceJob.id });
+      if (processing && result.job.state === "running") startImport({ ...result, version: 1, pdfBytes: prepared.bytes });
+      return reply.code(202).send({ importRequest: result.importRequest, paper: result.paper,
+        ...(result.versionProposal ? { versionProposal: true } : {}) });
+    }
 
     const frozen = reference.explicitVersion === null ? store.findFrozenArxiv(reference.arxivId) : null;
     let resolved: ResolvedPaper;
@@ -98,17 +153,17 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
         : await options.paperSource.resolve(reference.arxivId);
     } catch (error) {
       const failure = classifyPaperResolutionError(error);
-      const importRequest = store.recordFailedImport({ originalInput: request.body.arxivUrl,
-        normalizedInput: reference.arxivId, code: failure.code, detail: failure.detail });
+      const importRequest = store.failImport(pendingImport.id, { code: failure.code, detail: failure.detail });
       return reply.code(failure.status).send({ code: failure.code, detail: failure.detail, importRequest });
     }
     const version = reference.explicitVersion ?? resolved.latestVersion;
     const processing = Boolean(options.paperSource.fetchPdf && options.codexRunner);
     const { paper, importRequest, job } = store.importPaper({
-      originalInput: request.body.arxivUrl,
+      originalInput: submitted,
       resolved,
       version,
       processing,
+      importRequestId: pendingImport.id,
     });
     if (processing) startImport({ paper, arxivId: reference.arxivId, version, importRequest, job });
 
@@ -121,9 +176,33 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   });
 
   app.post<{ Params: { id: string } }>("/api/jobs/:id/retry", async (request, reply) => {
-    if (!options.paperSource.fetchPdf || !options.codexRunner) return reply.code(503).send({ code: "import-runner-unavailable" });
     const key = request.headers["idempotency-key"];
     if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    if (store.isPrePaperDirectImportJob(request.params.id)) {
+      if (!options.directPdfSource) return reply.code(503).send({ code: "import-runner-unavailable" });
+      const retry = store.retryDirectSourceJob(request.params.id, key);
+      if (!retry.ok) return reply.code(retry.code === "job-not-found" ? 404 : 409).send({ code: retry.code });
+      if (retry.replayed) return reply.code(202).send({ importRequest: { id: retry.importRequestId }, job: retry.job });
+      const reference = parsePaperImportReference(retry.sourceIdentity);
+      if (!reference || reference.kind !== "direct-pdf") return reply.code(409).send({ code: "job-not-retryable" });
+      try {
+        const prepared = retry.downloaded && options.directPdfSource.prepareDownloaded
+          ? await options.directPdfSource.prepareDownloaded(reference, retry.downloaded)
+          : await options.directPdfSource.prepare(reference);
+        const result = store.importDirectPdf({ originalInput: retry.originalInput, prepared, processing: Boolean(options.codexRunner),
+          importRequestId: retry.importRequestId, sourceJobId: retry.job.id });
+        if (options.codexRunner && result.job.state === "running") startImport({ ...result, version: 1, pdfBytes: prepared.bytes });
+        return reply.code(202).send({ importRequest: result.importRequest, paper: result.paper, job: result.job });
+      } catch (error) {
+        const { code, detail, downloaded } = classifyDirectPdfError(error);
+        const importRequest = store.failImport(retry.importRequestId, { code, detail, jobId: retry.job.id, ...(downloaded ? { downloaded } : {}) });
+        return reply.code(422).send({ code, detail, importRequest, job: retry.job });
+      }
+    }
+    if (!options.codexRunner) return reply.code(503).send({ code: "import-runner-unavailable" });
+    if (!options.paperSource.fetchPdf && !store.isDirectPdfImportJob(request.params.id)) {
+      return reply.code(503).send({ code: "import-runner-unavailable" });
+    }
     try { assertDataRootWritable(options.storageLayout); }
     catch (error) { return reply.code(503).send({ code: "data-root-not-writable", detail: (error as Error).message }); }
     const result = store.retryImportJob(request.params.id, key);
@@ -137,9 +216,11 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   app.get<{ Params: { id: string } }>("/api/papers/:id", async (request, reply) => {
     const workspace = store.getPaperWorkspace(request.params.id);
     if (!workspace) return reply.code(404).send({ code: "paper-not-found" });
-    const paper = store.findFrozenArxiv((workspace as { paper: { arxivId: string } }).paper.arxivId)!;
+    const workspacePaper = (workspace as { paper: import("./storage/import-store.js").StoredPaper }).paper;
+    if (workspacePaper.sourceType !== "arxiv" || !workspacePaper.arxivId) return { ...(workspace as object), updateProposal: null };
+    const paper = store.findFrozenArxiv(workspacePaper.arxivId)!;
     let updateProposal: unknown = null;
-    try { updateProposal = store.proposePaperUpdate(paper, (await options.paperSource.resolve(paper.arxivId)).latestVersion); }
+    try { updateProposal = store.proposePaperUpdate(paper, (await options.paperSource.resolve(workspacePaper.arxivId)).latestVersion); }
     catch { /* Update checks never make a readable workspace unavailable. */ }
     return { ...(workspace as object), updateProposal };
   });
@@ -167,7 +248,13 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     if (request.body?.action !== "accept") return reply.code(400).send({ code: "decision-action-invalid" });
     const key = request.headers["idempotency-key"];
     if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    if (!options.codexRunner && store.isDirectVersionProposal(request.params.id)) {
+      return reply.code(503).send({ code: "import-runner-unavailable" });
+    }
     const result = store.decideProposal(request.params.id, key);
+    if (result.execution) {
+      startImport(result.execution);
+    }
     return reply.code(result.status).send(result.body);
   });
   app.post<{ Params: { id: string } }>("/api/proposals/:id/open-source", async (request, reply) => {

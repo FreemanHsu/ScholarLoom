@@ -8,6 +8,8 @@ import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
 
 import type { ResolvedPaper } from "../app.js";
+import type { PreparedDirectPdfImport } from "../adapters/direct-pdf.js";
+import type { DownloadedPdf } from "../adapters/safe-pdf-downloader.js";
 import { migrate } from "./migrations.js";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { RepositoryAdapter } from "../adapters/git-repository.js";
@@ -18,9 +20,15 @@ const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resol
 
 export type StoredPaper = {
   id: string;
-  arxivId: string;
+  arxivId?: string;
+  versionId: string;
   version: number;
+  versionLabel: string;
+  sourceType: "arxiv" | "direct-pdf";
+  sourceUrl: string;
   title: string;
+  authors: string[];
+  year: number;
   updatedAt?: string;
   processing?: { state: ImportJobState; progress: number; needsAttention: boolean; error: ImportJobError | null } | null;
   summaryStatus?: "ready" | "processing" | "failed";
@@ -48,7 +56,7 @@ type ImportStatus = {
 };
 
 type ImportJobHandle = { id: string; attempt: number; state: ImportJobState };
-type ImportExecution = { paper: StoredPaper; arxivId: string; version: number; importRequest: StoredImportRequest; job: ImportJobHandle };
+type ImportExecution = { paper: StoredPaper; arxivId?: string; version: number; importRequest: StoredImportRequest; job: ImportJobHandle };
 type RetryImportResult = { ok: true; execution: ImportExecution; replayed: boolean } |
   { ok: false; code: "job-not-found" | "job-not-retryable" | "job-already-active" | "idempotency-key-conflict" };
 
@@ -108,7 +116,7 @@ export class ImportStore {
       chmodSync(absolutePdf, 0o400);
     }
     const artifactId = `artifact:pdf:${hash}`;
-    const versionId = `paper-version:${input.paper.id}:arxiv:v${input.paper.version}`;
+    const versionId = input.paper.versionId;
     this.#database.prepare(`INSERT INTO artifacts(id,artifact_type,content_hash,storage_ref,media_type,byte_size,created_by_kind,retention_class,created_at)
       VALUES (?,'paper-pdf',?,?,'application/pdf',?,'external-source','irreplaceable',?) ON CONFLICT(artifact_type,content_hash) DO NOTHING`)
       .run(artifactId, hash, storageRef, bytes.byteLength, now);
@@ -196,7 +204,8 @@ export class ImportStore {
     });
     const structured = { ...result, claims };
     const slug = input.paper.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "paper";
-    const relativePath = join("library", "papers", slug, `summary-v${input.paper.version}-r1.md`);
+    const summaryVersion = input.paper.sourceType === "arxiv" ? `v${input.paper.version}` : `pdf-${input.paper.versionLabel.replace(/^sha256:/, "").slice(0, 12)}`;
+    const relativePath = join("library", "papers", slug, `summary-${summaryVersion}-r1.md`);
     const targetPath = join(this.#knowledgeRoot, relativePath);
     const skillHash = createHash("sha256").update(readFileSync(join(process.cwd(), "skills/paper-reading/SKILL.md"))).digest("hex");
     const markdown = renderSummary({ summaryId, paper: input.paper, versionId, extractionId, agentRunId, skillHash, result: structured, date: now.slice(0, 10) });
@@ -293,6 +302,11 @@ export class ImportStore {
       this.#maybeFail("metadata-committed");
     }
     if (phase === "metadata-committed" || phase === "indexed") {
+      const currentVersion = (this.#database.prepare("SELECT current_version_id FROM papers WHERE id=?").get(payload.paperId) as
+        { current_version_id: string }).current_version_id;
+      const acceptedCandidate = this.#database.prepare(`SELECT 1 FROM proposals WHERE paper_id=? AND proposal_type='paper-version-update'
+        AND review_status='accepted' AND json_extract(payload_json,'$.candidateVersionId')=? LIMIT 1`).get(payload.paperId, payload.versionId);
+      const activateVersion = currentVersion === payload.versionId || Boolean(acceptedCandidate);
       this.#database.transaction(() => {
         this.#database.prepare(`INSERT INTO curated_search_documents(id,source_type,source_id,title,body,updated_at)
           VALUES (?,'summary',?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET title=excluded.title,body=excluded.body,updated_at=excluded.updated_at`)
@@ -302,8 +316,10 @@ export class ImportStore {
           .run(payload.now, payload.summaryId);
         this.#database.prepare("UPDATE knowledge_write_requests SET phase='complete',updated_at=? WHERE id=?").run(new Date().toISOString(), writeId);
         this.#database.prepare("UPDATE paper_versions SET processing_status='available',updated_at=? WHERE id=?").run(payload.now, payload.versionId);
+        if (activateVersion) this.#database.prepare("UPDATE papers SET current_version_id=?,updated_at=? WHERE id=?")
+          .run(payload.versionId, payload.now, payload.paperId);
       })();
-      this.#writePaperManifest(payload.paperId, payload.paperTitle, payload.versionId, payload.summaryId, payload.now);
+      if (activateVersion) this.#writePaperManifest(payload.paperId, payload.paperTitle, payload.versionId, payload.summaryId, payload.now);
     }
   }
 
@@ -311,8 +327,12 @@ export class ImportStore {
     const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "paper";
     const relativePath = join("library", "papers", slug, "paper.md");
     const target = join(this.#knowledgeRoot, relativePath);
-    const metadata = this.getResolvedMetadata(paperId)!;
-    const markdown = `---\nid: "${paperId}"\ntype: paper\ntitle: "${title}"\nauthors: ${JSON.stringify(metadata.authors)}\nyear: ${metadata.year}\nvenue: null\nexternal_identities:\n  arxiv: "${metadata.arxivId}"\n  doi: null\nacquisition_status: ingested\norigin: manual-import\ncurrent_version_id: "${versionId}"\ncurrent_summary_revision_id: "${summaryId}"\npaper_code_links: []\nread_status: read\nstatus: active\ntopics: []\nconcepts: []\ntags: []\ncreated: ${now.slice(0, 10)}\nupdated: ${now.slice(0, 10)}\n---\n\n# ${title}\n\n## Current reading\n\n- Current Paper Version: ${versionId}\n- Active Paper Summary: [[${relativePath.replace(/\/paper\.md$/, "")}/summary-${versionId.match(/:v(\d+)$/)?.[1] ? `v${versionId.match(/:v(\d+)$/)![1]}-r1` : "r1"}]]\n\n## Confirmed Takeaways\n\n| Takeaway | Active revision | Evidence | Status |\n|---|---|---|---|\n`;
+    const identity = this.#database.prepare(`SELECT identity_type,normalized_value,metadata_json FROM paper_external_identities
+      WHERE paper_id=? ORDER BY CASE identity_type WHEN 'arxiv' THEN 0 ELSE 1 END,created_at LIMIT 1`).get(paperId) as
+      { identity_type: string; normalized_value: string; metadata_json: string };
+    const metadata = JSON.parse(identity.metadata_json) as { authors: string[]; year: number };
+    const summaryPath = this.#database.prepare("SELECT markdown_path FROM summary_revisions WHERE id=?").pluck().get(summaryId) as string;
+    const markdown = `---\nid: "${paperId}"\ntype: paper\ntitle: "${title}"\nauthors: ${JSON.stringify(metadata.authors)}\nyear: ${metadata.year}\nvenue: null\nexternal_identities:\n  ${identity.identity_type}: "${identity.normalized_value}"\nacquisition_status: ingested\norigin: manual-import\ncurrent_version_id: "${versionId}"\ncurrent_summary_revision_id: "${summaryId}"\npaper_code_links: []\nread_status: read\nstatus: active\ntopics: []\nconcepts: []\ntags: []\ncreated: ${now.slice(0, 10)}\nupdated: ${now.slice(0, 10)}\n---\n\n# ${title}\n\n## Current reading\n\n- Current Paper Version: ${versionId}\n- Active Paper Summary: [[${summaryPath.replace(/\.md$/, "")}]]\n\n## Confirmed Takeaways\n\n| Takeaway | Active revision | Evidence | Status |\n|---|---|---|---|\n`;
     const hash = createHash("sha256").update(markdown).digest("hex");
     const writeId = `knowledge-write:paper-manifest:${paperId}`;
     this.#database.prepare(`INSERT INTO knowledge_write_requests(id,request_type,target_path,staged_path,result_hash,phase,created_at,updated_at,payload_json)
@@ -361,7 +381,7 @@ export class ImportStore {
   getPaperWorkspace(id: string): unknown | null {
     const paper = this.listPapers().find((candidate) => candidate.id === id);
     if (!paper) return null;
-    const versionId = `paper-version:${paper.id}:arxiv:v${paper.version}`;
+    const versionId = paper.versionId;
     const extraction = this.#database.prepare("SELECT id,page_count FROM extraction_runs WHERE paper_version_id=? AND status='succeeded'").get(versionId) as
       { id: string; page_count: number } | undefined;
     const summary = this.#database.prepare(`SELECT id,status,read_status,markdown_path,structured_json FROM summary_revisions
@@ -527,16 +547,44 @@ export class ImportStore {
     return { message: { id: assistantMessageId, role: "assistant", content: output.answer, citations }, proposals };
   }
 
-  decideProposal(proposalId: string, idempotencyKey: string): { status: number; body: unknown } {
+  decideProposal(proposalId: string, idempotencyKey: string): { status: number; body: unknown; execution?: ImportExecution } {
     const existing = this.#database.prepare("SELECT result_json FROM review_decisions WHERE idempotency_key=?").get(idempotencyKey) as
       { result_json: string } | undefined;
     if (existing) return { status: 200, body: JSON.parse(existing.result_json) as unknown };
-    const proposal = this.#database.prepare("SELECT paper_id,payload_json,review_status,one_click_eligible FROM proposals WHERE id=?").get(proposalId) as
-      { paper_id: string; payload_json: string; review_status: string; one_click_eligible: number } | undefined;
+    const proposal = this.#database.prepare("SELECT proposal_type,paper_id,payload_json,review_status,one_click_eligible FROM proposals WHERE id=?").get(proposalId) as
+      { proposal_type: string; paper_id: string; payload_json: string; review_status: string; one_click_eligible: number } | undefined;
     if (!proposal) return { status: 404, body: { code: "proposal-not-found" } };
     if (proposal.review_status !== "pending") return { status: 409, body: { code: "proposal-already-decided" } };
     const opened = this.#database.prepare("SELECT 1 FROM source_open_events WHERE proposal_id=? LIMIT 1").get(proposalId);
     if (!proposal.one_click_eligible && !opened) return { status: 409, body: { code: "source-verification-required" } };
+    if (proposal.proposal_type === "paper-version-update") {
+      const payload = JSON.parse(proposal.payload_json) as { candidateVersionId?: string };
+      if (!payload.candidateVersionId) return { status: 409, body: { code: "paper-version-candidate-missing" } };
+      const candidate = this.#database.prepare(`SELECT v.id,v.paper_id,v.source_version,v.source_url,j.id job_id,j.import_request_id,j.attempt
+        FROM paper_versions v JOIN import_requests i ON json_extract(i.frozen_input_json,'$.versionId')=v.id
+        JOIN job_runs j ON j.import_request_id=i.id AND j.job_type='paper-import'
+        WHERE v.id=? AND v.paper_id=? ORDER BY j.queued_at DESC LIMIT 1`).get(payload.candidateVersionId, proposal.paper_id) as
+        { id: string; paper_id: string; source_version: string; source_url: string; job_id: string; import_request_id: string; attempt: number } | undefined;
+      if (!candidate) return { status: 409, body: { code: "paper-version-candidate-missing" } };
+      const now = this.#now().toISOString();
+      const decisionId = `review-decision:${randomUUID()}`;
+      const body = { reviewDecision: { id: decisionId, action: "accept" }, paperVersion: { id: candidate.id, sourceVersion: candidate.source_version } };
+      this.#database.transaction(() => {
+        this.#database.prepare("UPDATE paper_versions SET processing_status='processing',accepted_at=?,updated_at=? WHERE id=?").run(now, now, candidate.id);
+        this.#database.prepare("UPDATE job_runs SET state='running',progress=0.1,error_json=NULL,completed_at=NULL,heartbeat_at=? WHERE id=?").run(now, candidate.job_id);
+        this.#database.prepare("UPDATE proposals SET review_status='accepted',decided_at=? WHERE id=?").run(now, proposalId);
+        this.#database.prepare("INSERT INTO review_decisions(id,proposal_id,action,idempotency_key,result_json,created_at) VALUES (?,?,'accept',?,?,?)")
+          .run(decisionId, proposalId, idempotencyKey, JSON.stringify(body), now);
+      })();
+      const currentPaper = this.listPapers().find((item) => item.id === proposal.paper_id)!;
+      const paper: StoredPaper = { ...currentPaper, version: 1, versionId: candidate.id,
+        versionLabel: candidate.source_version, sourceType: "direct-pdf", sourceUrl: candidate.source_url };
+      this.#event(candidate.import_request_id, "job-progress", { jobId: candidate.job_id, jobType: "paper-import", state: "running", progress: 0.1,
+        attempt: candidate.attempt });
+      return { status: 202, body, execution: { paper, version: 1,
+        importRequest: { id: candidate.import_request_id, paperId: proposal.paper_id, status: "resolved" },
+        job: { id: candidate.job_id, attempt: candidate.attempt, state: "running" } } };
+    }
     const payload = JSON.parse(proposal.payload_json) as { claim: string; sourceHandles: string[] };
     const now = new Date().toISOString();
     const slug = payload.claim.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-").slice(0, 48).replace(/-$/, "") || "takeaway";
@@ -563,6 +611,13 @@ export class ImportStore {
     const writePhase = (this.#database.prepare("SELECT phase FROM knowledge_write_requests WHERE id=?").get(writeId) as { phase: string }).phase;
     if (writePhase !== "complete") return { status: 409, body: { code: "knowledge-write-conflicted" } };
     return { status: 201, body };
+  }
+
+  isDirectVersionProposal(proposalId: string): boolean {
+    const row = this.#database.prepare("SELECT proposal_type,payload_json FROM proposals WHERE id=?").get(proposalId) as
+      { proposal_type: string; payload_json: string } | undefined;
+    return Boolean(row?.proposal_type === "paper-version-update" &&
+      (JSON.parse(row.payload_json) as { sourceType?: string }).sourceType === "direct-pdf");
   }
 
   #advanceTakeawayWrite(writeId: string): void {
@@ -616,7 +671,15 @@ export class ImportStore {
     const row = this.#database.prepare(`SELECT p.payload_json,pa.current_version_id FROM proposals p JOIN papers pa ON pa.id=p.paper_id
       WHERE p.id=? AND p.review_status='pending'`).get(proposalId) as { payload_json: string; current_version_id: string } | undefined;
     if (!row) return null;
-    const payload = JSON.parse(row.payload_json) as { sourceHandles?: string[] };
+    const payload = JSON.parse(row.payload_json) as { sourceHandles?: string[]; candidateVersionId?: string };
+    if (payload.candidateVersionId) {
+      const candidate = this.#database.prepare("SELECT id FROM paper_versions WHERE id=?").get(payload.candidateVersionId);
+      if (!candidate) return null;
+      const token = randomUUID();
+      this.#database.prepare("INSERT INTO source_open_tokens(token,proposal_id,paper_version_id,source_handle,issued_at) VALUES (?,?,?,?,?)")
+        .run(token, proposalId, payload.candidateVersionId, "pdf-page:1", new Date().toISOString());
+      return { pdfUrl: `/api/paper-versions/${encodeURIComponent(payload.candidateVersionId)}/pdf?openToken=${token}#page=1`, page: 1 };
+    }
     const handle = payload.sourceHandles?.find((candidate) => candidate.startsWith("pdf-page:"));
     if (!handle) return null;
     const token = randomUUID();
@@ -780,7 +843,7 @@ export class ImportStore {
 
   #knowledgePath(relativePath: string): string { return join(this.#knowledgeRoot, relativePath); }
 
-  importPaper(input: { originalInput: string; resolved: ResolvedPaper; version: number; processing?: boolean }): {
+  importPaper(input: { originalInput: string; resolved: ResolvedPaper; version: number; processing?: boolean; importRequestId?: string }): {
     paper: StoredPaper; importRequest: StoredImportRequest; job: ImportJobHandle;
   } {
     const now = new Date().toISOString();
@@ -805,11 +868,12 @@ export class ImportStore {
           now, now, now, now);
       this.#database.prepare("UPDATE papers SET current_version_id=?,updated_at=? WHERE id=?").run(versionId, now, paperId);
 
-      const importId = `import:${randomUUID()}`;
-      this.#database.prepare(`INSERT INTO import_requests
+      const importId = input.importRequestId ?? `import:${randomUUID()}`;
+      if (input.importRequestId) this.#database.prepare(`UPDATE import_requests SET normalized_input=?,resolution_status='resolved',
+        resolved_paper_id=?,error_code=NULL,error_detail=NULL,completed_at=? WHERE id=?`).run(input.resolved.arxivId, paperId, now, importId);
+      else this.#database.prepare(`INSERT INTO import_requests
         (id,original_input,normalized_input,submitted_at,resolution_status,resolved_paper_id,completed_at)
-        VALUES (?,?,?,?, 'resolved',?,?)`)
-        .run(importId, input.originalInput, input.resolved.arxivId, now, paperId, now);
+        VALUES (?,?,?,?, 'resolved',?,?)`).run(importId, input.originalInput, input.resolved.arxivId, now, paperId, now);
       const jobId = `job:${randomUUID()}`;
       this.#database.prepare(`INSERT INTO job_runs
         (id,job_type,import_request_id,paper_id,state,progress,idempotency_key,input_json,output_json,queued_at,started_at,completed_at,heartbeat_at)
@@ -820,10 +884,89 @@ export class ImportStore {
       this.#event(importId, "job-progress", { jobId, jobType: "paper-import", state: input.processing ? "running" : "succeeded", progress: input.processing ? 0.1 : 1 });
 
       return {
-        paper: { id: paperId, arxivId: input.resolved.arxivId, title: input.resolved.title, version: input.version },
+        paper: { id: paperId, arxivId: input.resolved.arxivId, title: input.resolved.title,
+          authors: input.resolved.authors, year: input.resolved.year, version: input.version,
+          versionId, versionLabel: `v${input.version}`, sourceType: "arxiv", sourceUrl: `https://arxiv.org/abs/${input.resolved.arxivId}v${input.version}` } as StoredPaper,
         importRequest: { id: importId, paperId, status: "resolved" as const },
         job: { id: jobId, attempt: 1, state: "running" as const },
       };
+    })();
+  }
+
+  importDirectPdf(input: { originalInput: string; prepared: PreparedDirectPdfImport; processing?: boolean; importRequestId?: string; sourceJobId?: string }): {
+    paper: StoredPaper; importRequest: StoredImportRequest; job: ImportJobHandle; versionProposal: boolean;
+  } {
+    const now = this.#now().toISOString();
+    const existingIdentity = this.#database.prepare(`SELECT i.paper_id,p.current_version_id FROM paper_external_identities i
+      JOIN papers p ON p.id=i.paper_id WHERE i.identity_type='direct-pdf-url' AND i.normalized_value=?`).get(input.prepared.sourceIdentity) as
+      { paper_id: string; current_version_id: string } | undefined;
+    const identityContentVersion = existingIdentity ? this.#database.prepare(`SELECT id FROM paper_versions
+      WHERE paper_id=? AND source_content_hash=? ORDER BY created_at LIMIT 1`).get(existingIdentity.paper_id, input.prepared.contentHash) as
+      { id: string } | undefined : undefined;
+    const contentPaper = this.#database.prepare(`SELECT paper_id,id FROM paper_versions WHERE source_content_hash=?
+      ORDER BY created_at LIMIT 1`).get(input.prepared.contentHash) as { paper_id: string; id: string } | undefined;
+    const paperId = existingIdentity?.paper_id ?? contentPaper?.paper_id ?? `paper:pdf:${input.prepared.contentHash.slice(0, 24)}`;
+    const versionId = identityContentVersion?.id ?? (!existingIdentity ? contentPaper?.id : undefined) ??
+      `paper-version:${paperId}:direct-pdf:sha256:${input.prepared.contentHash}`;
+    const changedAtSameUrl = Boolean(existingIdentity && !identityContentVersion && existingIdentity.current_version_id !== versionId);
+    const artifactId = `artifact:pdf:${input.prepared.contentHash}`;
+    const storageRef = join("originals", "papers", input.prepared.contentHash.slice(0, 2), `${input.prepared.contentHash}.pdf`);
+    const absolutePdf = join(this.#artifactRoot, storageRef);
+    mkdirSync(dirname(absolutePdf), { recursive: true });
+    if (!this.#fileMatches(absolutePdf, input.prepared.contentHash, input.prepared.byteSize)) {
+      const staged = `${absolutePdf}.staged-${randomUUID()}`;
+      writeFileSync(staged, input.prepared.bytes);
+      renameSync(staged, absolutePdf);
+      chmodSync(absolutePdf, 0o400);
+    }
+    return this.#database.transaction(() => {
+      this.#database.prepare(`INSERT INTO artifacts(id,artifact_type,content_hash,storage_ref,media_type,byte_size,created_by_kind,retention_class,created_at)
+        VALUES (?,'paper-pdf',?,?,?,?,'external-source','irreplaceable',?) ON CONFLICT(artifact_type,content_hash) DO NOTHING`)
+        .run(artifactId, input.prepared.contentHash, storageRef, input.prepared.mediaType, input.prepared.byteSize, now);
+      this.#database.prepare(`INSERT INTO papers(id,title,acquisition_status,origin,lifecycle_status,current_version_id,created_at,updated_at)
+        VALUES (?,?,'ingested','manual-import','active',?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at`)
+        .run(paperId, input.prepared.metadata.title, changedAtSameUrl ? existingIdentity!.current_version_id : versionId, now, now);
+      this.#database.prepare(`INSERT INTO paper_external_identities(id,paper_id,identity_type,normalized_value,canonical_url,metadata_json,created_at)
+        VALUES (?,?,'direct-pdf-url',?,?,?,?) ON CONFLICT(identity_type,normalized_value) DO UPDATE SET canonical_url=excluded.canonical_url`)
+        .run(`identity:direct-pdf:${createHash("sha256").update(input.prepared.sourceIdentity).digest("hex")}`, paperId,
+          input.prepared.sourceIdentity, input.prepared.canonicalUrl,
+          JSON.stringify({ authors: input.prepared.metadata.authors, year: input.prepared.metadata.year, actualMediaType: input.prepared.mediaType }), now);
+      this.#database.prepare(`INSERT INTO paper_versions(id,paper_id,source_type,source_version,source_url,resolved_at,processing_status,accepted_at,created_at,updated_at,source_content_hash,source_media_type,pdf_artifact_id)
+        VALUES (?,?,'direct-pdf',?,?,?, ?,?,?,?, ?,?,?) ON CONFLICT(id) DO NOTHING`)
+        .run(versionId, paperId, input.prepared.sourceVersion, input.prepared.canonicalUrl, now,
+          changedAtSameUrl ? "detected" : "accepted", changedAtSameUrl ? null : now, now, now,
+          input.prepared.contentHash, input.prepared.mediaType, artifactId);
+      if (changedAtSameUrl) this.#database.prepare(`INSERT OR IGNORE INTO proposals(id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
+        VALUES (?,'paper-version-update',?,?,'pending',0,?)`).run(`proposal:direct-pdf-version:${paperId}:${input.prepared.contentHash}`,
+          paperId, JSON.stringify({ sourceType: "direct-pdf", sourceIdentity: input.prepared.sourceIdentity,
+            currentVersion: existingIdentity!.current_version_id, candidateVersionId: versionId,
+            latestVersion: input.prepared.sourceVersion, contentHash: input.prepared.contentHash }), now);
+      const importId = input.importRequestId ?? `import:${randomUUID()}`;
+      const frozenInput = JSON.stringify({ canonicalUrl: input.prepared.canonicalUrl, contentHash: input.prepared.contentHash, versionId, artifactId });
+      if (input.importRequestId) this.#database.prepare(`UPDATE import_requests SET normalized_input=?,resolution_status='resolved',
+        resolved_paper_id=?,error_code=NULL,error_detail=NULL,completed_at=?,reference_kind='direct-pdf',frozen_input_json=? WHERE id=?`)
+        .run(input.prepared.sourceIdentity, paperId, now, frozenInput, importId);
+      else this.#database.prepare(`INSERT INTO import_requests(id,original_input,normalized_input,submitted_at,resolution_status,resolved_paper_id,completed_at,reference_kind,frozen_input_json)
+        VALUES (?,?,?,?,'resolved',?,?, 'direct-pdf',?)`).run(importId, input.originalInput, input.prepared.sourceIdentity, now, paperId, now, frozenInput);
+      const jobId = input.sourceJobId ?? `job:${randomUUID()}`;
+      const runProcessing = Boolean(input.processing && !changedAtSameUrl && !identityContentVersion && !contentPaper);
+      const jobInput = JSON.stringify({ versionId, sourceType: "direct-pdf", sourceIdentity: input.prepared.sourceIdentity,
+        canonicalUrl: input.prepared.canonicalUrl, contentHash: input.prepared.contentHash });
+      if (input.sourceJobId) this.#database.prepare(`UPDATE job_runs SET paper_id=?,state=?,progress=?,input_json=?,error_json=NULL,
+        completed_at=?,heartbeat_at=? WHERE id=?`).run(paperId, runProcessing ? "running" : "succeeded", runProcessing ? 0.1 : 1,
+          jobInput, runProcessing ? null : now, now, jobId);
+      else this.#database.prepare(`INSERT INTO job_runs(id,job_type,import_request_id,paper_id,state,progress,idempotency_key,input_json,output_json,queued_at,started_at,completed_at,heartbeat_at)
+        VALUES (?,'paper-import',?,?,?, ?,?,?,'{}',?,?,?,?)`).run(jobId, importId, paperId,
+          runProcessing ? "running" : "succeeded", runProcessing ? 0.1 : 1, `paper-import:${importId}`, jobInput,
+          now, now, runProcessing ? null : now, now);
+      this.#event(importId, "job-progress", { jobId, jobType: "paper-import", state: runProcessing ? "running" : "succeeded", progress: runProcessing ? 0.1 : 1 });
+      const jobAttempt = input.sourceJobId ? (this.#database.prepare("SELECT attempt FROM job_runs WHERE id=?").get(jobId) as { attempt: number }).attempt : 1;
+      return { paper: { id: paperId, title: input.prepared.metadata.title, authors: input.prepared.metadata.authors,
+        year: input.prepared.metadata.year, version: 1, versionId,
+        versionLabel: input.prepared.sourceVersion, sourceType: "direct-pdf", sourceUrl: input.prepared.canonicalUrl } as StoredPaper,
+        importRequest: { id: importId, paperId, status: "resolved" as const }, job: { id: jobId, attempt: jobAttempt,
+          state: (runProcessing ? "running" : "succeeded") as ImportJobState },
+        versionProposal: changedAtSameUrl };
     })();
   }
 
@@ -836,6 +979,50 @@ export class ImportStore {
       (id,original_input,normalized_input,submitted_at,resolution_status,error_code,error_detail,completed_at)
       VALUES (?,?,?,?,'failed',?,?,?)`)
       .run(id, input.originalInput, input.normalizedInput, now, input.code, input.detail, now);
+    return { id, status: "failed" };
+  }
+
+  beginImport(input: { originalInput: string; normalizedInput: string; referenceKind: "arxiv" | "direct-pdf" }): { id: string; status: "pending" } {
+    const id = `import:${randomUUID()}`;
+    const now = this.#now().toISOString();
+    this.#database.prepare(`INSERT INTO import_requests(id,original_input,normalized_input,submitted_at,resolution_status,reference_kind)
+      VALUES (?,?,?,?,'pending',?)`).run(id, input.originalInput, input.normalizedInput, now, input.referenceKind);
+    return { id, status: "pending" };
+  }
+
+  beginDirectSourceJob(importRequestId: string, sourceIdentity: string): ImportJobHandle {
+    const id = `job:${randomUUID()}`;
+    const now = this.#now().toISOString();
+    this.#database.prepare(`INSERT INTO job_runs(id,job_type,import_request_id,state,progress,idempotency_key,input_json,output_json,queued_at,started_at,heartbeat_at)
+      VALUES (?,'paper-import',?,'running',0.05,?,?,'{}',?,?,?)`).run(id, importRequestId, `paper-import:${importRequestId}`,
+        JSON.stringify({ sourceType: "direct-pdf", sourceIdentity }), now, now, now);
+    return { id, attempt: 1, state: "running" };
+  }
+
+  failImport(id: string, input: { code: string; detail: string; downloaded?: DownloadedPdf; jobId?: string }): { id: string; status: "failed" } {
+    const now = this.#now().toISOString();
+    let frozenInput: string | null = null;
+    if (input.downloaded) {
+      const artifactId = `artifact:pdf:${input.downloaded.contentHash}`;
+      const storageRef = join("originals", "papers", input.downloaded.contentHash.slice(0, 2), `${input.downloaded.contentHash}.pdf`);
+      const absolutePdf = join(this.#artifactRoot, storageRef);
+      mkdirSync(dirname(absolutePdf), { recursive: true });
+      if (!this.#fileMatches(absolutePdf, input.downloaded.contentHash, input.downloaded.byteSize)) {
+        const staged = `${absolutePdf}.staged-${randomUUID()}`;
+        writeFileSync(staged, input.downloaded.bytes);
+        renameSync(staged, absolutePdf);
+        chmodSync(absolutePdf, 0o400);
+      }
+      this.#database.prepare(`INSERT INTO artifacts(id,artifact_type,content_hash,storage_ref,media_type,byte_size,created_by_kind,retention_class,created_at)
+        VALUES (?,'paper-pdf',?,?,?,?,'external-source','irreplaceable',?) ON CONFLICT(artifact_type,content_hash) DO NOTHING`)
+        .run(artifactId, input.downloaded.contentHash, storageRef, input.downloaded.mediaType, input.downloaded.byteSize, now);
+      frozenInput = JSON.stringify({ canonicalUrl: input.downloaded.canonicalUrl, contentHash: input.downloaded.contentHash, artifactId });
+    }
+    this.#database.prepare(`UPDATE import_requests SET resolution_status='failed',error_code=?,error_detail=?,completed_at=?,
+      frozen_input_json=COALESCE(?,frozen_input_json) WHERE id=?`).run(input.code, input.detail, now, frozenInput, id);
+    if (input.jobId) this.#database.prepare(`UPDATE job_runs SET state='failed',error_json=?,completed_at=?,heartbeat_at=? WHERE id=?`)
+      .run(JSON.stringify({ code: input.code, message: input.detail, stage: input.code === "paper-metadata-incomplete" ? "pdf-extraction" : "pdf-download",
+        retryable: true, action: "retry" }), now, now, input.jobId);
     return { id, status: "failed" };
   }
 
@@ -861,26 +1048,29 @@ export class ImportStore {
 
   retryImportJob(jobId: string, idempotencyKey: string): RetryImportResult {
     const row = this.#database.prepare(`SELECT j.state,j.import_request_id,j.paper_id,j.input_json,i.resolution_status,p.title,
-      x.normalized_value arxiv_id,p.current_version_id
+      (SELECT normalized_value FROM paper_external_identities WHERE paper_id=p.id AND identity_type='arxiv' LIMIT 1) arxiv_id,p.current_version_id
       FROM job_runs j JOIN import_requests i ON i.id=j.import_request_id JOIN papers p ON p.id=j.paper_id
-      JOIN paper_external_identities x ON x.paper_id=p.id AND x.identity_type='arxiv'
       WHERE j.id=? AND j.job_type='paper-import'`).get(jobId) as
       { state: string; import_request_id: string; paper_id: string; input_json: string; resolution_status: string; title: string;
-        arxiv_id: string; current_version_id: string } | undefined;
+        arxiv_id: string | null; current_version_id: string } | undefined;
     if (!row) return { ok: false, code: "job-not-found" };
-    const input = JSON.parse(row.input_json) as { versionId?: string; arxivId?: string; version?: number };
+    const input = JSON.parse(row.input_json) as { versionId?: string; arxivId?: string; version?: number; sourceType?: string; canonicalUrl?: string };
     const versionId = input.versionId ?? row.current_version_id;
-    const versionRow = this.#database.prepare("SELECT source_version FROM paper_versions WHERE id=? AND paper_id=?").get(versionId, row.paper_id) as
-      { source_version: string } | undefined;
+    const versionRow = this.#database.prepare("SELECT source_version,source_type,source_url FROM paper_versions WHERE id=? AND paper_id=?").get(versionId, row.paper_id) as
+      { source_version: string; source_type: "arxiv" | "direct-pdf"; source_url: string } | undefined;
     if (!versionRow) return { ok: false, code: "job-not-retryable" };
-    const version = input.version ?? Number.parseInt(versionRow.source_version.replace(/^v/, ""), 10);
-    const arxivId = input.arxivId ?? row.arxiv_id;
+    const version = versionRow.source_type === "arxiv" ? input.version ?? Number.parseInt(versionRow.source_version.replace(/^v/, ""), 10) : 1;
+    const arxivId = input.arxivId ?? row.arxiv_id ?? undefined;
+    const storedPaper = this.listPapers().find((candidate) => candidate.id === row.paper_id)!;
+    const paper: StoredPaper = { id: row.paper_id, title: row.title, authors: storedPaper.authors, year: storedPaper.year,
+      version, versionId, versionLabel: versionRow.source_version,
+      sourceType: versionRow.source_type, sourceUrl: versionRow.source_url, ...(arxivId ? { arxivId } : {}) };
     const replay = this.#database.prepare(`SELECT id,attempt,state,import_request_id FROM job_runs
       WHERE idempotency_key=?`).get(idempotencyKey) as
       { id: string; attempt: number; state: string; import_request_id: string | null } | undefined;
     if (replay && replay.import_request_id !== row.import_request_id) return { ok: false, code: "idempotency-key-conflict" };
     if (replay) return { ok: true, replayed: true, execution: {
-      paper: { id: row.paper_id, arxivId, title: row.title, version }, arxivId, version,
+      paper, ...(arxivId ? { arxivId } : {}), version,
       importRequest: { id: row.import_request_id, paperId: row.paper_id, status: "resolved" },
       job: { id: replay.id, attempt: replay.attempt, state: requireImportJobState(replay.state) },
     } };
@@ -896,14 +1086,69 @@ export class ImportStore {
       (id,job_type,import_request_id,paper_id,state,progress,attempt,idempotency_key,input_json,output_json,queued_at,started_at,heartbeat_at)
       VALUES (?,'paper-import',?,?,'running',0.1,?,?,?,'{}',?,?,?)`)
       .run(retryId, row.import_request_id, row.paper_id, attempt, idempotencyKey,
-        JSON.stringify({ versionId, arxivId, version }), now, now, now);
+        JSON.stringify({ ...input, versionId, ...(arxivId ? { arxivId } : {}), version }), now, now, now);
     this.#database.prepare("UPDATE paper_versions SET processing_status='processing',updated_at=? WHERE id=?").run(now, versionId);
     this.#event(row.import_request_id, "job-progress", { jobId: retryId, jobType: "paper-import", state: "running", progress: 0.1, attempt });
     return { ok: true, replayed: false, execution: {
-      paper: { id: row.paper_id, arxivId, title: row.title, version }, arxivId, version,
+      paper, ...(arxivId ? { arxivId } : {}), version,
       importRequest: { id: row.import_request_id, paperId: row.paper_id, status: "resolved" },
       job: { id: retryId, attempt, state: "running" },
     } };
+  }
+
+  isDirectPdfImportJob(jobId: string): boolean {
+    const row = this.#database.prepare("SELECT input_json FROM job_runs WHERE id=? AND job_type='paper-import'").get(jobId) as
+      { input_json: string } | undefined;
+    if (!row) return false;
+    return (JSON.parse(row.input_json) as { sourceType?: string }).sourceType === "direct-pdf";
+  }
+
+  isPrePaperDirectImportJob(jobId: string): boolean {
+    const row = this.#database.prepare("SELECT paper_id,input_json FROM job_runs WHERE id=? AND job_type='paper-import'").get(jobId) as
+      { paper_id: string | null; input_json: string } | undefined;
+    return Boolean(row && row.paper_id === null && (JSON.parse(row.input_json) as { sourceType?: string }).sourceType === "direct-pdf");
+  }
+
+  retryDirectSourceJob(jobId: string, idempotencyKey: string): { ok: true; replayed: boolean; job: ImportJobHandle;
+    importRequestId: string; originalInput: string; sourceIdentity: string; downloaded?: DownloadedPdf } |
+    { ok: false; code: "job-not-found" | "job-not-retryable" | "job-already-active" | "idempotency-key-conflict" } {
+    const row = this.#database.prepare(`SELECT j.state,j.import_request_id,j.attempt,i.original_input,i.normalized_input,i.frozen_input_json
+      FROM job_runs j JOIN import_requests i ON i.id=j.import_request_id WHERE j.id=? AND j.paper_id IS NULL`).get(jobId) as
+      { state: string; import_request_id: string; attempt: number; original_input: string; normalized_input: string;
+        frozen_input_json: string | null } | undefined;
+    if (!row) return { ok: false, code: "job-not-found" };
+    const replay = this.#database.prepare("SELECT id,attempt,state,import_request_id FROM job_runs WHERE idempotency_key=?").get(idempotencyKey) as
+      { id: string; attempt: number; state: string; import_request_id: string } | undefined;
+    if (replay && replay.import_request_id !== row.import_request_id) return { ok: false, code: "idempotency-key-conflict" };
+    const downloaded = this.#frozenDownload(row.frozen_input_json);
+    if (replay) return { ok: true, replayed: true, job: { id: replay.id, attempt: replay.attempt, state: requireImportJobState(replay.state) },
+      importRequestId: row.import_request_id, originalInput: row.original_input, sourceIdentity: row.normalized_input, ...(downloaded ? { downloaded } : {}) };
+    if (!["failed", "interrupted"].includes(row.state)) return { ok: false, code: row.state === "running" ? "job-already-active" : "job-not-retryable" };
+    const active = this.#database.prepare("SELECT 1 FROM job_runs WHERE import_request_id=? AND state IN ('queued','running') LIMIT 1").get(row.import_request_id);
+    if (active) return { ok: false, code: "job-already-active" };
+    const retryId = `job:${randomUUID()}`;
+    const attempt = (this.#database.prepare("SELECT COALESCE(MAX(attempt),0)+1 next FROM job_runs WHERE import_request_id=?").get(row.import_request_id) as
+      { next: number }).next;
+    const now = this.#now().toISOString();
+    this.#database.transaction(() => {
+      this.#database.prepare(`INSERT INTO job_runs(id,job_type,import_request_id,state,progress,attempt,idempotency_key,input_json,output_json,queued_at,started_at,heartbeat_at)
+        VALUES (?,'paper-import',?,'running',0.05,?,?,?,'{}',?,?,?)`).run(retryId, row.import_request_id, attempt, idempotencyKey,
+          JSON.stringify({ sourceType: "direct-pdf", sourceIdentity: row.normalized_input }), now, now, now);
+      this.#database.prepare(`UPDATE import_requests SET resolution_status='pending',error_code=NULL,error_detail=NULL,completed_at=NULL
+        WHERE id=?`).run(row.import_request_id);
+    })();
+    return { ok: true, replayed: false, job: { id: retryId, attempt, state: "running" }, importRequestId: row.import_request_id,
+      originalInput: row.original_input, sourceIdentity: row.normalized_input, ...(downloaded ? { downloaded } : {}) };
+  }
+
+  #frozenDownload(frozenInput: string | null): DownloadedPdf | undefined {
+    if (!frozenInput) return undefined;
+    const frozen = JSON.parse(frozenInput) as { canonicalUrl?: string; contentHash?: string; artifactId?: string };
+    if (!frozen.canonicalUrl || !frozen.contentHash || !frozen.artifactId || !this.#artifactIsValid(frozen.artifactId)) return undefined;
+    const artifact = this.#database.prepare("SELECT storage_ref,media_type,byte_size FROM artifacts WHERE id=?").get(frozen.artifactId) as
+      { storage_ref: string; media_type: string; byte_size: number };
+    return { bytes: readFileSync(join(this.#artifactRoot, artifact.storage_ref)), contentHash: frozen.contentHash,
+      byteSize: artifact.byte_size, canonicalUrl: frozen.canonicalUrl, mediaType: artifact.media_type };
   }
 
   getImport(id: string): ImportStatus | null {
@@ -931,7 +1176,13 @@ export class ImportStore {
   }
 
   listPapers(): StoredPaper[] {
-    return (this.#database.prepare(`SELECT p.id,p.title,p.updated_at,i.normalized_value,v.source_version,
+    return (this.#database.prepare(`SELECT p.id,p.title,p.updated_at,v.id version_id,v.source_type,
+      CASE WHEN v.source_type='direct-pdf' THEN COALESCE((SELECT normalized_value FROM paper_external_identities
+        WHERE paper_id=p.id AND identity_type='direct-pdf-url' ORDER BY created_at LIMIT 1),v.source_url) ELSE v.source_url END source_url,
+      v.source_version,
+      COALESCE((SELECT metadata_json FROM paper_external_identities WHERE paper_id=p.id AND identity_type='arxiv' LIMIT 1),
+        (SELECT metadata_json FROM paper_external_identities WHERE paper_id=p.id AND identity_type='direct-pdf-url' ORDER BY created_at LIMIT 1)) metadata_json,
+      (SELECT i.normalized_value FROM paper_external_identities i WHERE i.paper_id=p.id AND i.identity_type='arxiv' LIMIT 1) arxiv_id,
       (SELECT j.state FROM job_runs j WHERE j.paper_id=p.id AND j.job_type='paper-import'
         ORDER BY j.attempt DESC,j.queued_at DESC,j.id DESC LIMIT 1) job_state,
       (SELECT j.progress FROM job_runs j WHERE j.paper_id=p.id AND j.job_type='paper-import'
@@ -946,13 +1197,17 @@ export class ImportStore {
         ELSE 'not-linked' END code_status,
       (SELECT count(*) FROM proposals pr WHERE pr.paper_id=p.id AND pr.review_status='pending') pending_review_count
       FROM papers p
-      JOIN paper_external_identities i ON i.paper_id=p.id AND i.identity_type='arxiv'
       JOIN paper_versions v ON v.id=p.current_version_id ORDER BY p.updated_at DESC,p.id`).all() as
-      Array<{ id: string; title: string; updated_at: string; normalized_value: string; source_version: string;
+      Array<{ id: string; title: string; updated_at: string; version_id: string; source_type: "arxiv" | "direct-pdf";
+        source_url: string; source_version: string; arxiv_id: string | null; metadata_json: string;
         job_state: string | null; job_progress: number | null; job_error_json: string | null;
         summary_status: "ready" | "processing" | "failed";
         code_status: "ready" | "failed" | "not-linked"; pending_review_count: number }>).map((row) => ({
-        id: row.id, arxivId: row.normalized_value, title: row.title, version: Number.parseInt(row.source_version.slice(1), 10),
+        id: row.id, ...(row.arxiv_id ? { arxivId: row.arxiv_id } : {}), title: row.title,
+        authors: (JSON.parse(row.metadata_json) as { authors: string[] }).authors,
+        year: (JSON.parse(row.metadata_json) as { year: number }).year,
+        version: row.source_type === "arxiv" ? Number.parseInt(row.source_version.slice(1), 10) : 1,
+        versionId: row.version_id, versionLabel: row.source_version, sourceType: row.source_type, sourceUrl: row.source_url,
         updatedAt: row.updated_at,
         processing: row.job_state ? { state: requireImportJobState(row.job_state), progress: row.job_progress ?? 0,
           needsAttention: isRetryableImportJobState(row.job_state), error: parseStoredImportError(row.job_error_json) } : null,
@@ -968,7 +1223,7 @@ export class ImportStore {
 
   getResolvedMetadata(paperId: string): ResolvedPaper | null {
     const paper = this.listPapers().find((candidate) => candidate.id === paperId);
-    if (!paper) return null;
+    if (!paper?.arxivId) return null;
     const row = this.#database.prepare("SELECT metadata_json FROM paper_external_identities WHERE paper_id=? AND identity_type='arxiv'").get(paperId) as { metadata_json: string };
     const metadata = JSON.parse(row.metadata_json) as { authors: string[]; year: number };
     return { arxivId: paper.arxivId, latestVersion: paper.version, title: paper.title, authors: metadata.authors, year: metadata.year };

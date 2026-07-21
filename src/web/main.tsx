@@ -14,8 +14,13 @@ import "./styles.css";
 type Paper = {
   id: string;
   title: string;
-  arxivId: string;
+  authors: string[];
+  year: number;
+  arxivId?: string;
   version: number;
+  versionLabel: string;
+  sourceType: "arxiv" | "direct-pdf";
+  sourceUrl: string;
   updatedAt?: string;
   processing?: { state: ImportJobState; progress: number; needsAttention: boolean; error: ImportJobError | null } | null;
   summaryStatus?: "ready" | "processing" | "failed";
@@ -42,7 +47,8 @@ type ReviewProposal = {
   oneClickEligible: boolean;
   createdAt: string;
   archivedAt: string | null;
-  payload: { claim?: string; currentVersion?: number; latestVersion?: number; error?: string };
+  payload: { claim?: string; sourceType?: string; currentVersion?: number | string; latestVersion?: number | string;
+    candidateVersionId?: string; error?: string };
 };
 type EntryAnswer = {
   answer: string;
@@ -65,6 +71,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<ImportJobState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [failedSourceJobId, setFailedSourceJobId] = useState<string | null>(null);
   const [openedPdfSource, setOpenedPdfSource] = useState<OpenedPdfSource | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [question, setQuestion] = useState("");
@@ -220,10 +227,11 @@ function App() {
       const response = await fetch("/api/imports", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ arxivUrl: url }),
+        body: JSON.stringify({ reference: url }),
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.detail ?? body.code ?? "导入失败");
+      if (!response.ok) { setFailedSourceJobId(body.job?.id ?? null); throw new Error(body.detail ?? body.code ?? "导入失败"); }
+      setFailedSourceJobId(null);
       setImportOpen(false);
       navigate(paperHref(body.paper.id));
       await refreshPapers();
@@ -241,6 +249,20 @@ function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function retrySourceImport() {
+    if (!failedSourceJobId) return;
+    setBusy(true); setError(null);
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(failedSourceJobId)}/retry`, { method: "POST",
+        headers: { "idempotency-key": `web-source-retry-${failedSourceJobId}-${Date.now()}` } });
+      const body = await response.json();
+      if (!response.ok) { setFailedSourceJobId(body.job?.id ?? failedSourceJobId); throw new Error(body.detail ?? body.code ?? "重试失败"); }
+      setFailedSourceJobId(null); setImportOpen(false); navigate(paperHref(body.paper.id)); await refreshPapers();
+      void importMonitor.wait(body.importRequest.id, setProgress).then(() => refreshWorkspace(body.paper.id)).finally(() => setProgress(null));
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "重试失败"); }
+    finally { setBusy(false); }
   }
 
   async function retryImport() {
@@ -288,29 +310,32 @@ function App() {
       </nav>
       <div className="nav-actions">
         {(processingPapers.length > 0 || progress) && <span className="nav-status">处理中 · {Math.max(processingPapers.length, 1)}</span>}
-        <button onClick={() => setImportOpen((value) => !value)}>导入 Paper</button>
+        <button onClick={() => setImportOpen((value) => !value)}>导入论文</button>
       </div>
     </header>
 
     {importOpen && <form className="global-import" onSubmit={importPaper}>
-      <label htmlFor="global-arxiv">导入 arXiv Paper</label>
-      <div><input id="global-arxiv" value={url} onChange={(event) => setUrl(event.target.value)} />
+      <label htmlFor="global-paper-reference">arXiv 或 PDF 直链</label>
+      <div><input id="global-paper-reference" value={url} onChange={(event) => setUrl(event.target.value)}
+        placeholder="https://arxiv.org/abs/… 或 https://example.org/paper.pdf" />
         <button disabled={busy}>{busy ? "正在识别…" : "导入并阅读"}</button></div>
       {error && <p className="error">{error}</p>}
+      {failedSourceJobId && <button type="button" disabled={busy} onClick={() => void retrySourceImport()}>重试此来源</button>}
     </form>}
 
     {route.name === "home" && <ResearchHome papers={papers} papersError={papersError} processingPapers={processingPapers}
       attentionPapers={attentionPapers} pendingReviews={pendingReviews} entryQuestion={entryQuestion} entryAnswer={entryAnswer}
       onEntryQuestion={setEntryQuestion} onAskEntry={askEntry} onNavigate={navigate} onImport={() => setImportOpen(true)} />}
     {route.name === "papers" && <PaperLibrary papers={papers} error={papersError} onNavigate={navigate} onImport={() => setImportOpen(true)} />}
-    {route.name === "reviews" && <ReviewCenter proposals={reviewProposals} error={reviewsError} onNavigate={navigate} />}
+    {route.name === "reviews" && <ReviewCenter proposals={reviewProposals} error={reviewsError} onNavigate={navigate}
+      onRefresh={refreshReviews} />}
     {route.name === "not-found" && <main className="page-state"><span className="eyebrow">NOT FOUND</span><h1>找不到这个页面</h1>
       <button onClick={() => navigate("/", true)}>返回研究首页</button></main>}
     {route.name === "paper" && (workspaceLoading && !workspace
       ? <main className="page-state loading-state"><span className="eyebrow">PAPER WORKSPACE</span><h1>正在载入 Paper…</h1></main>
       : workspaceError && !workspace
         ? <main className="page-state"><span className="eyebrow">PAPER UNAVAILABLE</span><h1>{workspaceError}</h1><button onClick={() => navigate("/papers")}>返回论文库</button></main>
-        : workspace && workspace.paper.id === route.paperId && <PaperWorkspace workspace={workspace} route={route} busy={busy} progress={progress} error={workspaceError ?? error}
+        : workspace && workspace.paper.id === route.paperId && <PaperWorkspace workspace={workspace} route={route} busy={busy} progress={progress} error={workspaceError}
           openedPdfSource={openedPdfSource} answer={answer} proposals={proposals} question={question} onQuestion={setQuestion}
           onAskPaper={askPaper} onAcceptProposal={acceptProposal} onRetry={retryImport} onNavigate={navigate} />)}
   </div>;
@@ -378,7 +403,7 @@ function PaperLibrary({ papers, error, onNavigate, onImport }: { papers: Paper[]
     <p>所有 Ready、Processing 和需要恢复的 Paper 都在这里。</p></header>
     <section className="library">{error && papers.length > 0 && <p className="inline-alert">{error}，正在显示上次成功载入的列表。</p>}
       {error && papers.length === 0 ? <p className="error-block">{error}</p>
-      : papers.length === 0 ? <div className="empty"><p>还没有论文。粘贴一个 arXiv 链接开始。</p><button onClick={onImport}>导入 Paper</button></div>
+      : papers.length === 0 ? <div className="empty"><p>还没有论文。粘贴 arXiv 链接或公开 PDF 直链开始。</p><button onClick={onImport}>导入论文</button></div>
         : papers.map((paper) => <PaperCard key={paper.id} paper={paper} onNavigate={onNavigate} />)}</section>
   </main>;
 }
@@ -387,11 +412,16 @@ function PaperCard({ paper, onNavigate }: { paper: Paper; onNavigate(href: strin
   const processingLabel = paperSummaryLabel(paper);
   const codeLabel = paper.codeStatus === "ready" ? "代码可用" : paper.codeStatus === "failed" ? "代码失败" : "未发现明确代码链接";
   const href = paperHref(paper.id);
+  const sourceLabel = paper.sourceType === "arxiv" ? `arXiv:${paper.arxivId}` : `公开 PDF · ${safeSourceHost(paper.sourceUrl)}`;
   return <a className="paper-card" href={href} onClick={(event) => { if (!event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
-    event.preventDefault(); onNavigate(href); } }}><span>v{paper.version}</span><div><h3>{paper.title}</h3><p>arXiv:{paper.arxivId}</p>
+    event.preventDefault(); onNavigate(href); } }}><span>{paper.sourceType === "arxiv" ? `v${paper.version}` : "PDF"}</span><div><h3>{paper.title}</h3><p className="paper-source">{sourceLabel}</p>
       <div className="paper-badges"><small>{processingLabel}</small><small>{codeLabel}</small>{Boolean(paper.pendingReviewCount) && <small>待审核 {paper.pendingReviewCount}</small>}</div>
       {paper.processing?.error && <p className="paper-error">失败原因：{paper.processing.error.message}</p>}
     </div><b>→</b></a>;
+}
+
+function safeSourceHost(value: string): string {
+  try { return new URL(value).host; } catch { return "来源不可用"; }
 }
 
 function paperSummaryLabel(paper: Paper): string {
@@ -402,17 +432,42 @@ function paperSummaryLabel(paper: Paper): string {
   return paper.summaryStatus === "failed" ? "Summary 失败" : "Summary 不可用";
 }
 
-function ReviewCenter({ proposals, error, onNavigate }: { proposals: ReviewProposal[]; error: string | null; onNavigate(href: string): void }) {
+function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: ReviewProposal[]; error: string | null;
+  onNavigate(href: string): void; onRefresh(): Promise<void> }) {
+  const [opened, setOpened] = useState<Set<string>>(new Set());
+  const [actionError, setActionError] = useState<string | null>(null);
   const pending = proposals.filter((proposal) => proposal.reviewStatus === "pending" && !proposal.archivedAt);
+  const openCandidate = async (proposal: ReviewProposal) => {
+    const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/open-source`, { method: "POST" });
+    if (!response.ok) { setActionError("无法打开候选 PDF，请稍后重试。"); return; }
+    const source = await response.json() as { pdfUrl: string };
+    window.open(source.pdfUrl, "_blank", "noopener,noreferrer");
+    setOpened((current) => new Set(current).add(proposal.id));
+    setActionError(null);
+  };
+  const acceptCandidate = async (proposal: ReviewProposal) => {
+    const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/decisions`, { method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `web-version-${proposal.id}` }, body: JSON.stringify({ action: "accept" }) });
+    if (!response.ok) { setActionError("候选版本尚未通过来源核验，无法确认。"); return; }
+    setActionError(null);
+    await onRefresh();
+  };
   return <main className="app page reviews-page"><header className="page-header"><span className="eyebrow">REVIEW CENTER</span><h1>审核中心</h1>
     <p>Proposal 在确认前不会成为长期知识。</p></header>
+    {actionError && <p className="error-block">{actionError}</p>}
     {error && pending.length > 0 && <p className="inline-alert">{error}，正在显示上次成功载入的审核队列。</p>}
     {error && proposals.length === 0 ? <p className="error-block">{error}</p>
       : pending.length === 0 ? <div className="empty"><p>当前没有待审核 Proposal。</p><button onClick={() => onNavigate("/papers")}>返回阅读</button></div>
       : <div className="review-list">{pending.map((proposal) => <article className="review-card" key={proposal.id}>
         <span className="eyebrow">{proposal.proposalType.replaceAll("-", " ")}</span>
-        <h2>{proposal.payload.claim ?? (proposal.proposalType === "paper-version-update" ? `Paper Version v${proposal.payload.latestVersion} 可用` : "需要你的判断")}</h2>
+        <h2>{proposal.payload.claim ?? (proposal.proposalType === "paper-version-update"
+          ? proposal.payload.sourceType === "direct-pdf" ? "检测到新的 PDF 内容版本" : `Paper Version v${proposal.payload.latestVersion} 可用`
+          : "需要你的判断")}</h2>
         <p>{proposal.oneClickEligible ? "证据已满足快速确认条件" : "确认前需要查看完整来源"}</p>
+        {proposal.proposalType === "paper-version-update" && proposal.payload.sourceType === "direct-pdf" && <div className="review-actions">
+          <button onClick={() => void openCandidate(proposal)}>打开候选 PDF</button>
+          <button disabled={!opened.has(proposal.id)} onClick={() => void acceptCandidate(proposal)}>确认采用此版本</button>
+        </div>}
         {proposal.paperId && <button className="text-button" onClick={() => onNavigate(paperHref(proposal.paperId!))}>打开相关 Paper →</button>}
       </article>)}</div>}
   </main>;
@@ -443,8 +498,11 @@ function PaperWorkspace(props: {
   };
   return <main className="app workspace">
     <header className="topbar"><a className="ghost" href="/papers" onClick={(event) => { event.preventDefault(); props.onNavigate("/papers"); }}>← 论文库</a>
-      <div><span className="eyebrow">PAPER WORKSPACE</span><h1>{workspace.paper.title}</h1></div>
-      <div className="workspace-badges"><span className="version">arXiv v{workspace.paper.version}</span><span className="code-status" title={workspace.repository?.url}>{codeStatus}</span></div>
+      <div><span className="eyebrow">PAPER WORKSPACE</span><h1>{workspace.paper.title}</h1>
+        <p className="paper-metadata">{workspace.paper.authors.join(", ")} · {workspace.paper.year}</p></div>
+      <div className="workspace-badges"><span className="version">{workspace.paper.sourceType === "arxiv" ? `arXiv v${workspace.paper.version}` : "公开 PDF"}</span>
+        <a className="source-link" href={workspace.paper.sourceUrl} target="_blank" rel="noopener noreferrer">打开来源</a>
+        <span className="code-status" title={workspace.repository?.url}>{codeStatus}</span></div>
     </header>
     {props.error && <div className="inline-alert">{props.error}</div>}
     <div className={`reading-grid ${route.pdfOpen ? "split" : ""}`}>
