@@ -20,7 +20,7 @@ function createSummarySchema(sourceHandles: string[]) {
 const chatSchema = {
   type: "object", additionalProperties: false, required: ["answer", "citations", "proposedTakeaways"], properties: {
     answer: { type: "string" }, citations: { type: "array", items: { type: "object", additionalProperties: false, required: ["sourceHandle", "locator"], properties: { sourceHandle: { type: "string" }, locator: { type: "string" } } } },
-    proposedTakeaways: { type: "array", items: { type: "object", additionalProperties: false, required: ["claim", "sourceHandles"], properties: { claim: { type: "string" }, sourceHandles: { type: "array", items: { type: "string" } }, quote: { type: "string" } } } },
+    proposedTakeaways: { type: "array", items: { type: "object", additionalProperties: false, required: ["claim", "sourceHandles", "quote"], properties: { claim: { type: "string" }, sourceHandles: { type: "array", items: { type: "string" } }, quote: { type: ["string", "null"] } } } },
   },
 } as const;
 const entrySchema = {

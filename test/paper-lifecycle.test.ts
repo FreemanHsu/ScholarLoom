@@ -131,7 +131,7 @@ describe("paper ingestion lifecycle", () => {
             citations: [{ sourceHandle: codeHandle, locator: "README.md:1-2" }, { sourceHandle: "pdf-page:2", locator: "p. 2" },
               { sourceHandle: summaryHandle, locator: "overview" }],
             proposedTakeaways: [
-              { claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", codeHandle] },
+              { claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", codeHandle], quote: null },
               { claim: "这条候选含有未核验引文。", quote: "NOT PRESENT VERBATIM", sourceHandles: ["pdf-page:2"] },
             ],
           };

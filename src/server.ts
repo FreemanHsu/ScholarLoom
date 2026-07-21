@@ -55,7 +55,7 @@ try {
           return { answer: "固定 commit 中的 README 说明了证据与实现的连接。", citations: [
             { sourceHandle: code.handle, locator: code.locator }, { sourceHandle: "pdf-page:2", locator: "p. 2" },
             { sourceHandle: summary.handle, locator: summary.locator }],
-            proposedTakeaways: [{ claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", code.handle] }] };
+            proposedTakeaways: [{ claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", code.handle], quote: null }] };
         },
         async runEntry(context) { return { answer: "已确认结论与 active Summary 支持可追溯阅读。",
           sourceHandles: context.sources.map((source) => source.handle), uncertainty: null }; },

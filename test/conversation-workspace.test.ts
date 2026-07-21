@@ -206,7 +206,7 @@ describe("recoverable paper conversation workspace", () => {
     const storageLayout = initializeDataRoot(join(root, "data"));
     const appOptions = options(storageLayout);
     appOptions.codexRunner!.runChat = async () => ({ answer: "must not persist", citations: [],
-      proposedTakeaways: [{ claim: "invented", sourceHandles: ["agent-invented-handle"] }] });
+      proposedTakeaways: [{ claim: "invented", sourceHandles: ["agent-invented-handle"], quote: null }] });
     const app = await createApp(appOptions);
     const imported = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
     await waitForImport(app, imported.json().importRequest.id);

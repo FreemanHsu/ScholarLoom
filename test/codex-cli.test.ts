@@ -50,4 +50,43 @@ process.stdin.on("end", () => {
       process.env.PATH = originalPath;
     }
   });
+
+  it("emits a Codex-compatible strict schema for optional Takeaway quotes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-chat-codex-"));
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const schemaPath = args[args.indexOf("--output-schema") + 1];
+const outputPath = args[args.indexOf("--output-last-message") + 1];
+const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+const proposal = schema.properties.proposedTakeaways.items;
+const keys = Object.keys(proposal.properties).sort();
+const required = [...proposal.required].sort();
+if (JSON.stringify(required) !== JSON.stringify(keys)) {
+  process.stderr.write("Invalid schema for response_format: 'required' must include every key in properties. Missing 'quote'.");
+  process.exit(44);
+}
+if (JSON.stringify(proposal.properties.quote.type) !== JSON.stringify(["string", "null"])) process.exit(45);
+process.stdin.resume();
+process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
+  answer: "fixture answer",
+  citations: [],
+  proposedTakeaways: [{ claim: "fixture claim", sourceHandles: ["pdf-page:1"], quote: null }]
+})));
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      await expect(new CodexCliRunner().runChat!({
+        paperId: "paper:fixture",
+        conversationId: "conversation:fixture",
+        content: "question",
+        sources: [{ handle: "pdf-page:1", type: "pdf", text: "evidence", locator: "p. 1" }],
+      })).resolves.toMatchObject({ answer: "fixture answer" });
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
 });

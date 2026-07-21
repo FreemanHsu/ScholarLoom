@@ -49,7 +49,7 @@ export type SummaryResult = {
 export type ChatResult = {
   answer: string;
   citations: Array<{ sourceHandle: string; locator: string }>;
-  proposedTakeaways: Array<{ claim: string; sourceHandles: string[]; quote?: string }>;
+  proposedTakeaways: Array<{ claim: string; sourceHandles: string[]; quote: string | null }>;
 };
 export type ChatSource = {
   handle: string;
