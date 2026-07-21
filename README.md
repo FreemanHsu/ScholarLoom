@@ -8,7 +8,8 @@
 
 ## 从这里开始
 
-1. 把论文链接、DOI、PDF 路径或临时想法放进数据 vault 的 `inbox/README.md`。
+1. 在应用中提交 arXiv 链接或公开 HTTPS PDF 直链；其他论文线索和临时想法可放进
+   数据 vault 的 `inbox/README.md`。
 2. 让 AI “摄取这篇论文”，它会根据 [`templates/paper.md`](templates/paper.md)
    创建规范化论文笔记并连接概念与主题。
 3. 从 `$HOME/ScholarLoomData/vault/HOME.md` 浏览当前阅读、开放问题和近期综合。
@@ -40,7 +41,7 @@ v1 数据层级、不变量和生命周期见 [`docs/data-model.md`](docs/data-m
 
 ## 当前阶段
 
-第一条纵向切片已经实现：arXiv → PDF.js page extraction → Evidence Anchor →
+第一条纵向切片已经实现：arXiv / 安全公开 PDF 直链 → PDF.js page extraction → Evidence Anchor →
 Skill 驱动的 Codex Summary → 固定 Git commit → Paper Conversation → 已确认
 Takeaway → curated-only Entry Agent。系统使用 React/Vite、Fastify、SQLite FTS5 与
 Codex CLI，不引入向量数据库。
@@ -88,9 +89,10 @@ npm run data:repair-permissions
 ```
 
 该命令把数据目录恢复为 owner-writable，同时保持 `originals/` 中的源文件只读；它不会
-删除或重写知识内容。失败或中断的 Paper Import 会保留原 Job Run，可在 Paper workspace
-中创建绑定原 Paper Version 的幂等 retry attempt；系统只复用通过完整性检查的 PDF/解析
-产物，并优先恢复未完成的 KnowledgeWriteRequest。
+删除或重写知识内容。失败或中断的 Paper Import 会保留原 Job Run：来源获取失败可重试下载，
+已安全保存的 PDF 会按 content hash 冻结并复用；进入 Paper workspace 后的 retry attempt
+继续绑定原 Paper Version。系统只复用通过完整性检查的 PDF/解析产物，并优先恢复未完成的
+KnowledgeWriteRequest。
 
 ## 数据快照与恢复
 
@@ -131,7 +133,7 @@ HTTPS URL。`/api/events` 每 20 秒发送 heartbeat；事件先持久化，再�
 
 ## 可选真实 smoke test
 
-生产模式使用 arXiv Atom/PDF、真实 `git clone` 和：
+生产模式使用 arXiv Atom/PDF、安全公开 HTTPS PDF 下载、真实 `git clone` 和：
 
 ```text
 codex exec --sandbox read-only --ephemeral --output-schema <schema> \
@@ -139,6 +141,7 @@ codex exec --sandbox read-only --ephemeral --output-schema <schema> \
 ```
 
 应用向 Codex 提供 opaque source handle manifest，校验结构化结果与 Evidence Anchor 后才
-写入。运行 `npm start` 后导入一篇允许下载的 arXiv 论文即可做 opt-in smoke；这会使用
-网络和 Codex 配额。仓库不会自动安装依赖或执行论文代码，也不会提交下载的 PDF/runtime
-assets。
+写入。运行 `npm start` 后导入一篇允许下载的 arXiv 论文或公开 PDF 直链即可做 opt-in
+smoke；这会使用网络和 Codex 配额。公开 PDF 仅接受 URL 直接返回的 PDF，不解析 landing
+page、DOI、OpenReview 或登录态链接。仓库不会自动安装依赖或执行论文代码，也不会提交
+下载的 PDF/runtime assets。

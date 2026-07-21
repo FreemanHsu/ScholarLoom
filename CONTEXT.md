@@ -106,6 +106,19 @@ _Avoid_: Status change
 A record of user intent to resolve and ingest a supplied paper reference.
 _Avoid_: Paper, inbox Paper
 
+**Paper Import Reference**:
+A classified user input that is either an arXiv reference or a public HTTPS Direct PDF Reference.
+_Avoid_: arXiv URL field, arbitrary URL
+
+**Direct PDF Reference**:
+A normalized public HTTPS URL whose response is expected to be the PDF itself, not a landing page.
+_Avoid_: project page, DOI, local PDF path
+
+**Source Identity**:
+The normalized external identity used to recognize a source across Import Requests; for direct PDFs,
+this is the submitted normalized URL, while the safely redirected final URL is its canonical source URL.
+_Avoid_: content hash, Paper ID
+
 **Job Run**:
 One observable execution of a download, extraction, indexing, reconciliation, or AI task.
 _Avoid_: Paper status, Agent session

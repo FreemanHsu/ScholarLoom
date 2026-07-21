@@ -1,7 +1,6 @@
 import type { DirectPdfReference } from "../domain/paper-import-reference.js";
 import { PdfMetadataExtractor, type PaperMetadata } from "./pdf-metadata.js";
-import { SafePdfDownloader, type DownloadedPdf } from "./safe-pdf-downloader.js";
-import { PaperSourceError } from "./safe-pdf-downloader.js";
+import { PaperSourceError, SafePdfDownloader, type DownloadedPdf } from "./safe-pdf-downloader.js";
 
 export type PreparedDirectPdfImport = DownloadedPdf & {
   reference: DirectPdfReference;

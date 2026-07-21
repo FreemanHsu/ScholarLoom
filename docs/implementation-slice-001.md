@@ -191,8 +191,8 @@ assessment without direct page evidence remains prose rather than a structured c
 - Code Analysis and Repository Digest may be minimal; code remains available to the
   Paper conversation through selected files.
 - Summary regeneration/replacement UI is deferred after the first active Summary.
-- Only Takeaway Proposal acceptance is required; Insight and other Knowledge Node
-  types use the same future mechanism.
+- Takeaway Proposal acceptance and direct-PDF `paper-version-update` confirmation are
+  required; Insight and other Knowledge Node types use the same future mechanism.
 - FTS5 only; no embeddings, vector store, graph UI, or reranker.
 - Entry Agent searches active Summary and confirmed Takeaway only.
 - No automatic discovery, external-note migration, or annotation UI.
