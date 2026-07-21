@@ -9,6 +9,7 @@
 - v1 数据契约：[`docs/data-model.md`](data-model.md)
 - v1 系统架构：[`docs/architecture.md`](architecture.md)
 - 第一条实现切片：[`docs/implementation-slice-001.md`](implementation-slice-001.md)
+- 前端信息架构：[`docs/frontend-information-architecture.md`](frontend-information-architecture.md)
 
 ## 1. 产品摘要
 

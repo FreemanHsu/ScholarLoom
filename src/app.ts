@@ -32,6 +32,7 @@ export type CodexRunner = {
 export type CreateAppOptions = {
   paperSource: PaperSource;
   storageLayout: StorageLayout;
+  webRoot?: string;
   codexRunner?: CodexRunner;
   repositoryAdapter?: RepositoryAdapter;
   knowledgeWriteFailurePoint?: "staged" | "renamed" | "metadata-committed";
@@ -187,9 +188,15 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     request.raw.on("close", () => { clearInterval(replay); clearInterval(heartbeat); });
   });
 
-  const webRoot = resolve(process.cwd(), "dist/web");
+  const webRoot = options.webRoot ?? resolve(process.cwd(), "dist/web");
   if (existsSync(webRoot)) {
     await app.register(fastifyStatic, { root: webRoot, wildcard: false });
+    app.setNotFoundHandler((request, reply) => {
+      if (request.method === "GET" && !request.url.startsWith("/api/")) {
+        return reply.type("text/html; charset=utf-8").sendFile("index.html");
+      }
+      return reply.code(404).send({ code: "not-found" });
+    });
   }
 
   return app;

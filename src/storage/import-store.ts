@@ -16,7 +16,17 @@ import { inspectDataRootAccess, type StorageLayout } from "./layout.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
-export type StoredPaper = { id: string; arxivId: string; version: number; title: string };
+export type StoredPaper = {
+  id: string;
+  arxivId: string;
+  version: number;
+  title: string;
+  updatedAt?: string;
+  processing?: { state: ImportJobState; progress: number; needsAttention: boolean } | null;
+  summaryStatus?: "ready" | "processing" | "failed";
+  codeStatus?: "ready" | "failed" | "not-linked";
+  pendingReviewCount?: number;
+};
 export type StoredImportRequest = { id: string; paperId: string; status: "resolved" };
 
 export type SummaryResult = {
@@ -660,10 +670,10 @@ export class ImportStore {
   }
 
   listProposals(): unknown[] {
-    return (this.#database.prepare(`SELECT id,proposal_type,review_status,one_click_eligible,created_at,archived_at,payload_json
+    return (this.#database.prepare(`SELECT id,proposal_type,paper_id,review_status,one_click_eligible,created_at,archived_at,payload_json
       FROM proposals ORDER BY created_at,id`).all() as Array<{ id: string; proposal_type: string; review_status: string;
-      one_click_eligible: number; created_at: string; archived_at: string | null; payload_json: string }>).map((row) => ({
-        id: row.id, proposalType: row.proposal_type, reviewStatus: row.review_status, oneClickEligible: row.one_click_eligible === 1,
+      paper_id: string | null; one_click_eligible: number; created_at: string; archived_at: string | null; payload_json: string }>).map((row) => ({
+        id: row.id, proposalType: row.proposal_type, paperId: row.paper_id, reviewStatus: row.review_status, oneClickEligible: row.one_click_eligible === 1,
         createdAt: row.created_at, archivedAt: row.archived_at, payload: JSON.parse(row.payload_json) as unknown,
       }));
   }
@@ -905,11 +915,31 @@ export class ImportStore {
   }
 
   listPapers(): StoredPaper[] {
-    return (this.#database.prepare(`SELECT p.id,p.title,i.normalized_value,v.source_version FROM papers p
+    return (this.#database.prepare(`SELECT p.id,p.title,p.updated_at,i.normalized_value,v.source_version,
+      (SELECT j.state FROM job_runs j WHERE j.paper_id=p.id AND j.job_type='paper-import'
+        ORDER BY j.attempt DESC,j.queued_at DESC,j.id DESC LIMIT 1) job_state,
+      (SELECT j.progress FROM job_runs j WHERE j.paper_id=p.id AND j.job_type='paper-import'
+        ORDER BY j.attempt DESC,j.queued_at DESC,j.id DESC LIMIT 1) job_progress,
+      CASE WHEN EXISTS (SELECT 1 FROM summary_revisions s WHERE s.paper_id=p.id AND s.status='active') THEN 'ready'
+        WHEN v.processing_status='failed' THEN 'failed' ELSE 'processing' END summary_status,
+      CASE WHEN EXISTS (SELECT 1 FROM paper_code_links pcl WHERE pcl.paper_id=p.id AND pcl.status='confirmed') THEN 'ready'
+        WHEN EXISTS (SELECT 1 FROM proposals pr WHERE pr.paper_id=p.id AND pr.proposal_type='repository-retry'
+          AND pr.review_status='pending') THEN 'failed'
+        ELSE 'not-linked' END code_status,
+      (SELECT count(*) FROM proposals pr WHERE pr.paper_id=p.id AND pr.review_status='pending') pending_review_count
+      FROM papers p
       JOIN paper_external_identities i ON i.paper_id=p.id AND i.identity_type='arxiv'
-      JOIN paper_versions v ON v.id=p.current_version_id ORDER BY i.normalized_value`).all() as
-      Array<{ id: string; title: string; normalized_value: string; source_version: string }>).map((row) => ({
+      JOIN paper_versions v ON v.id=p.current_version_id ORDER BY p.updated_at DESC,p.id`).all() as
+      Array<{ id: string; title: string; updated_at: string; normalized_value: string; source_version: string;
+        job_state: string | null; job_progress: number | null; summary_status: "ready" | "processing" | "failed";
+        code_status: "ready" | "failed" | "not-linked"; pending_review_count: number }>).map((row) => ({
         id: row.id, arxivId: row.normalized_value, title: row.title, version: Number.parseInt(row.source_version.slice(1), 10),
+        updatedAt: row.updated_at,
+        processing: row.job_state ? { state: requireImportJobState(row.job_state), progress: row.job_progress ?? 0,
+          needsAttention: isRetryableImportJobState(row.job_state) } : null,
+        summaryStatus: row.summary_status,
+        codeStatus: row.code_status,
+        pendingReviewCount: row.pending_review_count,
       }));
   }
 

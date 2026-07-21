@@ -86,8 +86,9 @@ describe("POST /api/imports", () => {
     const papers = await restartedApp.inject({ method: "GET", url: "/api/papers" });
 
     expect(papers.statusCode).toBe(200);
-    expect(papers.json()).toEqual({
-      papers: [{ arxivId: "2401.12345", id: "paper:fixture:2024:fixture-paper", title: "Fixture Paper", version: 2 }],
+    expect(papers.json().papers).toHaveLength(1);
+    expect(papers.json().papers[0]).toMatchObject({
+      arxivId: "2401.12345", id: "paper:fixture:2024:fixture-paper", title: "Fixture Paper", version: 2,
     });
 
     await restartedApp.close();
