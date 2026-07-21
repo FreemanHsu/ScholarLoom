@@ -25,6 +25,19 @@ async function waitForImport(app: FastifyInstance, id: string, expected = "succe
   throw new Error(`import did not reach ${expected}`);
 }
 
+async function waitForConversation(app: FastifyInstance, id: string): Promise<{
+  messages: Array<{ role: string; citations: Array<{ locator: Record<string, unknown> }> }>;
+}> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const response = await app.inject({ method: "GET", url: `/api/conversations/${id}` });
+    const body = response.json();
+    if (body.messages?.some((message: { role: string }) => message.role === "assistant") ||
+        body.messages?.some((message: { attempts?: Array<{ state: string }> }) => message.attempts?.some((run) => run.state === "failed"))) return body;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("conversation did not finish");
+}
+
 async function fixturePdf(label = "fixture"): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
@@ -109,12 +122,16 @@ describe("paper ingestion lifecycle", () => {
       codexRunner: {
         async runSummary() { return { sections: [{ key: "overview", title: "概述", body: "fixture" }], claims: [{ voice: "paper-evidence", claim: "Table 1 reports accuracy 91.2.", sourceHandle: "pdf-page:2" }], readStatus: "read" }; },
         async runChat(context) {
-          expect(context.sources.map((source) => source.handle)).toEqual(expect.arrayContaining(["pdf-page:2", "code:README.md"]));
+          const codeHandle = context.sources.find((source) => source.type === "code" && source.locator.startsWith("README.md:"))!.handle;
+          const summaryHandle = context.sources.find((source) => source.type === "summary")!.handle;
+          expect(codeHandle).toMatch(/^code:repository-snapshot:.+:README\.md$/);
+          expect(summaryHandle).toMatch(/^summary:.+:overview$/);
           return {
             answer: "该实现将 attention 记录在固定仓库快照中。",
-            citations: [{ sourceHandle: "code:README.md", locator: "README.md:1-2" }, { sourceHandle: "pdf-page:2", locator: "p. 2" }],
+            citations: [{ sourceHandle: codeHandle, locator: "README.md:1-2" }, { sourceHandle: "pdf-page:2", locator: "p. 2" },
+              { sourceHandle: summaryHandle, locator: "overview" }],
             proposedTakeaways: [
-              { claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", "code:README.md"] },
+              { claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", codeHandle] },
               { claim: "这条候选含有未核验引文。", quote: "NOT PRESENT VERBATIM", sourceHandles: ["pdf-page:2"] },
             ],
           };
@@ -143,32 +160,74 @@ describe("paper ingestion lifecycle", () => {
       summaryRevisionId: workspace.json().summary.id,
       repositorySnapshots: [{ commitSha: stdout.trim() }],
     });
-    const answer = await app.inject({ method: "POST", url: `/api/conversations/${conversation.json().conversation.id}/messages`, payload: { content: "WORKING_ONLY_SENTINEL 代码如何实现论文方法？" } });
-    expect(answer.statusCode).toBe(201);
-    expect(answer.json()).toMatchObject({
-      message: { role: "assistant", citations: [{ type: "code", commitSha: stdout.trim(), path: "README.md" }, { type: "pdf", page: 2 }] },
-      proposals: [{ proposalType: "takeaway", oneClickEligible: true }, { proposalType: "takeaway", oneClickEligible: false }],
+    const accepted = await app.inject({ method: "POST", url: `/api/conversations/${conversation.json().conversation.id}/messages`,
+      payload: { content: "WORKING_ONLY_SENTINEL 代码如何实现论文方法？", idempotencyKey: "fixture-chat" } });
+    expect(accepted.statusCode).toBe(202);
+    const answer = await waitForConversation(app, conversation.json().conversation.id);
+    expect(answer.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      citations: [
+        { locator: { type: "code", commitSha: stdout.trim(), path: "README.md" } },
+        { locator: { type: "pdf", page: 2, paperVersionId: workspace.json().paper.versionId,
+          evidenceAnchorId: expect.stringMatching(/^evidence:/) } },
+        { locator: { type: "summary", summaryRevisionId: workspace.json().summary.id, sectionKey: "overview" } },
+      ],
     });
-    const proposalId = answer.json().proposals[0].id;
+    const proposalResponse = await app.inject({ method: "GET", url: "/api/proposals" });
+    const takeawayProposals = proposalResponse.json().proposals.filter((proposal: { proposalType: string }) => proposal.proposalType === "takeaway");
+    expect(takeawayProposals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ proposalType: "takeaway", oneClickEligible: true }),
+      expect.objectContaining({ proposalType: "takeaway", oneClickEligible: false }),
+    ]));
+    const eligibleProposal = takeawayProposals.find((proposal: { oneClickEligible: boolean }) => proposal.oneClickEligible)!;
+    const unverifiedProposal = takeawayProposals.find((proposal: { oneClickEligible: boolean }) => !proposal.oneClickEligible)!;
+    const proposalId = eligibleProposal.id;
     const firstDecision = await app.inject({ method: "POST", url: `/api/proposals/${proposalId}/decisions`, headers: { "idempotency-key": "accept-fixture-takeaway" }, payload: { action: "accept" } });
     const retry = await app.inject({ method: "POST", url: `/api/proposals/${proposalId}/decisions`, headers: { "idempotency-key": "accept-fixture-takeaway" }, payload: { action: "accept" } });
     expect(firstDecision.statusCode).toBe(201);
     expect(retry.json()).toEqual(firstDecision.json());
     expect(firstDecision.json()).toMatchObject({ takeaway: { reviewStatus: "confirmed", revision: 1 } });
+    const knowledge = await app.inject({ method: "GET", url: `/api/papers/${imported.json().paper.id}/knowledge` });
+    expect(knowledge.statusCode).toBe(200);
+    expect(knowledge.json()).toMatchObject({
+      pendingProposals: [expect.objectContaining({ proposalType: "takeaway", source: {
+        conversationId: conversation.json().conversation.id, messageId: expect.stringMatching(/^message:/),
+      } })],
+      confirmedTakeaways: [expect.objectContaining({ claim: "该论文用可追溯证据连接实验与实现。", source: {
+        conversationId: conversation.json().conversation.id, messageId: expect.stringMatching(/^message:/),
+      } })],
+    });
     const summaryMarkdown = await readFile(join(storageLayout.vaultRoot, workspace.json().summary.markdownPath), "utf8");
     const takeawayMarkdown = await readFile(join(storageLayout.vaultRoot, firstDecision.json().takeaway.markdownPath), "utf8");
     const frontmatter = (markdown: string) => parse(markdown.split("---")[1]!) as Record<string, unknown>;
     expect(frontmatter(summaryMarkdown)).toMatchObject({ summary_revision_id: workspace.json().summary.id, paper_version_id: workspace.json().paper.versionId });
     expect(frontmatter(takeawayMarkdown)).toMatchObject({ id: firstDecision.json().takeaway.id, revision_id: firstDecision.json().takeaway.revisionId, review_status: "confirmed" });
-    const blocked = await app.inject({ method: "POST", url: `/api/proposals/${answer.json().proposals[1].id}/decisions`, headers: { "idempotency-key": "blocked-unverified" }, payload: { action: "accept" } });
+    const blocked = await app.inject({ method: "POST", url: `/api/proposals/${unverifiedProposal.id}/decisions`, headers: { "idempotency-key": "blocked-unverified" }, payload: { action: "accept" } });
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json()).toEqual({ code: "source-verification-required" });
-    const opened = await app.inject({ method: "POST", url: `/api/proposals/${answer.json().proposals[1].id}/open-source` });
+    const sourceDatabase = new Database(storageLayout.databasePath);
+    const newerVersionId = `${workspace.json().paper.versionId}:newer`;
+    sourceDatabase.prepare(`INSERT INTO paper_versions
+      (id,paper_id,source_type,source_version,source_url,resolved_at,processing_status,accepted_at,created_at,updated_at,
+       source_content_hash,source_media_type,pdf_artifact_id)
+      SELECT ?,paper_id,source_type,'v99',source_url,resolved_at,'ready',accepted_at,created_at,updated_at,
+        source_content_hash,source_media_type,pdf_artifact_id FROM paper_versions WHERE id=?`)
+      .run(newerVersionId, workspace.json().paper.versionId);
+    sourceDatabase.prepare("UPDATE papers SET current_version_id=? WHERE id=?").run(newerVersionId, imported.json().paper.id);
+    sourceDatabase.close();
+    const opened = await app.inject({ method: "POST", url: `/api/proposals/${unverifiedProposal.id}/open-source` });
     expect(opened.statusCode).toBe(201);
+    expect(decodeURIComponent(opened.json().pdfUrl)).toContain(`/api/paper-versions/${workspace.json().paper.versionId}/pdf`);
     const openedPdf = await app.inject({ method: "GET", url: opened.json().pdfUrl.split("#")[0] });
     expect(openedPdf.statusCode).toBe(200);
-    const acceptedAfterOpen = await app.inject({ method: "POST", url: `/api/proposals/${answer.json().proposals[1].id}/decisions`, headers: { "idempotency-key": "accepted-after-open" }, payload: { action: "accept", sourceOpened: false } });
+    const acceptedAfterOpen = await app.inject({ method: "POST", url: `/api/proposals/${unverifiedProposal.id}/decisions`,
+      headers: { "idempotency-key": "accepted-after-open" },
+      payload: { action: "edit-and-accept", editedClaim: "编辑后确认的固定来源结论。", sourceOpened: false } });
     expect(acceptedAfterOpen.statusCode).toBe(201);
+    const auditDatabase = new Database(storageLayout.databasePath, { readonly: true });
+    expect(auditDatabase.prepare("SELECT action FROM review_decisions WHERE idempotency_key='accepted-after-open'").get())
+      .toEqual({ action: "accept-with-edit" });
+    auditDatabase.close();
 
     const entry = await app.inject({ method: "POST", url: "/api/entry-agent/questions", payload: { question: "fixture 可追溯证据" } });
     expect(entry.statusCode).toBe(200);

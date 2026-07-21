@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { PaperSourceError } from "./adapters/safe-pdf-downloader.js";
 
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
+const fixtureChatFailures = new Set<string>();
 const paperSource: PaperSource = fixture ? {
   async resolve(arxivId) { return { arxivId, latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
   async fetchPdf() { return createFixturePdf(); },
@@ -43,9 +44,19 @@ try {
       repositoryAdapter: new GitRepositoryAdapter({ "https://github.com/example/fixture": fixtureRepository! }),
       codexRunner: {
         async runSummary() { return fixtureSummary; },
-        async runChat() { return { answer: "固定 commit 中的 README 说明了证据与实现的连接。", citations: [
-          { sourceHandle: "code:README.md", locator: "README.md:1-2" }, { sourceHandle: "pdf-page:2", locator: "p. 2" }],
-          proposedTakeaways: [{ claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", "code:README.md"] }] }; },
+        async runChat(context) {
+          await new Promise((resolve) => setTimeout(resolve, 1_200));
+          if (context.content.includes("FAIL_CHAT_FIXTURE") && !fixtureChatFailures.has(context.content)) {
+            fixtureChatFailures.add(context.content);
+            throw new Error("fixture-codex-failure");
+          }
+          const code = context.sources.find((source) => source.type === "code")!;
+          const summary = context.sources.find((source) => source.type === "summary")!;
+          return { answer: "固定 commit 中的 README 说明了证据与实现的连接。", citations: [
+            { sourceHandle: code.handle, locator: code.locator }, { sourceHandle: "pdf-page:2", locator: "p. 2" },
+            { sourceHandle: summary.handle, locator: summary.locator }],
+            proposedTakeaways: [{ claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", code.handle] }] };
+        },
         async runEntry(context) { return { answer: "已确认结论与 active Summary 支持可追溯阅读。",
           sourceHandles: context.sources.map((source) => source.handle), uncertainty: null }; },
       },

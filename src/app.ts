@@ -27,7 +27,8 @@ export type PaperSource = {
 
 export type CodexRunner = {
   runSummary(context: { paperId: string; title: string; pages: Array<{ handle: string; page: number; text: string }> }): Promise<import("./storage/import-store.js").SummaryResult>;
-  runChat?(context: { paperId: string; conversationId: string; content: string; sources: Array<{ handle: string; type: "pdf" | "code"; text: string; locator: string }> }): Promise<import("./storage/import-store.js").ChatResult>;
+  runChat?(context: { paperId: string; conversationId: string; content: string;
+    sources: import("./storage/import-store.js").ChatSource[]; signal?: AbortSignal }): Promise<import("./storage/import-store.js").ChatResult>;
   runEntry?(context: { question: string; sources: Array<{ handle: string; sourceType: string; sourceId: string; title: string; body: string }> }): Promise<import("./storage/import-store.js").EntryResult>;
 };
 
@@ -40,6 +41,7 @@ export type CreateAppOptions = {
   repositoryAdapter?: RepositoryAdapter;
   knowledgeWriteFailurePoint?: "staged" | "renamed" | "metadata-committed";
   clock?: { now(): Date };
+  agentMessageTimeoutMs?: number;
 };
 
 function classifyPaperResolutionError(error: unknown): { status: 404 | 503; code: string; detail: string } {
@@ -82,7 +84,24 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   const now = options.clock ? () => options.clock!.now() : undefined;
   const store = ImportStore.open(options.storageLayout, options.knowledgeWriteFailurePoint ?? null, now);
   const backgroundTasks = new Set<Promise<void>>();
-  app.addHook("onClose", async () => { await Promise.allSettled(backgroundTasks); store.close(); });
+  const chatControllers = new Set<AbortController>();
+  app.addHook("onClose", async () => {
+    for (const controller of chatControllers) controller.abort(new Error("application-closing"));
+    await Promise.allSettled(backgroundTasks);
+    store.close();
+  });
+  const runPaperChat = (context: Parameters<NonNullable<CodexRunner["runChat"]>>[0]) => {
+    const controller = new AbortController();
+    chatControllers.add(controller);
+    const timeoutMs = options.agentMessageTimeoutMs ?? 120_000;
+    let timer: ReturnType<typeof setTimeout>;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => { controller.abort(new Error("agent-timeout")); reject(new Error("agent-timeout")); }, timeoutMs);
+      controller.signal.addEventListener("abort", () => reject(controller.signal.reason ?? new Error("agent-aborted")), { once: true });
+    });
+    return Promise.race([options.codexRunner!.runChat!({ ...context, signal: controller.signal }), interrupted])
+      .finally(() => { clearTimeout(timer); chatControllers.delete(controller); });
+  };
 
   const startImport = (execution: { paper: import("./storage/import-store.js").StoredPaper; arxivId?: string; version: number;
     importRequest: { id: string }; job: { id: string }; pdfBytes?: Uint8Array }) => {
@@ -232,26 +251,84 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     return reply.type("application/pdf").send(Buffer.from(pdf));
   });
 
-  app.post<{ Params: { id: string } }>("/api/papers/:id/conversations", async (request, reply) => {
-    const conversation = store.startConversation(request.params.id);
-    return conversation ? reply.code(201).send(conversation) : reply.code(404).send({ code: "paper-not-found" });
+  app.post<{ Params: { id: string }; Body: { continuedFromConversationId?: unknown } }>("/api/papers/:id/conversations", async (request, reply) => {
+    const continuedFrom = typeof request.body?.continuedFromConversationId === "string" ? request.body.continuedFromConversationId : null;
+    const conversation = store.startConversation(request.params.id, continuedFrom);
+    if (conversation) return reply.code(201).send(conversation);
+    return store.paperExists(request.params.id)
+      ? reply.code(409).send({ code: continuedFrom ? "continued-conversation-invalid" : "conversation-context-unavailable" })
+      : reply.code(404).send({ code: "paper-not-found" });
   });
 
-  app.post<{ Params: { id: string }; Body: { content?: unknown } }>("/api/conversations/:id/messages", async (request, reply) => {
+  app.get<{ Params: { id: string } }>("/api/papers/:id/conversations", async (request) => ({
+    conversations: store.listConversations(request.params.id),
+  }));
+
+  app.post<{ Params: { id: string }; Body: { title?: unknown } }>("/api/conversations/:id/rename", async (request, reply) =>
+    typeof request.body?.title === "string" && store.renameConversation(request.params.id, request.body.title)
+      ? reply.code(200).send({ status: "renamed" }) : reply.code(400).send({ code: "conversation-title-invalid" }));
+  app.post<{ Params: { id: string } }>("/api/conversations/:id/archive", async (request, reply) =>
+    store.setConversationArchived(request.params.id, true)
+      ? reply.code(200).send({ status: "archived" }) : reply.code(404).send({ code: "conversation-not-found" }));
+  app.post<{ Params: { id: string } }>("/api/conversations/:id/restore", async (request, reply) =>
+    store.setConversationArchived(request.params.id, false)
+      ? reply.code(200).send({ status: "active" }) : reply.code(404).send({ code: "conversation-not-found" }));
+
+  app.get<{ Params: { id: string } }>("/api/conversations/:id", async (request, reply) => {
+    const conversation = store.getConversation(request.params.id);
+    return conversation ?? reply.code(404).send({ code: "conversation-not-found" });
+  });
+
+  app.get<{ Params: { id: string } }>("/api/papers/:id/knowledge", async (request, reply) => {
+    const knowledge = store.getPaperKnowledge(request.params.id);
+    return knowledge ?? reply.code(404).send({ code: "paper-not-found" });
+  });
+
+  app.post<{ Params: { id: string }; Body: { content?: unknown; idempotencyKey?: unknown } }>("/api/conversations/:id/messages", async (request, reply) => {
     if (typeof request.body?.content !== "string" || !request.body.content.trim()) return reply.code(400).send({ code: "message-content-required" });
+    const key = typeof request.body.idempotencyKey === "string" && request.body.idempotencyKey
+      ? request.body.idempotencyKey
+      : typeof request.headers["idempotency-key"] === "string" ? request.headers["idempotency-key"] : `paper-chat:${crypto.randomUUID()}`;
     if (!options.codexRunner?.runChat) return reply.code(503).send({ code: "codex-runner-unavailable" });
-    const result = await store.sendMessage(request.params.id, request.body.content, (context) => options.codexRunner!.runChat!(context));
-    return result ? reply.code(201).send(result) : reply.code(404).send({ code: "conversation-not-found" });
+    const blocked = store.conversationTurnBlock(request.params.id, key);
+    if (blocked) return reply.code(blocked === "conversation-not-found" ? 404 : 409).send({ code: blocked });
+    let task: Promise<void>;
+    task = store.sendMessage(request.params.id, request.body.content, key, runPaperChat)
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => backgroundTasks.delete(task));
+    backgroundTasks.add(task);
+    return reply.code(202).send({ conversation: store.getConversation(request.params.id) });
   });
 
-  app.post<{ Params: { id: string }; Body: { action?: unknown; sourceOpened?: unknown } }>("/api/proposals/:id/decisions", async (request, reply) => {
-    if (request.body?.action !== "accept") return reply.code(400).send({ code: "decision-action-invalid" });
+  app.post<{ Params: { id: string } }>("/api/messages/:id/retry", async (request, reply) => {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    if (!options.codexRunner?.runChat) return reply.code(503).send({ code: "codex-runner-unavailable" });
+    const conversationId = store.getMessageConversationId(request.params.id);
+    if (!conversationId) return reply.code(404).send({ code: "message-not-found" });
+    const blocked = store.messageRetryBlock(request.params.id, key);
+    if (blocked) return reply.code(blocked === "message-not-found" ? 404 : 409).send({ code: blocked });
+    let task: Promise<void>;
+    task = store.retryMessage(request.params.id, key, runPaperChat)
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => backgroundTasks.delete(task));
+    backgroundTasks.add(task);
+    return reply.code(202).send({ conversation: store.getConversation(conversationId) });
+  });
+
+  app.post<{ Params: { id: string }; Body: { action?: unknown; sourceOpened?: unknown; editedClaim?: unknown } }>("/api/proposals/:id/decisions", async (request, reply) => {
+    if (request.body?.action !== "accept" && request.body?.action !== "edit-and-accept" && request.body?.action !== "reject") {
+      return reply.code(400).send({ code: "decision-action-invalid" });
+    }
     const key = request.headers["idempotency-key"];
     if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
     if (!options.codexRunner && store.isDirectVersionProposal(request.params.id)) {
       return reply.code(503).send({ code: "import-runner-unavailable" });
     }
-    const result = store.decideProposal(request.params.id, key);
+    const result = store.decideProposal(request.params.id, key, request.body.action,
+      typeof request.body.editedClaim === "string" ? request.body.editedClaim : undefined);
     if (result.execution) {
       startImport(result.execution);
     }

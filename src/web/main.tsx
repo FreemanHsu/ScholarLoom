@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   isRetryableImportJobState,
@@ -45,6 +45,7 @@ type ReviewProposal = {
   paperId: string | null;
   reviewStatus: string;
   oneClickEligible: boolean;
+  legacySource?: boolean;
   createdAt: string;
   archivedAt: string | null;
   payload: { claim?: string; sourceType?: string; currentVersion?: number | string; latestVersion?: number | string;
@@ -56,6 +57,30 @@ type EntryAnswer = {
   projection: { stale: boolean; notice?: string; lastSuccessfulAt: string | null };
 };
 type OpenedPdfSource = { href: string; anchor: string; page: number };
+
+function PdfFrame({ src }: { src: string }) {
+  const frame = useRef<HTMLIFrameElement>(null);
+  const initialSrc = useRef(src);
+  useEffect(() => {
+    if (src === initialSrc.current) return;
+    frame.current?.contentWindow?.location.replace(src);
+    initialSrc.current = src;
+  }, [src]);
+  return <iframe ref={frame} title="原始 PDF" src={initialSrc.current} />;
+}
+type ConversationSummary = { id: string; paperId: string; title: string; status: "active" | "archived";
+  snapshotIntegrity: "frozen" | "legacy"; updatedAt: string };
+type ConversationDetail = {
+  conversation: ConversationSummary & { contextSnapshotId: string; continuedFromConversationId: string | null };
+  contextSnapshot: { id: string; paperVersionId: string; summaryRevisionId: string; extractionRunId: string;
+    pageCount: number; repositorySnapshots: Array<{ id: string; commitSha: string }> } | null;
+  messages: Array<{ id: string; role: "user" | "assistant"; content: string; inReplyToMessageId: string | null;
+    citations: Array<{ kind: string; sourceHandle: string; verificationStatus: string; locator: Record<string, unknown> }>;
+    attempts: Array<{ id: string; attemptNo: number; state: string; error: { code?: string } | null }> }>;
+};
+type KnowledgeModel = { pendingProposals: Array<Proposal & { reviewStatus: string; legacySource: boolean;
+  source: { conversationId: string; messageId: string } }>;
+  confirmedTakeaways: Array<{ id: string; claim: string; revision: number; source: { conversationId: string; messageId: string } }> };
 
 function App() {
   const [route, setRoute] = useState<BrowserRoute>(() => readBrowserRoute(window.location));
@@ -79,6 +104,10 @@ function App() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [entryQuestion, setEntryQuestion] = useState("fixture 可追溯证据");
   const [entryAnswer, setEntryAnswer] = useState<EntryAnswer | null>(null);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [conversation, setConversation] = useState<ConversationDetail | null>(null);
+  const [knowledge, setKnowledge] = useState<KnowledgeModel>({ pendingProposals: [], confirmedTakeaways: [] });
+  const [discussionError, setDiscussionError] = useState<string | null>(null);
 
   function navigate(href: string, replace = false) {
     window.history[replace ? "replaceState" : "pushState"](null, "", href);
@@ -135,6 +164,29 @@ function App() {
     }
   };
 
+  const refreshConversationWorkspace = async (paperId: string, selectedId: string | null) => {
+    try {
+      const [listResponse, knowledgeResponse] = await Promise.all([
+        fetch(`/api/papers/${encodeURIComponent(paperId)}/conversations`),
+        fetch(`/api/papers/${encodeURIComponent(paperId)}/knowledge`),
+      ]);
+      if (!listResponse.ok || !knowledgeResponse.ok) throw new Error("Discussion / Knowledge 暂时不可用");
+      setConversations((await listResponse.json() as { conversations: ConversationSummary[] }).conversations);
+      setKnowledge(await knowledgeResponse.json() as KnowledgeModel);
+      if (selectedId) {
+        const detailResponse = await fetch(`/api/conversations/${encodeURIComponent(selectedId)}`);
+        if (!detailResponse.ok) throw new Error(detailResponse.status === 404 ? "找不到这个 Conversation" : "Conversation 暂时不可用");
+        const detail = await detailResponse.json() as ConversationDetail;
+        if (detail.conversation.paperId !== paperId) throw new Error("Conversation 不属于 URL 中的 Paper");
+        setConversation(detail);
+      } else setConversation(null);
+      setDiscussionError(null);
+    } catch (cause) {
+      setConversation(null);
+      setDiscussionError(cause instanceof Error ? cause.message : "Discussion / Knowledge 暂时不可用");
+    }
+  };
+
   useEffect(() => {
     const onPopState = () => setRoute(readBrowserRoute(window.location));
     window.addEventListener("popstate", onPopState);
@@ -159,6 +211,25 @@ function App() {
   }, [route.name === "paper" ? route.paperId : null]);
 
   useEffect(() => {
+    if (route.name !== "paper") return;
+    void refreshConversationWorkspace(route.paperId, route.conversationId);
+  }, [route.name === "paper" ? `${route.paperId}:${route.mode}:${route.conversationId ?? ""}` : null]);
+
+  useEffect(() => {
+    if (route.name !== "paper" || !route.conversationId) return;
+    const running = conversation?.messages.some((message) => message.attempts.some((attempt) => attempt.state === "running"));
+    if (!running) return;
+    const timer = window.setInterval(() => void refreshConversationWorkspace(route.paperId, route.conversationId), 500);
+    return () => window.clearInterval(timer);
+  }, [route.name === "paper" ? route.conversationId : null, conversation?.messages.map((message) => message.attempts.map((attempt) => attempt.state).join(",")).join("|")]);
+
+  useEffect(() => {
+    if (route.name !== "paper") return;
+    const key = `scholarloom:draft:${route.conversationId ?? `paper:${route.paperId}`}`;
+    setQuestion(window.localStorage.getItem(key) ?? "");
+  }, [route.name === "paper" ? `${route.paperId}:${route.conversationId ?? "new"}` : null]);
+
+  useEffect(() => {
     if (route.name !== "paper" || !workspace?.processing || isTerminalImportJobState(workspace.processing.state)) return;
     const timer = window.setInterval(() => void refreshWorkspace(route.paperId), 3_000);
     return () => window.clearInterval(timer);
@@ -167,21 +238,58 @@ function App() {
   async function askPaper(event: React.FormEvent) {
     event.preventDefault();
     if (!workspace || !question.trim()) return;
-    let id = conversationId;
+    let id = route.name === "paper" ? route.conversationId : null;
+    const initialDraftKey = route.name === "paper" ? `scholarloom:draft:${route.conversationId ?? `paper:${route.paperId}`}` : null;
     if (!id) {
       const created = await fetch(`/api/papers/${encodeURIComponent(workspace.paper.id)}/conversations`, { method: "POST" }).then((response) => response.json());
       id = created.conversation.id;
       setConversationId(id);
+      navigate(paperHref(workspace.paper.id, { mode: "discussion", conversationId: id, pdfOpen: false, page: 1, anchor: null }));
     }
-    const result = await fetch(`/api/conversations/${encodeURIComponent(id!)}/messages`, {
+    const draftKey = `scholarloom:draft:${id}`;
+    const response = await fetch(`/api/conversations/${encodeURIComponent(id!)}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ content: question }),
-    }).then((response) => response.json());
-    setAnswer(result.message.content);
-    setProposals(result.proposals);
+      body: JSON.stringify({ content: question, idempotencyKey: crypto.randomUUID() }),
+    });
+    if (!response.ok) { setDiscussionError("消息未能持久化，请重试。"); return; }
+    window.localStorage.removeItem(draftKey);
+    if (initialDraftKey) window.localStorage.removeItem(initialDraftKey);
     setQuestion("");
+    await refreshConversationWorkspace(workspace.paper.id, id);
     void refreshReviews();
+  }
+
+  function updateQuestion(value: string) {
+    setQuestion(value);
+    if (route.name === "paper") window.localStorage.setItem(`scholarloom:draft:${route.conversationId ?? `paper:${route.paperId}`}`, value);
+  }
+
+  async function retryMessage(messageId: string) {
+    if (route.name !== "paper" || !route.conversationId) return;
+    const response = await fetch(`/api/messages/${encodeURIComponent(messageId)}/retry`, { method: "POST",
+      headers: { "idempotency-key": crypto.randomUUID() } });
+    if (!response.ok) { setDiscussionError("这条消息当前无法重试。"); return; }
+    await refreshConversationWorkspace(route.paperId, route.conversationId);
+  }
+
+  async function manageConversation(action: "rename" | "archive" | "restore", title?: string) {
+    if (route.name !== "paper" || !route.conversationId) return;
+    const response = await fetch(`/api/conversations/${encodeURIComponent(route.conversationId)}/${action}`, {
+      method: "POST", headers: { "content-type": "application/json" }, ...(title ? { body: JSON.stringify({ title }) } : {}),
+    });
+    if (!response.ok) { setDiscussionError("Conversation 状态更新失败。"); return; }
+    await refreshConversationWorkspace(route.paperId, route.conversationId);
+  }
+
+  async function continueConversation() {
+    if (route.name !== "paper" || !route.conversationId) return;
+    const response = await fetch(`/api/papers/${encodeURIComponent(route.paperId)}/conversations`, { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ continuedFromConversationId: route.conversationId }) });
+    if (!response.ok) { setDiscussionError("当前材料不足，无法创建新的冻结 Conversation。"); return; }
+    const created = await response.json();
+    navigate(paperHref(route.paperId, { mode: "discussion", conversationId: created.conversation.id,
+      pdfOpen: false, page: 1, anchor: null }));
   }
 
   async function acceptProposal(proposal: Proposal) {
@@ -204,7 +312,21 @@ function App() {
       setProposals((items) => items.filter((item) => item.id !== proposal.id));
       void refreshReviews();
       void refreshPapers();
+      if (route.name === "paper") void refreshConversationWorkspace(route.paperId, route.conversationId);
     }
+  }
+
+  async function reviewProposal(proposal: Proposal, action: "accept" | "edit-and-accept" | "reject", editedClaim?: string) {
+    if (action === "accept") { await acceptProposal(proposal); return; }
+    const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/decisions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+      body: JSON.stringify({ action, ...(editedClaim ? { editedClaim } : {}) }),
+    });
+    if (!response.ok) { setDiscussionError("Proposal 状态已变化或来源不可确认。"); return; }
+    if (route.name === "paper") await refreshConversationWorkspace(route.paperId, route.conversationId);
+    void refreshReviews();
+    void refreshPapers();
   }
 
   async function askEntry(event: React.FormEvent) {
@@ -335,9 +457,13 @@ function App() {
       ? <main className="page-state loading-state"><span className="eyebrow">PAPER WORKSPACE</span><h1>正在载入 Paper…</h1></main>
       : workspaceError && !workspace
         ? <main className="page-state"><span className="eyebrow">PAPER UNAVAILABLE</span><h1>{workspaceError}</h1><button onClick={() => navigate("/papers")}>返回论文库</button></main>
-        : workspace && workspace.paper.id === route.paperId && <PaperWorkspace workspace={workspace} route={route} busy={busy} progress={progress} error={workspaceError}
-          openedPdfSource={openedPdfSource} answer={answer} proposals={proposals} question={question} onQuestion={setQuestion}
-          onAskPaper={askPaper} onAcceptProposal={acceptProposal} onRetry={retryImport} onNavigate={navigate} />)}
+        : workspace && workspace.paper.id === route.paperId && <PaperWorkspace workspace={workspace} route={route} busy={busy} progress={progress}
+          error={workspaceError ?? discussionError} openedPdfSource={openedPdfSource} conversations={conversations}
+          conversation={conversation} knowledge={knowledge} question={question} onQuestion={updateQuestion}
+          onAskPaper={askPaper} onRetryMessage={retryMessage} onAcceptProposal={acceptProposal}
+          onReviewProposal={reviewProposal}
+          onManageConversation={manageConversation} onContinueConversation={continueConversation}
+          onRetry={retryImport} onNavigate={navigate} />)}
   </div>;
 }
 
@@ -452,6 +578,14 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
     setActionError(null);
     await onRefresh();
   };
+  const decideTakeaway = async (proposal: ReviewProposal, action: "accept" | "edit-and-accept" | "reject", editedClaim?: string) => {
+    const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/decisions`, { method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+      body: JSON.stringify({ action, ...(editedClaim ? { editedClaim } : {}) }) });
+    if (!response.ok) { setActionError("Proposal 已变化，或固定来源尚未完成核验。"); return; }
+    setActionError(null);
+    await onRefresh();
+  };
   return <main className="app page reviews-page"><header className="page-header"><span className="eyebrow">REVIEW CENTER</span><h1>审核中心</h1>
     <p>Proposal 在确认前不会成为长期知识。</p></header>
     {actionError && <p className="error-block">{actionError}</p>}
@@ -468,6 +602,16 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
           <button onClick={() => void openCandidate(proposal)}>打开候选 PDF</button>
           <button disabled={!opened.has(proposal.id)} onClick={() => void acceptCandidate(proposal)}>确认采用此版本</button>
         </div>}
+        {proposal.proposalType === "takeaway" && <div className="review-actions">
+          {!proposal.oneClickEligible && <button onClick={() => void openCandidate(proposal)}>查看固定来源</button>}
+          {!proposal.legacySource && <button disabled={!proposal.oneClickEligible && !opened.has(proposal.id)}
+            onClick={() => void decideTakeaway(proposal, "accept")}>确认</button>}
+          {!proposal.legacySource && <button disabled={!proposal.oneClickEligible && !opened.has(proposal.id)} onClick={() => {
+            const edited = window.prompt("编辑确认后的 Takeaway", proposal.payload.claim ?? "");
+            if (edited) void decideTakeaway(proposal, "edit-and-accept", edited); }}>编辑后确认</button>}
+          <button onClick={() => void decideTakeaway(proposal, "reject")}>拒绝</button>
+        </div>}
+        {proposal.legacySource && <p className="inline-alert">旧 Conversation 来源不完整，只能查看或拒绝，不能确认。</p>}
         {proposal.paperId && <button className="text-button" onClick={() => onNavigate(paperHref(proposal.paperId!))}>打开相关 Paper →</button>}
       </article>)}</div>}
   </main>;
@@ -480,22 +624,40 @@ function PaperWorkspace(props: {
   progress: ImportJobState | null;
   error: string | null;
   openedPdfSource: OpenedPdfSource | null;
-  answer: string | null;
-  proposals: Proposal[];
+  conversations: ConversationSummary[];
+  conversation: ConversationDetail | null;
+  knowledge: KnowledgeModel;
   question: string;
   onQuestion(value: string): void;
   onAskPaper(event: React.FormEvent): void;
+  onRetryMessage(messageId: string): void;
   onAcceptProposal(proposal: Proposal): void;
+  onReviewProposal(proposal: Proposal, action: "accept" | "edit-and-accept" | "reject", editedClaim?: string): void;
+  onManageConversation(action: "rename" | "archive" | "restore", title?: string): void;
+  onContinueConversation(): void;
   onRetry(): void;
-  onNavigate(href: string): void;
+  onNavigate(href: string, replace?: boolean): void;
 }) {
   const { workspace, route } = props;
   const codeStatus = workspace.repository?.status === "ready" ? "代码可用于讨论"
     : workspace.repository?.status === "failed" ? "代码关联失败"
       : workspace.processing && !isTerminalImportJobState(workspace.processing.state) ? "正在检查代码关联" : "未发现明确代码链接";
   const setPdf = (pdfOpen: boolean, page = route.page, anchor = route.anchor) => {
-    props.onNavigate(paperHref(workspace.paper.id, { pdfOpen, page, anchor }));
+    props.onNavigate(paperHref(workspace.paper.id, { mode: route.mode, conversationId: route.conversationId, pdfOpen, page, anchor }));
   };
+  const pdfPageCount = route.mode === "discussion"
+    ? props.conversation?.contextSnapshot?.pageCount ?? 0
+    : workspace.pdf?.pageCount ?? 0;
+  const changePdfPage = (offset: number) => {
+    const page = Math.min(pdfPageCount || route.page, Math.max(1, route.page + offset));
+    props.onNavigate(paperHref(workspace.paper.id, { mode: route.mode, conversationId: route.conversationId,
+      pdfOpen: true, page, anchor: null }), true);
+  };
+  const modeHref = (mode: "reading" | "discussion" | "knowledge") => paperHref(workspace.paper.id,
+    { mode, conversationId: null, pdfOpen: false, page: 1, anchor: null });
+  const running = props.conversation?.messages.some((message) => message.attempts.some((attempt) => attempt.state === "running")) ?? false;
+  const discussionProposals = props.knowledge.pendingProposals.filter((proposal) =>
+    proposal.source.conversationId === props.conversation?.conversation.id);
   return <main className="app workspace">
     <header className="topbar"><a className="ghost" href="/papers" onClick={(event) => { event.preventDefault(); props.onNavigate("/papers"); }}>← 论文库</a>
       <div><span className="eyebrow">PAPER WORKSPACE</span><h1>{workspace.paper.title}</h1>
@@ -505,7 +667,84 @@ function PaperWorkspace(props: {
         <span className="code-status" title={workspace.repository?.url}>{codeStatus}</span></div>
     </header>
     {props.error && <div className="inline-alert">{props.error}</div>}
-    <div className={`reading-grid ${route.pdfOpen ? "split" : ""}`}>
+    <nav className="workspace-modes" aria-label="Paper workspace mode">
+      {(["reading", "discussion", "knowledge"] as const).map((mode) => <a key={mode} href={modeHref(mode)}
+        aria-current={route.mode === mode ? "page" : undefined}
+        onClick={(event) => { event.preventDefault(); props.onNavigate(modeHref(mode)); }}>{mode === "reading" ? "Reading" : mode === "discussion" ? "Discussion" : "Knowledge"}</a>)}
+    </nav>
+    {route.mode === "discussion" && <div className="discussion-layout">
+      <aside className="conversation-list"><div className="conversation-list-heading"><div><span className="eyebrow">CONVERSATIONS</span><h2>论文讨论</h2></div>
+        <button onClick={() => props.onNavigate(modeHref("discussion"))}>新对话</button></div>
+        {props.conversations.length === 0 && <p className="empty">还没有 Conversation。</p>}
+        {props.conversations.map((item) => <a key={item.id}
+          className={route.conversationId === item.id ? "selected" : ""}
+          href={paperHref(workspace.paper.id, { mode: "discussion", conversationId: item.id, pdfOpen: false, page: 1, anchor: null })}
+          onClick={(event) => { event.preventDefault(); props.onNavigate(paperHref(workspace.paper.id,
+            { mode: "discussion", conversationId: item.id, pdfOpen: false, page: 1, anchor: null })); }}>
+          <strong>{item.title}</strong><small>{item.status === "archived" ? "已归档" : item.snapshotIntegrity === "legacy" ? "Legacy · 只读" : "上下文已冻结"}</small></a>)}
+      </aside>
+      <section className="discussion-pane">
+        {!route.conversationId && <div className="discussion-empty"><span className="eyebrow">NEW CONVERSATION</span><h2>从一个问题开始</h2>
+          <p>发送后将立即冻结当前 Paper、Summary、Extraction 与 Repository Snapshots。</p></div>}
+        {route.conversationId && !props.conversation && <div className="discussion-empty"><h2>正在恢复 Conversation…</h2></div>}
+        {props.conversation && <><header className="conversation-header"><div><span className="eyebrow">{props.conversation.conversation.snapshotIntegrity === "legacy" ? "LEGACY · READ ONLY" : "FROZEN CONTEXT"}</span>
+          <h2>{props.conversation.conversation.title}</h2></div><div className="conversation-actions"><small>{props.conversation.contextSnapshot?.repositorySnapshots.length ?? 0} repository snapshots</small>
+            <button onClick={() => { const title = window.prompt("Conversation 标题", props.conversation!.conversation.title); if (title) void props.onManageConversation("rename", title); }}>重命名</button>
+            <button onClick={() => void props.onManageConversation(props.conversation!.conversation.status === "archived" ? "restore" : "archive")}>{props.conversation.conversation.status === "archived" ? "恢复" : "归档"}</button></div></header>
+          <div className="message-timeline">{props.conversation.messages.map((message) => <article key={message.id} className={`message ${message.role}`}>
+            <b>{message.role === "user" ? "你" : "ScholarLoom"}</b><p>{message.content}</p>
+            {message.citations.length > 0 && <div className="citation-list">{message.citations.map((citation, index) => {
+              const locator = citation.locator;
+              const label = locator.type === "pdf" ? `PDF · p. ${String(locator.page)}`
+                : locator.type === "code" ? `${String(locator.path)} · ${String(locator.commitSha).slice(0, 8)}`
+                  : locator.type === "summary" ? `Summary · ${String(locator.sectionKey)}` : "历史消息";
+              const href = locator.type === "pdf" ? paperHref(workspace.paper.id, { mode: "discussion", conversationId: route.conversationId,
+                pdfOpen: true, page: Number(locator.page), anchor: String(locator.evidenceAnchorId) }) : "#";
+              if (locator.type === "code") return <details key={`${message.id}-${index}`} className="citation-detail">
+                <summary className="citation">{label}</summary><code>{String(locator.commitSha)} · {String(locator.path)}:{String(locator.startLine)}-{String(locator.endLine)}</code>
+              </details>;
+              if (locator.type === "summary" || locator.type === "message") return <details key={`${message.id}-${index}`} className="citation-detail">
+                <summary className="citation">{label}</summary><code>{JSON.stringify(locator)}</code>
+              </details>;
+              return <a key={`${message.id}-${index}`} className="citation" href={href}
+                onClick={(event) => { event.preventDefault(); props.onNavigate(href); }}>{label}</a>;
+            })}</div>}
+            {message.attempts.slice(-1).map((attempt) => attempt.state !== "succeeded" && <div key={attempt.id} className={`attempt ${attempt.state}`}>
+              <span>{attempt.state === "running" ? "正在处理…" : attempt.state === "interrupted" ? "服务中断，回答未完成" : `回答失败 · ${attempt.error?.code ?? "unknown"}`}</span>
+              {(attempt.state === "failed" || attempt.state === "interrupted") && <button onClick={() => void props.onRetryMessage(message.id)}>重试</button>}
+            </div>)}</article>)}
+            {discussionProposals.map((proposal) => <article className="proposal" key={proposal.id}><span>TAKEAWAY PROPOSAL</span>
+              <p>{proposal.claim}</p><div className="review-actions">{!proposal.legacySource && <>
+                <button onClick={() => void props.onReviewProposal(proposal, "accept")}>确认</button>
+                <button onClick={() => { const edited = window.prompt("编辑确认后的 Takeaway", proposal.claim); if (edited) void props.onReviewProposal(proposal, "edit-and-accept", edited); }}>编辑后确认</button></>}
+                <button onClick={() => void props.onReviewProposal(proposal, "reject")}>拒绝</button></div></article>)}</div></>}
+        {(!props.conversation || (props.conversation.conversation.status === "active" && props.conversation.conversation.snapshotIntegrity === "frozen")) &&
+          <form className="chat-form discussion-composer" onSubmit={props.onAskPaper}><input aria-label="Paper question" value={props.question}
+            onChange={(event) => props.onQuestion(event.target.value)} placeholder="论文、Summary 或固定代码快照中的问题…" disabled={running}/>
+            <button disabled={running || !props.question.trim()}>{running ? "处理中" : "发送"}</button></form>}
+        {props.conversation?.conversation.snapshotIntegrity === "legacy" && <button className="continue-latest"
+          onClick={() => void props.onContinueConversation()}>使用最新上下文继续</button>}
+      </section>
+      {route.pdfOpen && <aside className="pdf-pane source-view"><div className="pdf-toolbar"><strong>固定 PDF 证据</strong>
+        <button aria-label="上一页" disabled={route.page <= 1} onClick={() => changePdfPage(-1)}>←</button>
+        <span>Page {route.page} / {pdfPageCount}</span>
+        <button aria-label="下一页" disabled={route.page >= pdfPageCount} onClick={() => changePdfPage(1)}>→</button></div>
+        <PdfFrame src={`/api/paper-versions/${encodeURIComponent(props.conversation?.contextSnapshot?.paperVersionId ?? workspace.paper.versionId)}/pdf#page=${route.page}`} /></aside>}
+    </div>}
+    {route.mode === "knowledge" && <section className="knowledge-workspace"><header><span className="eyebrow">PAPER KNOWLEDGE</span><h2>已审核知识</h2></header>
+      <div className="knowledge-columns"><div><h3>Pending Proposals</h3>{props.knowledge.pendingProposals.length === 0 && <p className="empty">没有待审核 Proposal。</p>}
+        {props.knowledge.pendingProposals.map((proposal) => <article className="proposal" key={proposal.id}><span>{proposal.legacySource ? "LEGACY · REJECT ONLY" : "TAKEAWAY PROPOSAL"}</span>
+          <p>{proposal.claim}</p><small>来源：{proposal.source.conversationId}</small><div className="review-actions">
+            {!proposal.legacySource && <><button onClick={() => void props.onReviewProposal(proposal, "accept")}>确认</button>
+              <button onClick={() => { const edited = window.prompt("编辑确认后的 Takeaway", proposal.claim); if (edited) void props.onReviewProposal(proposal, "edit-and-accept", edited); }}>编辑后确认</button></>}
+            <button onClick={() => void props.onReviewProposal(proposal, "reject")}>拒绝</button></div></article>)}</div>
+        <div><h3>Confirmed Takeaways</h3>{props.knowledge.confirmedTakeaways.length === 0 && <p className="empty">尚无 confirmed Takeaway。</p>}
+          {props.knowledge.confirmedTakeaways.map((takeaway) => <article className="takeaway" key={takeaway.id}><span className="eyebrow">CONFIRMED · R{takeaway.revision}</span>
+            <p>{takeaway.claim}</p><a href={paperHref(workspace.paper.id, { mode: "discussion", conversationId: takeaway.source.conversationId,
+              pdfOpen: false, page: 1, anchor: null })} onClick={(event) => { event.preventDefault(); props.onNavigate(paperHref(workspace.paper.id,
+                { mode: "discussion", conversationId: takeaway.source.conversationId, pdfOpen: false, page: 1, anchor: null })); }}>查看来源 Conversation →</a></article>)}</div></div>
+    </section>}
+    {route.mode === "reading" && <div className={`reading-grid ${route.pdfOpen ? "split" : ""}`}>
       <article className="summary-pane">
         <div className="pane-title"><div><span className="status">{workspace.summary ? "Summary Ready"
           : workspace.processing?.state === "cancelled" ? "Import Cancelled"
@@ -521,26 +760,21 @@ function PaperWorkspace(props: {
         {workspace.summary?.sections.map((section, index) => <section key={section.key}><span className="section-no">{String(index + 1).padStart(2, "0")}</span>
           <h3>{section.title}</h3><SummaryMarkdown markdown={section.body} pageCount={workspace.pdf?.pageCount ?? 0}
             onOpenEvidence={(page) => props.onNavigate(paperHref(workspace.paper.id, {
-              pdfOpen: true, page, anchor: `page:${page}`,
+              mode: "reading", pdfOpen: true, page, anchor: `page:${page}`,
             }))} /></section>)}
         {workspace.summary && <section><span className="section-no">KEY CLAIMS</span><h3>关键结论与证据</h3>
           {workspace.summary.claims.map((claim) => <button className={`claim ${route.anchor === claim.evidence.id ? "selected" : ""}`} key={claim.claim}
-            onClick={() => { props.onNavigate(paperHref(workspace.paper.id, { pdfOpen: true, page: claim.evidence.page,
+            onClick={() => { props.onNavigate(paperHref(workspace.paper.id, { mode: "reading", pdfOpen: true, page: claim.evidence.page,
               anchor: claim.evidence.id ?? `page:${claim.evidence.page}` })); }}>
             <span>{claim.claim}</span><small>p. {claim.evidence.page} · {claim.evidence.verified ? "原文已核验" : "仅定位"}</small></button>)}</section>}
-        {workspace.summary && <section className="conversation"><span className="section-no">DISCUSS</span><h3>围绕 Paper 继续追问</h3>
-          <p className="source-boundary">当前 Paper、Summary、历史讨论{workspace.repository?.status === "ready" ? "及固定代码快照" : ""}可作为信源。</p>
-          {props.answer && <div className="agent-answer"><b>ScholarLoom</b><p>{props.answer}</p></div>}
-          {props.proposals.map((proposal) => <div className="proposal" key={proposal.id}><span>建议沉淀为 Takeaway</span><p>{proposal.claim}</p>
-            <button onClick={() => void props.onAcceptProposal(proposal)}>{proposal.oneClickEligible ? "确认沉淀" : "打开证据后确认"}</button></div>)}
-          <form className="chat-form" onSubmit={props.onAskPaper}><input aria-label="Paper question" value={props.question}
-            onChange={(event) => props.onQuestion(event.target.value)} placeholder="论文或代码中的实现细节…"/><button>发送</button></form>
-        </section>}
       </article>
-      {route.pdfOpen && <aside className="pdf-pane"><div className="pdf-toolbar"><strong>原始 PDF</strong><span>Page {route.page} / {workspace.pdf?.pageCount}</span></div>
-        <iframe title="原始 PDF" src={props.openedPdfSource?.anchor === route.anchor && props.openedPdfSource.page === route.page
+      {route.pdfOpen && <aside className="pdf-pane"><div className="pdf-toolbar"><strong>原始 PDF</strong>
+        <button aria-label="上一页" disabled={route.page <= 1} onClick={() => changePdfPage(-1)}>←</button>
+        <span>Page {route.page} / {pdfPageCount}</span>
+        <button aria-label="下一页" disabled={route.page >= pdfPageCount} onClick={() => changePdfPage(1)}>→</button></div>
+        <PdfFrame src={props.openedPdfSource?.anchor === route.anchor && props.openedPdfSource.page === route.page
           ? props.openedPdfSource.href : `/api/paper-versions/${encodeURIComponent(workspace.paper.versionId)}/pdf#page=${route.page}`} /></aside>}
-    </div>
+    </div>}
   </main>;
 }
 

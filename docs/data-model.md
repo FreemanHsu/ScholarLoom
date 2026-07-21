@@ -272,13 +272,25 @@ Context Snapshot containing:
 - zero or more Repository Snapshots.
 
 Updating a Paper, Summary, extraction, or repository does not reinterpret old
-Messages. Continuing with newer material creates a new Context Snapshot boundary.
+Messages. A Conversation has one set-once Context Snapshot in this slice; continuing
+with newer material creates a new Conversation linked by `continuedFromConversationId`.
+Migration diagnostics classify pre-slice rows as `frozen` or `legacy`. A legacy row
+is readable but cannot create new Agent Runs or confirmed knowledge.
 
 ### 8.2 Message
 
 Messages form immutable process history. They may be archived and are available to
 the relevant Paper-scoped Agent, but they are not accepted personal knowledge and
 are not searched by the MVP entry Agent.
+
+Each user Message has a stable ordinal and one or more turn attempts. Attempt state
+lives in `job_runs`; `conversation_turn_attempts` supplies retry lineage. At most one
+attempt is non-terminal per Conversation and at most one assistant Message may reply
+successfully to a user Message. Retry never inserts another user Message.
+
+New assistant citations are normalized `message_citations`. The application resolves
+their locators from the attempt's persisted handle manifest; an Agent cannot invent
+an Evidence Anchor, repository commit, path, or line range.
 
 ### 8.3 Annotation
 

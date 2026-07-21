@@ -227,6 +227,7 @@ CREATE TABLE extraction_runs (
         status IN ('queued', 'running', 'succeeded', 'failed', 'discarded')
     ),
     is_active INTEGER NOT NULL DEFAULT 0 CHECK (is_active IN (0, 1)),
+    page_count INTEGER CHECK (page_count IS NULL OR page_count >= 1),
     started_at TEXT,
     completed_at TEXT,
     error_json TEXT CHECK (error_json IS NULL OR json_valid(error_json))
@@ -399,14 +400,15 @@ CREATE TABLE code_analyses (
 CREATE TABLE conversations (
     id TEXT PRIMARY KEY,
     paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-    title TEXT,
-    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived', 'deleted')),
-    current_context_snapshot_id TEXT REFERENCES context_snapshots(id) ON DELETE SET NULL
+    title TEXT NOT NULL DEFAULT '新对话',
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+    active_context_snapshot_id TEXT REFERENCES context_snapshots(id) ON DELETE SET NULL
         DEFERRABLE INITIALLY DEFERRED,
+    continued_from_conversation_id TEXT REFERENCES conversations(id),
+    snapshot_integrity TEXT NOT NULL CHECK (snapshot_integrity IN ('frozen', 'legacy')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    archived_at TEXT,
-    deleted_at TEXT
+    archived_at TEXT
 ) STRICT;
 
 CREATE TABLE context_snapshots (
@@ -415,26 +417,72 @@ CREATE TABLE context_snapshots (
     paper_version_id TEXT NOT NULL REFERENCES paper_versions(id) ON DELETE RESTRICT,
     summary_revision_id TEXT NOT NULL REFERENCES summary_revisions(id) ON DELETE RESTRICT,
     extraction_run_id TEXT NOT NULL REFERENCES extraction_runs(id) ON DELETE RESTRICT,
+    repositories_json TEXT NOT NULL CHECK (json_valid(repositories_json)),
     created_at TEXT NOT NULL
 ) STRICT;
 
-CREATE TABLE context_snapshot_repositories (
-    context_snapshot_id TEXT NOT NULL REFERENCES context_snapshots(id) ON DELETE CASCADE,
-    repository_snapshot_id TEXT NOT NULL REFERENCES repository_snapshots(id) ON DELETE RESTRICT,
-    PRIMARY KEY (context_snapshot_id, repository_snapshot_id)
-) STRICT;
+CREATE TRIGGER context_snapshots_one_per_new_conversation
+BEFORE INSERT ON context_snapshots
+WHEN EXISTS (SELECT 1 FROM context_snapshots WHERE conversation_id = NEW.conversation_id)
+BEGIN
+    SELECT RAISE(ABORT, 'conversation-context-snapshot-immutable');
+END;
+
+CREATE TRIGGER conversations_context_snapshot_set_once
+BEFORE UPDATE OF active_context_snapshot_id ON conversations
+WHEN OLD.active_context_snapshot_id IS NOT NULL
+    AND NEW.active_context_snapshot_id IS NOT OLD.active_context_snapshot_id
+BEGIN
+    SELECT RAISE(ABORT, 'conversation-context-snapshot-immutable');
+END;
+
+CREATE TRIGGER context_snapshots_no_update
+BEFORE UPDATE ON context_snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'conversation-context-snapshot-immutable');
+END;
+
+CREATE TRIGGER context_snapshots_no_delete
+BEFORE DELETE ON context_snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'conversation-context-snapshot-immutable');
+END;
 
 CREATE TABLE messages (
     id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     context_snapshot_id TEXT NOT NULL REFERENCES context_snapshots(id) ON DELETE RESTRICT,
-    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
-    content_text TEXT NOT NULL,
-    agent_job_run_id TEXT REFERENCES agent_runs(job_run_id) ON DELETE SET NULL,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    citations_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(citations_json)),
+    ordinal INTEGER CHECK (ordinal >= 1),
+    in_reply_to_message_id TEXT REFERENCES messages(id),
     created_at TEXT NOT NULL,
-    deleted_at TEXT,
     UNIQUE (conversation_id, ordinal)
+) STRICT;
+
+CREATE UNIQUE INDEX messages_one_assistant_reply
+    ON messages(in_reply_to_message_id)
+    WHERE role = 'assistant' AND in_reply_to_message_id IS NOT NULL;
+
+CREATE TABLE conversation_turn_attempts (
+    job_run_id TEXT PRIMARY KEY REFERENCES job_runs(id),
+    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+    user_message_id TEXT NOT NULL REFERENCES messages(id),
+    attempt_no INTEGER NOT NULL CHECK (attempt_no > 0),
+    created_at TEXT NOT NULL,
+    UNIQUE (user_message_id, attempt_no)
+) STRICT;
+
+CREATE TABLE message_citations (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL REFERENCES messages(id),
+    ordinal INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('pdf_anchor', 'summary_locator', 'repo_lines', 'message')),
+    source_handle TEXT NOT NULL,
+    locator_json TEXT NOT NULL CHECK (json_valid(locator_json)),
+    verification_status TEXT NOT NULL CHECK (verification_status IN ('verified', 'unverified')),
+    UNIQUE (message_id, ordinal)
 ) STRICT;
 
 CREATE TABLE message_evidence (

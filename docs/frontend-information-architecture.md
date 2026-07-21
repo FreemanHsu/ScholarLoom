@@ -273,14 +273,23 @@ The next accepted slice is **Recoverable Research Navigation**.
 - URL persistence for PDF visibility, selected page, and Evidence Anchor;
 - correct direct-link, refresh, browser-back, and browser-forward behavior.
 
+### Implemented by the recoverable Discussion/Knowledge slice
+
+- Reading, Discussion, and Knowledge workspace modes;
+- stable Conversation identity URLs and URL-restored source state;
+- multiple active/archived Conversations with frozen context;
+- persistent Message/attempt states, explicit retry, and local per-Conversation draft;
+- pending Proposal and confirmed Takeaway Paper Knowledge views;
+- single-column narrow-screen mode switching and full-screen source view.
+
 ### Not included
 
-- full Discussion and Knowledge mode restructuring;
 - persisted personal reading state;
 - a notification center;
 - a standalone Code mode;
 - inferred repository discovery;
-- visual redesign.
+- Conversation Digest and cross-Conversation automatic memory;
+- Summary regeneration and Paper Version comparison.
 
 ### Browser acceptance journey
 
@@ -292,6 +301,6 @@ The next accepted slice is **Recoverable Research Navigation**.
 6. Refresh and retain the same Paper, PDF visibility, page, and anchor.
 7. Use browser back and forward and observe the expected meaningful states.
 
-Later slices can add reading-state persistence, dedicated Discussion/Knowledge modes,
-notification history, and richer review workflows without changing this route and
-recovery foundation.
+Later slices can add reading-state persistence, notification history, Conversation
+Digest, and richer knowledge-node types without changing this route and recovery
+foundation.

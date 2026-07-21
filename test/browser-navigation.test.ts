@@ -10,10 +10,33 @@ describe("browser navigation", () => {
     })).toEqual({
       name: "paper",
       paperId: "paper:fixture:2024:traceable",
+      mode: "reading",
+      conversationId: null,
       pdfOpen: true,
       page: 7,
       anchor: "evidence:claim:1",
     });
+  });
+
+  it("restores Discussion and Knowledge modes including a stable Conversation path", () => {
+    expect(readBrowserRoute({
+      pathname: "/papers/paper%3Afixture/conversations/conversation%3Aone",
+      search: "?mode=knowledge&pdf=open&page=3&anchor=evidence%3A3",
+    })).toEqual({
+      name: "paper",
+      paperId: "paper:fixture",
+      mode: "discussion",
+      conversationId: "conversation:one",
+      pdfOpen: true,
+      page: 3,
+      anchor: "evidence:3",
+    });
+    expect(readBrowserRoute({ pathname: "/papers/paper%3Afixture", search: "?mode=knowledge" })).toMatchObject({
+      mode: "knowledge",
+      conversationId: null,
+    });
+    expect(paperHref("paper:fixture", { mode: "discussion", conversationId: "conversation:one",
+      pdfOpen: false, page: 1, anchor: null })).toBe("/papers/paper%3Afixture/conversations/conversation%3Aone");
   });
 
   it("recognizes every top-level destination and rejects unknown paths", () => {

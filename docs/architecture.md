@@ -179,13 +179,24 @@ state. It does not expose table-shaped repositories.
 Interface:
 
 ```ts
-start(input: { paperId: string }): Promise<ConversationHandle>
-send(input: { conversationId: string; text: string }): AsyncIterable<ConversationEvent>
+start(input: { paperId: string; continuedFromConversationId?: string }): ConversationHandle
+send(input: { conversationId: string; text: string; idempotencyKey: string }): AttemptHandle
+retry(input: { userMessageId: string; idempotencyKey: string }): AttemptHandle
+read(conversationId: string): ConversationReadModel
 ```
 
-It freezes a Context Snapshot, chooses available Paper and code context, persists
-Messages, invokes Codex, verifies citations, and emits Takeaway/Insight Proposals.
-Updating underlying material creates a new Context Snapshot boundary.
+It freezes a Context Snapshot, persists the user Message and attempt before invoking
+Codex, verifies output against the persisted handle manifest, and atomically commits
+the assistant Message, normalized citations, and Takeaway Proposals. `job_runs` owns
+runtime state; `agent_runs` is written only for validated successful output. Updating
+underlying material requires a new Conversation boundary.
+
+The implementation keeps this boundary explicit even while the enclosing application
+still uses `ImportStore` as its compatibility facade: `ConversationStore` owns list,
+read, rename/archive, and retry eligibility; `ContextSnapshotBuilder` owns creation
+and freeze validation; startup recovery owns running-to-interrupted reconciliation.
+Agent invocation and its two transaction protocol remain orchestrated behind the
+facade so this slice does not force an unrelated repository-wide storage rewrite.
 
 ### 4.4 KnowledgeReview
 
@@ -370,8 +381,14 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | GET | `/api/papers` | List Paper read models |
 | GET | `/api/papers/:id` | Load Paper workspace read model |
 | GET | `/api/paper-versions/:id/pdf` | Stream the accepted PDF asset |
-| POST | `/api/papers/:id/conversations` | Start a Context Snapshot conversation |
-| POST | `/api/conversations/:id/messages` | Send a Message and stream events |
+| GET/POST | `/api/papers/:id/conversations` | List or start frozen Conversations |
+| GET | `/api/conversations/:id` | Restore Messages, attempts, citations, and context |
+| POST | `/api/conversations/:id/messages` | Persist a Message/attempt and return `202` |
+| POST | `/api/messages/:id/retry` | Retry the original Message with frozen context |
+| POST | `/api/conversations/:id/rename` | Rename a Conversation |
+| POST | `/api/conversations/:id/archive` | Archive without destructive delete |
+| POST | `/api/conversations/:id/restore` | Restore an archived Conversation |
+| GET | `/api/papers/:id/knowledge` | Read pending Proposals and confirmed Takeaways |
 | GET | `/api/proposals` | List reviewable suggestions |
 | POST | `/api/proposals/:id/decisions` | Accept, edit, or reject |
 | POST | `/api/entry-agent/questions` | Query global-curated knowledge |
@@ -379,6 +396,10 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 Commands accept an `Idempotency-Key`. Errors use stable problem codes such as
 `invalid-arxiv-reference`, `paper-source-unavailable`, `proposal-already-decided`,
 and `codex-output-invalid`.
+
+The generic durable SSE route is transport only: clients refetch the Conversation
+read model after an event or reconnect. Startup recovery completes before the server
+listens and marks dead paper-chat runs interrupted without silently dispatching them.
 
 New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
 compatibility input. Direct PDF acquisition validates DNS and every redirect before

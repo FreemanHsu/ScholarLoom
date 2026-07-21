@@ -356,6 +356,11 @@ PRD 只保留产品层约束：Paper 是跨 arXiv/DOI/正式发表版本的稳�
 结论；Insight/Concept/Topic/Question/Synthesis 共享 KnowledgeNode 生命周期；来源链与
 语义关系严格分离；入口 Agent 的 v1 索引仅包含 active Summary 与已确认知识。
 
+Paper Workspace 正式包含 Reading、Discussion、Knowledge。Conversation 支持多个
+Paper-scoped 实例、稳定 URL 和唯一冻结 Context Snapshot。user Message 必须先于
+Codex 持久化，失败或中断只允许显式 retry。pending Proposal 不是知识，只有 Review
+Decision 可以生成 confirmed Takeaway。
+
 ## 9. 关键交互
 
 ### 9.1 导入

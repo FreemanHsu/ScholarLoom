@@ -46,6 +46,11 @@ Skill 驱动的 Codex Summary → 固定 Git commit → Paper Conversation → �
 Takeaway → curated-only Entry Agent。系统使用 React/Vite、Fastify、SQLite FTS5 与
 Codex CLI，不引入向量数据库。
 
+Paper Workspace 现包含可恢复的 Reading、Discussion 与 Knowledge 模式。
+Conversation 使用稳定 URL 和不可变 Context Snapshot；Message、Agent attempt、
+引用与 Takeaway Proposal 可在刷新或重启后恢复。失败和中断只允许显式 retry，
+不会在启动时静默重跑。
+
 ## 本地运行
 
 要求 Node.js 22+、Git 和已完成登录的 Codex CLI。
