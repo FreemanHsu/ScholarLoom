@@ -1,15 +1,16 @@
-import { chmod, mkdtemp, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { PDFDocument, StandardFonts } from "pdf-lib";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import type { FastifyInstance } from "fastify";
 
-import { createApp } from "../src/app.js";
+import { createApp, type CreateAppOptions } from "../src/app.js";
 import { GitRepositoryAdapter } from "../src/adapters/git-repository.js";
 import { initializeDataRoot } from "../src/storage/layout.js";
 
@@ -182,6 +183,68 @@ describe("paper ingestion lifecycle", () => {
     const afterRebuild = await app.inject({ method: "POST", url: "/api/entry-agent/questions", payload: { question: "fixture 可追溯证据" } });
     expect(afterRebuild.json().sources).toEqual(entry.json().sources);
     await app.close();
+  });
+
+  it("removes a repository-retry Proposal after a later import links the repository successfully", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-repository-retry-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const working = join(root, "working");
+    const bare = join(root, "fixture.git");
+    await exec("git", ["init", working]);
+    await exec("git", ["-C", working, "config", "user.email", "fixture@example.test"]);
+    await exec("git", ["-C", working, "config", "user.name", "Fixture"]);
+    await writeFile(join(working, "README.md"), "# Fixture", "utf8");
+    await mkdir(join(working, "docs"));
+    await writeFile(join(working, "docs", "guide.md"), "# Guide", "utf8");
+    await symlink("docs", join(working, "linked-docs"));
+    await exec("git", ["-C", working, "add", "."]);
+    await exec("git", ["-C", working, "commit", "-m", "fixture"]);
+    await exec("git", ["clone", "--bare", working, bare]);
+    const repository = new GitRepositoryAdapter({ "https://github.com/example/fixture": bare });
+    let attempts = 0;
+    const options: CreateAppOptions = {
+      storageLayout,
+      repositoryAdapter: { async materialize(url, destination) {
+        attempts += 1;
+        const materialized = await repository.materialize(url, destination);
+        if (attempts === 1) {
+          await writeFile(join(destination, "README.md"), "# Mutated after clone", "utf8");
+          const error = new Error("EISDIR: illegal operation on a directory, read") as NodeJS.ErrnoException;
+          error.code = "EISDIR";
+          throw error;
+        }
+        return materialized;
+      } },
+      paperSource: { async resolve() { return { arxivId: "2401.12345", latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
+        async fetchPdf() { return fixturePdf(); } },
+      codexRunner: { async runSummary() { return { sections: [{ key: "overview", title: "概述", body: "fixture" }],
+        claims: [{ voice: "paper-evidence", claim: "Table 1 reports accuracy 91.2.", sourceHandle: "pdf-page:2" }], readStatus: "read" }; } },
+    };
+    const app = await createApp(options);
+    const first = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
+    await waitForImport(app, first.json().importRequest.id);
+    expect((await app.inject({ method: "GET", url: "/api/proposals" })).json().proposals)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ proposalType: "repository-retry", reviewStatus: "pending" })]));
+
+    const retried = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
+    await waitForImport(app, retried.json().importRequest.id);
+    expect(attempts).toBe(2);
+    expect((await app.inject({ method: "GET", url: `/api/papers/${retried.json().paper.id}` })).json().repository)
+      .toMatchObject({ status: "ready" });
+    expect((await app.inject({ method: "GET", url: "/api/proposals" })).json().proposals)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ proposalType: "repository-retry", reviewStatus: "pending" })]));
+    const [repositoryCache] = await readdir(storageLayout.repositoryRoot);
+    expect(await readFile(join(storageLayout.repositoryRoot, repositoryCache!, "README.md"), "utf8")).toBe("# Fixture");
+    await app.close();
+
+    const database = new Database(storageLayout.databasePath);
+    database.prepare("UPDATE proposals SET review_status='pending',decided_at=NULL WHERE proposal_type='repository-retry'").run();
+    database.prepare("DELETE FROM schema_migrations WHERE version=14").run();
+    database.close();
+    const migrated = await createApp(options);
+    expect((await migrated.inject({ method: "GET", url: "/api/proposals" })).json().proposals)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ proposalType: "repository-retry", reviewStatus: "superseded" })]));
+    await migrated.close();
   });
 
   it("recovers every Summary write phase and preserves a competing external edit", async () => {

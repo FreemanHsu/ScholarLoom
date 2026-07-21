@@ -154,6 +154,9 @@ hash, and stored PDF Artifact.
 ### 5.3 Code Repository and Snapshot
 
 Code Repository is shared across Papers. Repository Snapshot is a fixed commit.
+When a previously failed explicit repository link is materialized successfully, its
+pending `repository-retry` Proposal becomes `superseded` in the same transaction; no
+user Review Decision is fabricated for an operational condition that no longer exists.
 PaperCodeLink records:
 
 - relation: `official`, `author`, `third-party-reproduction`, or `unknown`;

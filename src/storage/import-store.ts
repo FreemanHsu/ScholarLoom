@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
@@ -159,6 +159,11 @@ export class ImportStore {
         .run(document.numPages, now, extractionArtifactId, extractionId);
     }
 
+    const explicitUrl = pages.map((page) => page.text).join("\n").match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/)?.[0]?.replace(/[.,;)]$/, "");
+    const repositoryWork = input.repositoryAdapter && explicitUrl
+      ? this.#materializeRepository(input.paper.id, explicitUrl, input.repositoryAdapter, now).catch((error: unknown) =>
+        this.#recordRepositoryFailure(input.paper.id, explicitUrl, error, now))
+      : Promise.resolve();
     const summaryId = `summary:${versionId}:r1`;
     const existingWrite = this.#database.prepare("SELECT phase,payload_json FROM knowledge_write_requests WHERE id=?")
       .get(`knowledge-write:${summaryId}`) as { phase: string; payload_json: string } | undefined;
@@ -175,14 +180,10 @@ export class ImportStore {
       const resumed = this.#database.prepare("SELECT phase FROM knowledge_write_requests WHERE id=?")
         .get(`knowledge-write:${summaryId}`) as { phase: string };
       if (resumed.phase !== "complete") throw new Error(`knowledge-write-incomplete:${resumed.phase}`);
+      await repositoryWork;
       return;
     }
 
-    const explicitUrl = pages.map((page) => page.text).join("\n").match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/)?.[0]?.replace(/[.,;)]$/, "");
-    const repositoryWork = input.repositoryAdapter && explicitUrl
-      ? this.#materializeRepository(input.paper.id, explicitUrl, input.repositoryAdapter, now).catch((error: unknown) =>
-        this.#recordRepositoryFailure(input.paper.id, explicitUrl, error, now))
-      : Promise.resolve();
     const summaryContext = { paperId: input.paper.id, title: input.paper.title, pages };
     input.onStage?.("paper-summary");
     const result = await input.runSummary(summaryContext);
@@ -424,7 +425,8 @@ export class ImportStore {
     const [owner, name] = parsed.pathname.slice(1).split("/");
     this.#database.transaction(() => {
       this.#database.prepare(`INSERT INTO code_repositories(id,canonical_url,host,owner_name,repository_name,availability_status,created_at,updated_at)
-        VALUES (?,?,?,?,?,'available',?,?) ON CONFLICT(canonical_url) DO NOTHING`).run(repositoryId, url, parsed.host, owner, name, now, now);
+        VALUES (?,?,?,?,?,'available',?,?) ON CONFLICT(canonical_url) DO UPDATE SET availability_status='available',updated_at=excluded.updated_at`)
+        .run(repositoryId, url, parsed.host, owner, name, now, now);
       this.#database.prepare(`INSERT INTO repository_snapshots(id,code_repository_id,commit_sha,local_path,created_at)
         VALUES (?,?,?,?,?) ON CONFLICT(code_repository_id,commit_sha) DO NOTHING`).run(snapshotId, repositoryId, commitSha, digest, now);
       this.#database.prepare(`INSERT INTO paper_code_links(id,paper_id,code_repository_id,link_type,origin,status,repository_snapshot_id,created_at)
@@ -436,8 +438,11 @@ export class ImportStore {
         this.#database.prepare(`INSERT INTO code_elements(id,repository_snapshot_id,relative_path,start_line,end_line,text_content,content_hash)
           VALUES (?,?,?,?,?,?,?) ON CONFLICT(repository_snapshot_id,relative_path,start_line,end_line) DO NOTHING`)
           .run(`code-element:${snapshotId}:${file.relative}`, snapshotId, file.relative, 1, lineCount, text,
-            createHash("sha256").update(text).digest("hex"));
+          createHash("sha256").update(text).digest("hex"));
       }
+      this.#database.prepare(`UPDATE proposals SET review_status='superseded',decided_at=?
+        WHERE id=? AND proposal_type='repository-retry' AND review_status='pending'`)
+        .run(now, `proposal:repository-retry:${paperId}:${digest}`);
     })();
   }
 
@@ -1244,8 +1249,16 @@ export class ImportStore {
 
 function listTextFiles(root: string): Array<{ absolute: string; relative: string }> {
   const tracked = execFileSync("git", ["-C", root, "ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean);
-  return tracked.map((relative) => ({ relative, absolute: join(root, relative) })).filter((file) =>
-    statSync(file.absolute).size <= 256_000 && !readFileSync(file.absolute).includes(0));
+  return tracked.flatMap((relative) => {
+    const absolute = join(root, relative);
+    try {
+      const stats = lstatSync(absolute);
+      if (!stats.isFile() || stats.size > 256_000) return [];
+      return readFileSync(absolute).includes(0) ? [] : [{ relative, absolute }];
+    } catch {
+      return [];
+    }
+  });
 }
 
 function renderSummary(input: { summaryId: string; paper: StoredPaper; versionId: string; extractionId: string; agentRunId: string; skillHash: string;
