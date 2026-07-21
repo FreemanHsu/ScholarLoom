@@ -276,10 +276,9 @@ An index failure marks the projection stale; it does not roll back valid Markdow
 
 ### 4.9 SearchIndex
 
-`EntryAgentSearch` is separate from Paper workspace search. It has no corpus parameter
-and queries only the curated projection; PaperConversation builds its own bounded
-context from the selected Paper Version, Summary Revision, Evidence Anchors, and ready
-Repository Snapshot.
+`EntryAgentSearch` is separate from Discussion evidence exploration. It has no corpus
+parameter and queries only the curated projection. Discussion builds a frozen,
+content-addressed Evidence Workspace and lets one Codex process explore it natively.
 
 Interface:
 
@@ -300,7 +299,7 @@ Only dependencies that genuinely vary receive exposed internal ports.
 | Seam | Production adapter | Test adapter |
 |---|---|---|
 | `PaperSource` | arXiv and safe direct-PDF adapters | deterministic fixture adapters |
-| `CodexRunner` | Codex CLI subprocess adapter | schema-valid deterministic fake |
+| `AgenticEvidenceRunner` | sandboxed Codex CLI JSONL subprocess | deterministic fake |
 | `Clock` | system clock | fixed clock |
 | `IdGenerator` | UUIDv7 generator | deterministic sequence |
 
@@ -325,8 +324,9 @@ type CodexTask<T> = {
 };
 ```
 
-The production adapter creates a Paper-scoped job directory containing only the
-allowed immutable context and runs the equivalent of:
+For Discussion, `EvidenceWorkspaceBuilder` creates a read-only tree and
+`AgentRunCoordinator` owns queue/epoch/lease/cancel/retry. The production adapter runs
+one long-lived process per Attempt, equivalent to:
 
 ```text
 codex exec
@@ -362,9 +362,12 @@ Rules:
   A candidate quotation is re-matched against the anchored page before it is rendered
   as verbatim evidence. Unverified evidence is labelled and cannot use one-click
   confirmation without opening the source page.
-- Runs are ephemeral. Conversation continuity is reconstructed explicitly from
-  Context Snapshot, Messages, and Conversation Digest; it does not depend on hidden
-  Codex session state.
+- Final citations are revalidated against the workspace MANIFEST and create Receipts;
+  sanitized JSONL Activity is progress/audit only. Conversation continuity is
+  reconstructed from frozen durable state, never hidden Codex session state.
+- The inner Codex sandbox and outer deny-default macOS profile allow reads only from
+  the Evidence Workspace, per-run temp, and minimum runtime/auth paths. Shell network
+  is denied and proxy variables are scrubbed; launch canaries fail closed.
 - Timeouts send graceful termination, then force termination after a bounded grace
   period. Partial output never becomes active knowledge.
 

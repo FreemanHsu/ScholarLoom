@@ -270,6 +270,8 @@ Context Snapshot containing:
 - Summary Revision;
 - Extraction Run;
 - zero or more Repository Snapshots.
+- one immutable Knowledge Corpus Manifest containing other papers' active Summary
+  Revisions and confirmed knowledge as of Conversation creation.
 
 Updating a Paper, Summary, extraction, or repository does not reinterpret old
 Messages. A Conversation has one set-once Context Snapshot in this slice; continuing
@@ -288,9 +290,12 @@ lives in `job_runs`; `conversation_turn_attempts` supplies retry lineage. At mos
 attempt is non-terminal per Conversation and at most one assistant Message may reply
 successfully to a user Message. Retry never inserts another user Message.
 
-New assistant citations are normalized `message_citations`. The application resolves
-their locators from the attempt's persisted handle manifest; an Agent cannot invent
-an Evidence Anchor, repository commit, path, or line range.
+Agentic attempts refer to an `EvidenceWorkspace` registry row and append Activity and
+Usage records under a matching run epoch. New assistant citations are final-only
+`EvidenceReceipt` records. Each Receipt fixes source/revision, workspace path,
+content/blob hash, line/page locator, and a bounded verbatim quote. Activity is never
+treated as verified evidence. Legacy one-shot citations remain readable but receive
+no synthetic Receipts.
 
 ### 8.3 Annotation
 

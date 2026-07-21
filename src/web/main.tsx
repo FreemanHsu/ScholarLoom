@@ -10,6 +10,7 @@ import { paperHref, readBrowserRoute, type BrowserRoute } from "./browser-naviga
 import { importMonitor } from "./import-monitor.js";
 import { SummaryMarkdown } from "./summary-markdown.js";
 import { ConversationMessageBody, ConversationProposalGroup } from "./conversation-message.js";
+import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspector.js";
 import "./styles.css";
 
 type Paper = {
@@ -76,8 +77,13 @@ type ConversationDetail = {
   contextSnapshot: { id: string; paperVersionId: string; summaryRevisionId: string; extractionRunId: string;
     pageCount: number; repositorySnapshots: Array<{ id: string; commitSha: string }> } | null;
   messages: Array<{ id: string; role: "user" | "assistant"; content: string; inReplyToMessageId: string | null;
-    citations: Array<{ kind: string; sourceHandle: string; verificationStatus: string; locator: Record<string, unknown> }>;
-    attempts: Array<{ id: string; attemptNo: number; state: string; error: { code?: string } | null }> }>;
+    groundingStatus?: string | null;
+    citations: Array<{ id?: string; evidenceKind?: string; quote?: string; kind?: string; sourceHandle?: string;
+      verificationStatus: string; locator: Record<string, unknown> }>;
+    attempts: Array<{ id: string; attemptNo: number; state: string; runnerKind?: string | null; error: { code?: string } | null;
+      receiptCounts?: Record<string, number> & { total: number };
+      activities?: Array<{ type: string; text: string; createdAt: string }>; usage?: { status: string; inputTokens: number | null;
+        cachedInputTokens: number | null; outputTokens: number | null; totalTokens: number | null; elapsedMs: number | null } | null }> }>;
 };
 type KnowledgeModel = { pendingProposals: Array<Proposal & { reviewStatus: string; legacySource: boolean;
   source: { conversationId: string; messageId: string } }>;
@@ -109,6 +115,7 @@ function App() {
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgeModel>({ pendingProposals: [], confirmedTakeaways: [] });
   const [discussionError, setDiscussionError] = useState<string | null>(null);
+  const [evidence, setEvidence] = useState<EvidenceInspectorModel | null>(null);
 
   function navigate(href: string, replace = false) {
     window.history[replace ? "replaceState" : "pushState"](null, "", href);
@@ -217,6 +224,14 @@ function App() {
   }, [route.name === "paper" ? `${route.paperId}:${route.mode}:${route.conversationId ?? ""}` : null]);
 
   useEffect(() => {
+    if (route.name !== "paper" || !route.evidenceReceiptId) { setEvidence(null); return; }
+    void fetch(`/api/evidence/${encodeURIComponent(route.evidenceReceiptId)}`).then(async (response) => {
+      if (!response.ok) throw new Error("引用证据不可用");
+      setEvidence(await response.json() as EvidenceInspectorModel);
+    }).catch((cause: unknown) => setDiscussionError(cause instanceof Error ? cause.message : "引用证据不可用"));
+  }, [route.name === "paper" ? route.evidenceReceiptId : null]);
+
+  useEffect(() => {
     if (route.name !== "paper" || !route.conversationId) return;
     const running = conversation?.messages.some((message) => message.attempts.some((attempt) => attempt.state === "running"));
     if (!running) return;
@@ -272,6 +287,12 @@ function App() {
       headers: { "idempotency-key": crypto.randomUUID() } });
     if (!response.ok) { setDiscussionError("这条消息当前无法重试。"); return; }
     await refreshConversationWorkspace(route.paperId, route.conversationId);
+  }
+
+  async function cancelAttempt(attemptId: string) {
+    const response = await fetch(`/api/agent-runs/${encodeURIComponent(attemptId)}/cancel`, { method: "POST" });
+    if (!response.ok) { setDiscussionError("该 Attempt 已结束，无法取消。"); return; }
+    if (route.name === "paper") await refreshConversationWorkspace(route.paperId, route.conversationId);
   }
 
   async function manageConversation(action: "rename" | "archive" | "restore", title?: string) {
@@ -462,6 +483,7 @@ function App() {
           error={workspaceError ?? discussionError} openedPdfSource={openedPdfSource} conversations={conversations}
           conversation={conversation} knowledge={knowledge} question={question} onQuestion={updateQuestion}
           onAskPaper={askPaper} onRetryMessage={retryMessage} onAcceptProposal={acceptProposal}
+          onCancelAttempt={cancelAttempt} evidence={evidence}
           onReviewProposal={reviewProposal}
           onManageConversation={manageConversation} onContinueConversation={continueConversation}
           onRetry={retryImport} onNavigate={navigate} />)}
@@ -632,12 +654,14 @@ function PaperWorkspace(props: {
   onQuestion(value: string): void;
   onAskPaper(event: React.FormEvent): void;
   onRetryMessage(messageId: string): void;
+  onCancelAttempt(attemptId: string): void;
   onAcceptProposal(proposal: Proposal): void;
   onReviewProposal(proposal: Proposal, action: "accept" | "edit-and-accept" | "reject", editedClaim?: string): void;
   onManageConversation(action: "rename" | "archive" | "restore", title?: string): void;
   onContinueConversation(): void;
   onRetry(): void;
   onNavigate(href: string, replace?: boolean): void;
+  evidence: EvidenceInspectorModel | null;
 }) {
   const { workspace, route } = props;
   const codeStatus = workspace.repository?.status === "ready" ? "代码可用于讨论"
@@ -702,8 +726,15 @@ function PaperWorkspace(props: {
             <b>{message.role === "user" ? "你" : "ScholarLoom"}</b>
             <ConversationMessageBody role={message.role} content={message.content} pageCount={pdfPageCount}
               onOpenEvidence={openInlineEvidence} />
-            {message.citations.length > 0 && <div className="citation-list">{message.citations.map((citation, index) => {
+            {message.citations.length > 0 && <div className="citation-list verified-citations">{message.citations.map((citation, index) => {
               const locator = citation.locator;
+              if (citation.id && citation.evidenceKind) {
+                const receiptHref = paperHref(workspace.paper.id, { mode: "discussion", conversationId: route.conversationId,
+                  pdfOpen: false, page: 1, anchor: null, evidenceReceiptId: citation.id });
+                return <a key={citation.id} className={`citation receipt ${citation.evidenceKind}`} href={receiptHref}
+                  onClick={(event) => { event.preventDefault(); props.onNavigate(receiptHref); }}>
+                  {citation.evidenceKind.toUpperCase()} · {citation.quote?.slice(0, 48)}</a>;
+              }
               const label = locator.type === "pdf" ? `PDF · p. ${String(locator.page)}`
                 : locator.type === "code" ? `${String(locator.path)} · ${String(locator.commitSha).slice(0, 8)}`
                   : locator.type === "summary" ? `Summary · ${String(locator.sectionKey)}` : "历史消息";
@@ -726,22 +757,33 @@ function PaperWorkspace(props: {
                 if (edited && source) void props.onReviewProposal(source, "edit-and-accept", edited); }}
               onReject={(proposal) => { const source = messageProposals.find((candidate) => candidate.id === proposal.id);
                 if (source) void props.onReviewProposal(source, "reject"); }} />
-            {message.attempts.slice(-1).map((attempt) => attempt.state !== "succeeded" && <div key={attempt.id} className={`attempt ${attempt.state}`}>
-              <span>{attempt.state === "running" ? "正在处理…" : attempt.state === "interrupted" ? "服务中断，回答未完成" : `回答失败 · ${attempt.error?.code ?? "unknown"}`}</span>
+            {message.attempts.slice(-1).map((attempt) => <div key={attempt.id} className={`attempt ${attempt.state}`}>
+              <div><span>{attempt.state === "queued" ? "排队中" : attempt.state === "running" ? "正在处理…"
+                : attempt.state === "interrupted" ? "服务中断，回答未完成" : attempt.state === "succeeded"
+                  ? `${formatReceiptCounts(attempt.receiptCounts)} · ${formatUsage(attempt.usage)}` : `${attempt.state} · ${attempt.error?.code ?? "未保存回答"}`}</span>
+                {attempt.activities && attempt.activities.length > 0 && <details className="activity-timeline"><summary>Agent Activity · {attempt.activities.length}</summary>
+                  <ol>{attempt.activities.map((activity, activityIndex) => <li key={`${activity.type}-${activityIndex}`}><b>{activity.type}</b> {activity.text}</li>)}</ol></details>}</div>
+              {(attempt.state === "queued" || attempt.state === "running") && attempt.runnerKind === "agentic_evidence" &&
+                <button onClick={() => void props.onCancelAttempt(attempt.id)}>取消</button>}
               {(attempt.state === "failed" || attempt.state === "interrupted") && <button onClick={() => void props.onRetryMessage(message.id)}>重试</button>}
+              {(attempt.state === "timed_out" || attempt.state === "canceled") && <button onClick={() => void props.onRetryMessage(message.id)}>重试</button>}
             </div>)}</article>})}</div></>}
         {(!props.conversation || (props.conversation.conversation.status === "active" && props.conversation.conversation.snapshotIntegrity === "frozen")) &&
           <form className="chat-form discussion-composer" onSubmit={props.onAskPaper}><input aria-label="Paper question" value={props.question}
             onChange={(event) => props.onQuestion(event.target.value)} placeholder="论文、Summary 或固定代码快照中的问题…" disabled={running}/>
             <button disabled={running || !props.question.trim()}>{running ? "处理中" : "发送"}</button></form>}
-        {props.conversation?.conversation.snapshotIntegrity === "legacy" && <button className="continue-latest"
-          onClick={() => void props.onContinueConversation()}>使用最新上下文继续</button>}
+        {props.conversation && <button className="continue-latest" onClick={() => void props.onContinueConversation()}>
+          {props.conversation.conversation.snapshotIntegrity === "legacy" ? "使用最新上下文继续" : "使用最新知识创建后继 Conversation"}
+        </button>}
       </section>
       {route.pdfOpen && <aside className="pdf-pane source-view"><div className="pdf-toolbar"><strong>固定 PDF 证据</strong>
         <button aria-label="上一页" disabled={route.page <= 1} onClick={() => changePdfPage(-1)}>←</button>
         <span>Page {route.page} / {pdfPageCount}</span>
         <button aria-label="下一页" disabled={route.page >= pdfPageCount} onClick={() => changePdfPage(1)}>→</button></div>
         <PdfFrame src={`/api/paper-versions/${encodeURIComponent(props.conversation?.contextSnapshot?.paperVersionId ?? workspace.paper.versionId)}/pdf#page=${route.page}`} /></aside>}
+      {route.evidenceReceiptId && props.evidence && <EvidenceInspector evidence={props.evidence} onClose={() => props.onNavigate(
+        paperHref(workspace.paper.id, { mode: "discussion", conversationId: route.conversationId, pdfOpen: false,
+          page: 1, anchor: null, evidenceReceiptId: null }))} />}
     </div>}
     {route.mode === "knowledge" && <section className="knowledge-workspace"><header><span className="eyebrow">PAPER KNOWLEDGE</span><h2>已审核知识</h2></header>
       <div className="knowledge-columns"><div><h3>Pending Proposals</h3>{props.knowledge.pendingProposals.length === 0 && <p className="empty">没有待审核 Proposal。</p>}
@@ -791,3 +833,19 @@ function PaperWorkspace(props: {
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
+
+function formatUsage(usage: ConversationDetail["messages"][number]["attempts"][number]["usage"]): string {
+  if (!usage || usage.status === "unavailable") return "tokens unavailable";
+  const tokens = usage.totalTokens === null ? "tokens unavailable" : `${(usage.totalTokens / 1000).toFixed(1)}k tokens`;
+  const elapsed = usage.elapsedMs === null ? "" : ` · ${Math.max(1, Math.round(usage.elapsedMs / 1000))}秒`;
+  return `${tokens}${elapsed}`;
+}
+
+function formatReceiptCounts(counts: (Record<string, number> & { total: number }) | undefined): string {
+  if (!counts) return "证据 0";
+  const parts = [`证据 ${counts.total}`];
+  for (const [kind, label] of [["pdf", "PDF"], ["code", "代码"], ["summary", "Summary"], ["library", "Library"], ["visual", "Visual"]] as const) {
+    if (counts[kind]) parts.push(`${label} ${counts[kind]}`);
+  }
+  return parts.join(" · ");
+}

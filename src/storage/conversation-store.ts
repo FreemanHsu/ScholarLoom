@@ -35,7 +35,7 @@ export class ConversationStore {
   read(conversationId: string): unknown | null {
     const row = this.database.prepare(`SELECT c.id,c.paper_id,c.title,c.status,c.snapshot_integrity,
       c.active_context_snapshot_id,c.continued_from_conversation_id,c.created_at,c.updated_at,c.archived_at,
-      cs.paper_version_id,cs.summary_revision_id,cs.extraction_run_id,cs.repositories_json,er.page_count
+      cs.paper_version_id,cs.summary_revision_id,cs.extraction_run_id,cs.repositories_json,cs.knowledge_corpus_manifest_id,er.page_count
       FROM conversations c LEFT JOIN context_snapshots cs ON cs.id=c.active_context_snapshot_id
       LEFT JOIN extraction_runs er ON er.id=cs.extraction_run_id
       WHERE c.id=?`).get(conversationId) as {
@@ -43,32 +43,62 @@ export class ConversationStore {
         active_context_snapshot_id: string | null; continued_from_conversation_id: string | null;
         created_at: string; updated_at: string; archived_at: string | null; paper_version_id: string | null;
         summary_revision_id: string | null; extraction_run_id: string | null; repositories_json: string | null;
+        knowledge_corpus_manifest_id: string | null;
         page_count: number | null;
       } | undefined;
     if (!row) return null;
-    const messages = (this.database.prepare(`SELECT id,role,content,created_at,ordinal,in_reply_to_message_id,citations_json
+    const messages = (this.database.prepare(`SELECT id,role,content,created_at,ordinal,in_reply_to_message_id,citations_json,grounding_status
       FROM messages WHERE conversation_id=? ORDER BY ordinal,created_at,id`).all(conversationId) as Array<{
         id: string; role: string; content: string; created_at: string; ordinal: number | null;
-        in_reply_to_message_id: string | null; citations_json: string;
+        in_reply_to_message_id: string | null; citations_json: string; grounding_status: string | null;
       }>).map((message) => {
-        const attempts = message.role === "user" ? (this.database.prepare(`SELECT a.job_run_id,a.attempt_no,j.state,j.error_json,j.started_at,j.completed_at
+        const attempts = message.role === "user" ? (this.database.prepare(`SELECT a.job_run_id,a.attempt_no,j.state,j.error_json,j.started_at,j.completed_at,
+          j.runner_kind,j.failure_kind,j.run_epoch
           FROM conversation_turn_attempts a JOIN job_runs j ON j.id=a.job_run_id
           WHERE a.user_message_id=? ORDER BY a.attempt_no`).all(message.id) as Array<{
             job_run_id: string; attempt_no: number; state: string; error_json: string | null;
-            started_at: string | null; completed_at: string | null;
-          }>).map((attempt) => ({ id: attempt.job_run_id, attemptNo: attempt.attempt_no, state: attempt.state,
-            error: attempt.error_json ? JSON.parse(attempt.error_json) as unknown : null,
-            startedAt: attempt.started_at, completedAt: attempt.completed_at })) : [];
+            started_at: string | null; completed_at: string | null; runner_kind: string | null; failure_kind: string | null;
+            run_epoch: number;
+          }>).map((attempt) => {
+            const activities = this.database.prepare(`SELECT event_type,display_text,metadata_json,created_at
+              FROM agent_run_activities WHERE job_run_id=? ORDER BY id`).all(attempt.job_run_id) as
+              Array<{ event_type: string; display_text: string; metadata_json: string; created_at: string }>;
+            const usage = this.database.prepare(`SELECT status,input_tokens,cached_input_tokens,output_tokens,total_tokens,elapsed_ms
+              FROM agent_run_usage WHERE job_run_id=? ORDER BY run_epoch DESC LIMIT 1`).get(attempt.job_run_id) as
+              { status: string; input_tokens: number | null; cached_input_tokens: number | null; output_tokens: number | null;
+                total_tokens: number | null; elapsed_ms: number | null } | undefined;
+            const receiptRows = this.database.prepare(`SELECT evidence_kind,count(*) count FROM evidence_receipts
+              WHERE job_run_id=? GROUP BY evidence_kind`).all(attempt.job_run_id) as Array<{ evidence_kind: string; count: number }>;
+            const receiptCounts = Object.fromEntries(receiptRows.map((item) => [item.evidence_kind, item.count]));
+            return { id: attempt.job_run_id, attemptNo: attempt.attempt_no, state: attempt.state,
+              error: attempt.error_json ? JSON.parse(attempt.error_json) as unknown : null,
+              startedAt: attempt.started_at, completedAt: attempt.completed_at, runnerKind: attempt.runner_kind,
+              failureKind: attempt.failure_kind,
+              receiptCounts: { total: receiptRows.reduce((sum, item) => sum + item.count, 0), ...receiptCounts },
+              activities: activities.map((activity) => ({ type: activity.event_type, text: activity.display_text,
+                metadata: JSON.parse(activity.metadata_json) as unknown, createdAt: activity.created_at })),
+              usage: usage ? { status: usage.status, inputTokens: usage.input_tokens, cachedInputTokens: usage.cached_input_tokens,
+                outputTokens: usage.output_tokens, totalTokens: usage.total_tokens, elapsedMs: usage.elapsed_ms } : null };
+          }) : [];
         const normalized = this.database.prepare(`SELECT kind,source_handle,locator_json,verification_status
           FROM message_citations WHERE message_id=? ORDER BY ordinal`).all(message.id) as Array<{
             kind: string; source_handle: string; locator_json: string; verification_status: string;
           }>;
-        const citations = normalized.length > 0
+        const receipts = this.database.prepare(`SELECT id,evidence_kind,source_id,source_revision,workspace_path,locator_json,
+          content_hash,quote_text,verification_status FROM evidence_receipts WHERE message_id=? ORDER BY ordinal`).all(message.id) as Array<{
+            id: string; evidence_kind: string; source_id: string; source_revision: string | null; workspace_path: string;
+            locator_json: string; content_hash: string; quote_text: string; verification_status: string;
+          }>;
+        const citations = receipts.length > 0 ? receipts.map((receipt) => ({ id: receipt.id, evidenceKind: receipt.evidence_kind,
+          sourceId: receipt.source_id, sourceRevision: receipt.source_revision, workspacePath: receipt.workspace_path,
+          locator: JSON.parse(receipt.locator_json) as unknown, contentHash: receipt.content_hash, quote: receipt.quote_text,
+          verificationStatus: receipt.verification_status })) : normalized.length > 0
           ? normalized.map((citation) => ({ kind: citation.kind, sourceHandle: citation.source_handle,
             locator: JSON.parse(citation.locator_json) as unknown, verificationStatus: citation.verification_status }))
           : JSON.parse(message.citations_json) as unknown[];
         return { id: message.id, role: message.role, content: message.content, ordinal: message.ordinal,
-          inReplyToMessageId: message.in_reply_to_message_id, createdAt: message.created_at, citations, attempts };
+          inReplyToMessageId: message.in_reply_to_message_id, createdAt: message.created_at,
+          groundingStatus: message.grounding_status, citations, attempts };
       });
     return {
       conversation: { id: row.id, paperId: row.paper_id, title: row.title, status: row.status,
@@ -78,6 +108,7 @@ export class ConversationStore {
       contextSnapshot: row.active_context_snapshot_id ? { id: row.active_context_snapshot_id,
         paperVersionId: row.paper_version_id, summaryRevisionId: row.summary_revision_id,
         extractionRunId: row.extraction_run_id, pageCount: row.page_count,
+        knowledgeCorpusManifestId: row.knowledge_corpus_manifest_id,
         repositorySnapshots: JSON.parse(row.repositories_json ?? "[]") as unknown[] } : null,
       messages,
     };

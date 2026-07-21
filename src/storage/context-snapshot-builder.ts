@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
+import { KnowledgeCorpusManifestBuilder } from "./knowledge-corpus-manifest.js";
 
 export class ContextSnapshotBuilder {
-  constructor(private readonly database: Database.Database, private readonly now: () => Date) {}
+  readonly #corpus: KnowledgeCorpusManifestBuilder;
+
+  constructor(private readonly database: Database.Database, private readonly now: () => Date) {
+    this.#corpus = new KnowledgeCorpusManifestBuilder(database, now);
+  }
 
   create(paperId: string, continuedFromConversationId: string | null = null): unknown | null {
     const timestamp = this.now().toISOString();
@@ -20,6 +25,7 @@ export class ContextSnapshotBuilder {
       WHERE pcl.paper_id=? AND pcl.status='confirmed' ORDER BY rs.id`).all(paperId) as Array<{ id: string; commit_sha: string }>;
     const conversationId = `conversation:${randomUUID()}`;
     const snapshotId = `context-snapshot:${randomUUID()}`;
+    const corpus = this.#corpus.freeze(paperId);
     this.database.transaction(() => {
       const pageElements = this.database.prepare(`SELECT id,page_number FROM document_elements
         WHERE extraction_run_id=? AND element_type='page' ORDER BY page_number`).all(row.extraction_run_id) as
@@ -38,14 +44,15 @@ export class ContextSnapshotBuilder {
         VALUES (?,?,?,'新对话','active','frozen',?,?,?)`)
         .run(conversationId, paperId, snapshotId, continuedFromConversationId, timestamp, timestamp);
       this.database.prepare(`INSERT INTO context_snapshots
-        (id,conversation_id,paper_version_id,summary_revision_id,extraction_run_id,repositories_json,created_at)
-        VALUES (?,?,?,?,?,?,?)`).run(snapshotId, conversationId, row.current_version_id, row.summary_id, row.extraction_run_id,
-          JSON.stringify(repositories.map((repository) => ({ id: repository.id, commitSha: repository.commit_sha }))), timestamp);
+        (id,conversation_id,paper_version_id,summary_revision_id,extraction_run_id,repositories_json,created_at,knowledge_corpus_manifest_id)
+        VALUES (?,?,?,?,?,?,?,?)`).run(snapshotId, conversationId, row.current_version_id, row.summary_id, row.extraction_run_id,
+          JSON.stringify(repositories.map((repository) => ({ id: repository.id, commitSha: repository.commit_sha }))), timestamp, corpus.id);
     })();
     return { conversation: { id: conversationId, paperId, title: "新对话", status: "active",
       snapshotIntegrity: "frozen", continuedFromConversationId }, contextSnapshot: { id: snapshotId,
       paperVersionId: row.current_version_id, summaryRevisionId: row.summary_id, extractionRunId: row.extraction_run_id,
       pageCount: row.page_count,
+      knowledgeCorpusManifestId: corpus.id,
       repositorySnapshots: repositories.map((repository) => ({ id: repository.id, commitSha: repository.commit_sha })) } };
   }
 }

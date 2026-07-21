@@ -11,6 +11,8 @@ import { ImportStore } from "./storage/import-store.js";
 import type { RepositoryAdapter } from "./adapters/git-repository.js";
 import type { StorageLayout } from "./storage/layout.js";
 import { assertDataRootWritable } from "./storage/layout.js";
+import type { AgenticEvidenceRunner } from "./agent/agentic-evidence-runner.js";
+import { AgentRunCoordinator } from "./storage/agent-run-coordinator.js";
 
 export type ResolvedPaper = {
   arxivId: string;
@@ -42,6 +44,7 @@ export type CreateAppOptions = {
   knowledgeWriteFailurePoint?: "staged" | "renamed" | "metadata-committed";
   clock?: { now(): Date };
   agentMessageTimeoutMs?: number;
+  agenticEvidenceRunner?: AgenticEvidenceRunner;
 };
 
 function classifyPaperResolutionError(error: unknown): { status: 404 | 503; code: string; detail: string } {
@@ -83,11 +86,15 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   const app = Fastify({ logger: false, routerOptions: { maxParamLength: 1024 } });
   const now = options.clock ? () => options.clock!.now() : undefined;
   const store = ImportStore.open(options.storageLayout, options.knowledgeWriteFailurePoint ?? null, now);
+  const agentCoordinator = options.agenticEvidenceRunner ? new AgentRunCoordinator(options.storageLayout,
+    options.agenticEvidenceRunner, { ...(options.agentMessageTimeoutMs ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
+      ...(options.clock ? { now: () => options.clock!.now() } : {}) }) : null;
   const backgroundTasks = new Set<Promise<void>>();
   const chatControllers = new Set<AbortController>();
   app.addHook("onClose", async () => {
     for (const controller of chatControllers) controller.abort(new Error("application-closing"));
     await Promise.allSettled(backgroundTasks);
+    await agentCoordinator?.close();
     store.close();
   });
   const runPaperChat = (context: Parameters<NonNullable<CodexRunner["runChat"]>>[0]) => {
@@ -289,6 +296,15 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     const key = typeof request.body.idempotencyKey === "string" && request.body.idempotencyKey
       ? request.body.idempotencyKey
       : typeof request.headers["idempotency-key"] === "string" ? request.headers["idempotency-key"] : `paper-chat:${crypto.randomUUID()}`;
+    if (agentCoordinator) {
+      try {
+        const attempt = agentCoordinator.submit(request.params.id, request.body.content, key);
+        return reply.code(202).send({ attempt, conversation: store.getConversation(request.params.id) });
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "agent-submit-failed";
+        return reply.code(code === "conversation-not-found" ? 404 : 409).send({ code });
+      }
+    }
     if (!options.codexRunner?.runChat) return reply.code(503).send({ code: "codex-runner-unavailable" });
     const blocked = store.conversationTurnBlock(request.params.id, key);
     if (blocked) return reply.code(blocked === "conversation-not-found" ? 404 : 409).send({ code: blocked });
@@ -301,9 +317,21 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     return reply.code(202).send({ conversation: store.getConversation(request.params.id) });
   });
 
+  app.get<{ Params: { id: string } }>("/api/evidence/:id", async (request, reply) => {
+    const evidence = agentCoordinator?.readReceipt(request.params.id);
+    return evidence ?? reply.code(404).send({ code: "evidence-receipt-not-found" });
+  });
+
   app.post<{ Params: { id: string } }>("/api/messages/:id/retry", async (request, reply) => {
     const key = request.headers["idempotency-key"];
     if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    if (agentCoordinator?.ownsMessage(request.params.id)) {
+      try { return reply.code(202).send({ attempt: agentCoordinator.retry(request.params.id, key) }); }
+      catch (error) {
+        const code = error instanceof Error ? error.message : "message-retry-failed";
+        return reply.code(code === "message-not-found" ? 404 : 409).send({ code });
+      }
+    }
     if (!options.codexRunner?.runChat) return reply.code(503).send({ code: "codex-runner-unavailable" });
     const conversationId = store.getMessageConversationId(request.params.id);
     if (!conversationId) return reply.code(404).send({ code: "message-not-found" });
@@ -317,6 +345,11 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     backgroundTasks.add(task);
     return reply.code(202).send({ conversation: store.getConversation(conversationId) });
   });
+
+  app.post<{ Params: { id: string } }>("/api/agent-runs/:id/cancel", async (request, reply) =>
+    agentCoordinator?.cancel(request.params.id)
+      ? reply.code(202).send({ status: "canceled" })
+      : reply.code(409).send({ code: "agent-run-not-cancelable" }));
 
   app.post<{ Params: { id: string }; Body: { action?: unknown; sourceOpened?: unknown; editedClaim?: unknown } }>("/api/proposals/:id/decisions", async (request, reply) => {
     if (request.body?.action !== "accept" && request.body?.action !== "edit-and-accept" && request.body?.action !== "reject") {

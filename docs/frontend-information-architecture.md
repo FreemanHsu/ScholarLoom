@@ -285,6 +285,10 @@ The next accepted slice is **Recoverable Research Navigation**.
 - persistent Message/attempt states, explicit retry, and local per-Conversation draft;
 - pending Proposal and confirmed Takeaway Paper Knowledge views;
 - single-column narrow-screen mode switching and full-screen source view.
+- Agentic Evidence activity timeline, queue/cancel/retry/failure states, reported or
+  unavailable usage, and verified PDF/Summary/Code/Library citation types;
+- citation inspector state at `?evidence=:receiptId`, restored by refresh/back/forward;
+- frozen Knowledge Corpus information and linked successor Conversation creation.
 
 ### Not included
 

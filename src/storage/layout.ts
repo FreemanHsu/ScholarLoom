@@ -89,6 +89,7 @@ export function inspectDataRootAccess(layout: StorageLayout): DataRootAccessRepo
   const visit = (directory: string) => {
     try { accessSync(directory, constants.W_OK); }
     catch { unwritablePaths.push(relative(layout.root, directory)); }
+    if (directory === join(layout.derivedRoot, "evidence-workspaces")) return;
     for (const name of readdirSync(directory)) {
       const child = join(directory, name);
       if (lstatSync(child).isDirectory()) visit(child);

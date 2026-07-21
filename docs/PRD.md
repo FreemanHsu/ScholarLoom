@@ -361,6 +361,13 @@ Paper-scoped 实例、稳定 URL 和唯一冻结 Context Snapshot。user Message
 Codex 持久化，失败或中断只允许显式 retry。pending Proposal 不是知识，只有 Review
 Decision 可以生成 confirmed Takeaway。
 
+Discussion 使用 Codex-native Agentic Evidence Retrieval：每次 Message Attempt 只
+启动一个长期存活的 `codex exec`，在只读、content-addressed Evidence Workspace
+中用原生 shell/`rg`/文件阅读自主查证。系统不实现 host-side ReAct loop。最终回答
+必须经过 MANIFEST ownership、hash、line/page locator 和 bounded verbatim quote
+校验；Activity 不等于证据。跨论文 curated corpus 在 Conversation 创建时冻结，刷新
+知识只能创建 linked successor Conversation。
+
 ## 9. 关键交互
 
 ### 9.1 导入
@@ -435,6 +442,9 @@ Decision 可以生成 confirmed Takeaway。
 ### 11.3 可靠性
 
 - 所有长任务幂等、可重试且可观察。
+- Discussion 采用 durable queue（默认跨 Conversation 并发 2）、run epoch/lease/
+  heartbeat；取消与完成 CAS 竞争，重启后 queued 保留、running/canceling 变为
+  interrupted 且不自动重跑。
 - 单个解析器、模型或外部 API 失败不得损坏已有知识。
 - 派生索引删除后应能从事实源完整重建。
 - Markdown/SQLite 跨存储写入必须通过可恢复的意图状态机；恢复只能在字节级 hash

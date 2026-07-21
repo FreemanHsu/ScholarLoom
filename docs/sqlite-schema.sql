@@ -132,7 +132,7 @@ CREATE TABLE job_runs (
     import_request_id TEXT REFERENCES import_requests(id) ON DELETE SET NULL,
     paper_id TEXT REFERENCES papers(id) ON DELETE SET NULL,
     state TEXT NOT NULL CHECK (
-        state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')
+        state IN ('queued', 'running', 'canceling', 'succeeded', 'failed', 'timed_out', 'canceled', 'interrupted')
     ),
     progress REAL NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 1),
     attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
@@ -145,6 +145,13 @@ CREATE TABLE job_runs (
     started_at TEXT,
     completed_at TEXT,
     heartbeat_at TEXT
+    ,run_epoch INTEGER NOT NULL DEFAULT 0 CHECK (run_epoch >= 0)
+    ,lease_owner TEXT
+    ,lease_expires_at TEXT
+    ,cancel_requested_at TEXT
+    ,runner_kind TEXT CHECK (runner_kind IS NULL OR runner_kind IN ('legacy_one_shot','agentic_evidence'))
+    ,failure_kind TEXT
+    ,evidence_workspace_id TEXT REFERENCES evidence_workspaces(id) DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
 
 CREATE INDEX idx_job_runs_dispatch ON job_runs(state, job_type, queued_at);
@@ -328,6 +335,7 @@ CREATE TABLE summary_revisions (
     status TEXT NOT NULL CHECK (status IN ('active', 'candidate', 'superseded')),
     read_status TEXT NOT NULL CHECK (read_status IN ('abstract', 'skimmed', 'read')),
     skill_content_hash TEXT NOT NULL,
+    canonical_sections_hash TEXT NOT NULL,
     generated_at TEXT NOT NULL,
     activated_at TEXT,
     UNIQUE (paper_version_id, revision_number)
@@ -418,6 +426,7 @@ CREATE TABLE context_snapshots (
     summary_revision_id TEXT NOT NULL REFERENCES summary_revisions(id) ON DELETE RESTRICT,
     extraction_run_id TEXT NOT NULL REFERENCES extraction_runs(id) ON DELETE RESTRICT,
     repositories_json TEXT NOT NULL CHECK (json_valid(repositories_json)),
+    knowledge_corpus_manifest_id TEXT NOT NULL REFERENCES knowledge_corpus_manifests(id) ON DELETE RESTRICT,
     created_at TEXT NOT NULL
 ) STRICT;
 
@@ -455,6 +464,8 @@ CREATE TABLE messages (
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     content TEXT NOT NULL,
     citations_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(citations_json)),
+    grounding_status TEXT CHECK (grounding_status IS NULL OR grounding_status IN
+        ('answered','partially_answered','insufficient_evidence','conflicting_evidence')),
     ordinal INTEGER CHECK (ordinal >= 1),
     in_reply_to_message_id TEXT REFERENCES messages(id),
     created_at TEXT NOT NULL,
@@ -472,6 +483,55 @@ CREATE TABLE conversation_turn_attempts (
     attempt_no INTEGER NOT NULL CHECK (attempt_no > 0),
     created_at TEXT NOT NULL,
     UNIQUE (user_message_id, attempt_no)
+) STRICT;
+
+CREATE TABLE knowledge_corpus_manifests (
+    id TEXT PRIMARY KEY,
+    manifest_hash TEXT NOT NULL UNIQUE,
+    manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json)),
+    created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE evidence_workspaces (
+    id TEXT PRIMARY KEY,
+    context_snapshot_id TEXT NOT NULL REFERENCES context_snapshots(id),
+    knowledge_corpus_manifest_id TEXT NOT NULL REFERENCES knowledge_corpus_manifests(id),
+    workspace_hash TEXT NOT NULL UNIQUE,
+    root_ref TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('building','built','failed','evicted')),
+    builder_version TEXT NOT NULL,
+    byte_size INTEGER NOT NULL DEFAULT 0 CHECK (byte_size >= 0),
+    last_accessed_at TEXT, created_at TEXT NOT NULL, completed_at TEXT, failed_at TEXT, evicted_at TEXT,
+    error_json TEXT CHECK (error_json IS NULL OR json_valid(error_json))
+) STRICT;
+
+CREATE TABLE agent_run_activities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_run_id TEXT NOT NULL REFERENCES job_runs(id),
+    run_epoch INTEGER NOT NULL CHECK (run_epoch >= 1),
+    event_type TEXT NOT NULL,
+    display_text TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE agent_run_usage (
+    job_run_id TEXT NOT NULL REFERENCES job_runs(id), run_epoch INTEGER NOT NULL CHECK (run_epoch >= 1),
+    status TEXT NOT NULL CHECK (status IN ('reported','estimated','unavailable')),
+    input_tokens INTEGER, cached_input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
+    elapsed_ms INTEGER, recorded_at TEXT NOT NULL, PRIMARY KEY (job_run_id,run_epoch)
+) STRICT;
+
+CREATE TABLE evidence_receipts (
+    id TEXT PRIMARY KEY, job_run_id TEXT NOT NULL REFERENCES job_runs(id), run_epoch INTEGER NOT NULL,
+    message_id TEXT REFERENCES messages(id), ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    evidence_kind TEXT NOT NULL CHECK (evidence_kind IN ('pdf','summary','code','library','visual')),
+    source_id TEXT NOT NULL, source_revision TEXT, workspace_path TEXT NOT NULL,
+    locator_json TEXT NOT NULL CHECK (json_valid(locator_json)), content_hash TEXT NOT NULL,
+    quote_text TEXT NOT NULL CHECK (length(quote_text) <= 500),
+    verification_status TEXT NOT NULL CHECK (verification_status IN ('verified','render-drift')),
+    visual_observation TEXT, created_at TEXT NOT NULL,
+    UNIQUE (job_run_id,run_epoch,ordinal)
 ) STRICT;
 
 CREATE TABLE message_citations (

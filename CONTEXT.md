@@ -59,8 +59,20 @@ A Paper-scoped sequence of Messages whose meaning is fixed by one or more Contex
 _Avoid_: Knowledge, chat memory
 
 **Context Snapshot**:
-The immutable Paper Version, Summary Revision, Extraction Run, and Repository Snapshots available to a conversation segment.
+The immutable Paper Version, Summary Revision, Extraction Run, Repository Snapshots, and Knowledge Corpus Manifest available to a Conversation.
 _Avoid_: Current context
+
+**Knowledge Corpus Manifest**:
+The immutable content-addressed list of other papers' active Summaries and confirmed knowledge frozen when a Conversation is created.
+_Avoid_: Current library, live search results
+
+**Evidence Workspace**:
+A rebuildable, content-addressed, read-only filesystem projection of one Context Snapshot for a single Agentic Evidence Attempt.
+_Avoid_: Vault, production data root, Codex session
+
+**Evidence Receipt**:
+A final verified citation that fixes source ownership, revision, content hash, locator, and bounded verbatim quote.
+_Avoid_: Activity, search result, read log
 
 **Conversation Digest**:
 A generated compression of a bounded range of Messages for restoring Paper-scoped context.
@@ -126,3 +138,7 @@ _Avoid_: Paper status, Agent session
 **Agent Run**:
 A Job Run performed through Codex CLI with a recorded model, Skill, and Context Snapshot.
 _Avoid_: Conversation, Message
+
+**Agent Activity**:
+A sanitized append-only progress/audit event emitted by a running Agent. It is never verified evidence.
+_Avoid_: chain of thought, Evidence Receipt

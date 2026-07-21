@@ -19,6 +19,7 @@ import { recoverInterruptedRuns } from "./bootstrap-recovery.js";
 import { KnowledgeWriter } from "./knowledge-writer.js";
 import { ContextSnapshotBuilder } from "./context-snapshot-builder.js";
 import { ConversationStore } from "./conversation-store.js";
+import { canonicalSectionHash } from "./canonical-section-hash.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -100,6 +101,10 @@ export class ImportStore {
     this.#database.pragma("journal_mode = WAL");
     this.#database.pragma("busy_timeout = 5000");
     migrate(this.#database);
+    const unhashed = this.#database.prepare("SELECT id,structured_json FROM summary_revisions WHERE canonical_sections_hash IS NULL")
+      .all() as Array<{ id: string; structured_json: string }>;
+    const persistSectionHash = this.#database.prepare("UPDATE summary_revisions SET canonical_sections_hash=? WHERE id=?");
+    this.#database.transaction(() => unhashed.forEach((row) => persistSectionHash.run(canonicalSectionHash(row.structured_json), row.id)))();
     this.#contextSnapshots = new ContextSnapshotBuilder(this.#database, this.#now);
     this.#conversations = new ConversationStore(this.#database, this.#now);
     recoverInterruptedRuns(this.#database, this.#now().toISOString());
@@ -180,9 +185,10 @@ export class ImportStore {
         pages.push({ handle: `pdf-page:${pageNumber}`, page: pageNumber, text });
       }
       const extractionArtifactId = `artifact:${extractionId}`;
-      this.#storeArtifact(extractionArtifactId, "document-extraction", Buffer.from(JSON.stringify(pages)), "json", "job-run", null, artifactId);
+      const storedExtractionArtifactId = this.#storeArtifact(extractionArtifactId, "document-extraction",
+        Buffer.from(JSON.stringify(pages)), "json", "job-run", null, artifactId);
       this.#database.prepare("UPDATE extraction_runs SET status='succeeded',page_count=?,completed_at=?,output_artifact_id=? WHERE id=?")
-        .run(document.numPages, now, extractionArtifactId, extractionId);
+        .run(document.numPages, now, storedExtractionArtifactId, extractionId);
     }
 
     const explicitUrl = pages.map((page) => page.text).join("\n").match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/)?.[0]?.replace(/[.,;)]$/, "");
@@ -302,10 +308,11 @@ export class ImportStore {
       const pdfArtifact = (this.#database.prepare("SELECT pdf_artifact_id FROM paper_versions WHERE id=?").get(payload.versionId) as { pdf_artifact_id: string }).pdf_artifact_id;
       this.#storeArtifact(`artifact:${payload.summaryId}`, "paper-summary", readFileSync(targetPath), "md", "agent-run", payload.agentRunId, pdfArtifact);
       this.#database.transaction(() => {
-        this.#database.prepare(`INSERT INTO summary_revisions(id,paper_id,paper_version_id,extraction_run_id,revision,status,read_status,markdown_path,markdown_hash,structured_json,skill_path,skill_content_hash,created_at,agent_run_id)
-          VALUES (?,?,?,?,1,'active',?,?,?,?, 'skills/paper-reading/SKILL.md',?,?,?) ON CONFLICT(id) DO NOTHING`)
+        this.#database.prepare(`INSERT INTO summary_revisions(id,paper_id,paper_version_id,extraction_run_id,revision,status,read_status,markdown_path,markdown_hash,structured_json,skill_path,skill_content_hash,created_at,agent_run_id,canonical_sections_hash)
+          VALUES (?,?,?,?,1,'active',?,?,?,?, 'skills/paper-reading/SKILL.md',?,?,?,?) ON CONFLICT(id) DO NOTHING`)
           .run(payload.summaryId, payload.paperId, payload.versionId, payload.extractionId, payload.readStatus, payload.relativePath,
-            payload.markdownHash, JSON.stringify(payload.structured), payload.skillHash, payload.now, payload.agentRunId);
+            payload.markdownHash, JSON.stringify(payload.structured), payload.skillHash, payload.now, payload.agentRunId,
+            canonicalSectionHash(payload.structured));
         payload.claims.forEach((claim, ordinal) => this.#database.prepare(`INSERT INTO summary_claim_evidence(summary_revision_id,claim_ordinal,evidence_anchor_id)
           VALUES (?,?,?) ON CONFLICT DO NOTHING`).run(payload.summaryId, ordinal, claim.evidenceAnchorId));
         this.#database.prepare(`INSERT OR IGNORE INTO index_outbox(projection,source_id,operation,state,created_at)
@@ -782,14 +789,15 @@ export class ImportStore {
         importRequest: { id: candidate.import_request_id, paperId: proposal.paper_id, status: "resolved" },
         job: { id: candidate.job_id, attempt: candidate.attempt, state: "running" } } };
     }
-    const payload = JSON.parse(proposal.payload_json) as { claim: string; sourceHandles: string[] };
+    const payload = JSON.parse(proposal.payload_json) as { claim: string; sourceHandles?: string[]; receiptIds?: string[] };
     if (action === "edit-and-accept") {
       if (!editedClaim?.trim()) return { status: 400, body: { code: "edited-claim-required" } };
       payload.claim = editedClaim.trim();
     }
     const paper = this.listPapers().find((candidate) => candidate.id === proposal.paper_id)!;
+    const sourceHandles = payload.receiptIds ?? payload.sourceHandles ?? [];
     const write = this.#knowledgeWriter.commitTakeaway({ paperId: proposal.paper_id, paperTitle: paper.title,
-      proposalId, idempotencyKey, action, claim: payload.claim, sourceHandles: payload.sourceHandles });
+      proposalId, idempotencyKey, action, claim: payload.claim, sourceHandles });
     if (!write.complete) return { status: 409, body: { code: "knowledge-write-conflicted" } };
     return { status: 201, body: write.body };
   }
@@ -809,7 +817,7 @@ export class ImportStore {
       WHERE p.id=? AND p.review_status='pending'`).get(proposalId) as
       { payload_json: string; source_version_id: string | null } | undefined;
     if (!row) return null;
-    const payload = JSON.parse(row.payload_json) as { sourceHandles?: string[]; candidateVersionId?: string };
+    const payload = JSON.parse(row.payload_json) as { sourceHandles?: string[]; receiptIds?: string[]; candidateVersionId?: string };
     if (payload.candidateVersionId) {
       const candidate = this.#database.prepare("SELECT id FROM paper_versions WHERE id=?").get(payload.candidateVersionId);
       if (!candidate) return null;
@@ -817,6 +825,16 @@ export class ImportStore {
       this.#database.prepare("INSERT INTO source_open_tokens(token,proposal_id,paper_version_id,source_handle,issued_at) VALUES (?,?,?,?,?)")
         .run(token, proposalId, payload.candidateVersionId, "pdf-page:1", new Date().toISOString());
       return { pdfUrl: `/api/paper-versions/${encodeURIComponent(payload.candidateVersionId)}/pdf?openToken=${token}#page=1`, page: 1 };
+    }
+    const pdfReceipt = payload.receiptIds?.map((id) => this.#database.prepare(`SELECT source_id,locator_json FROM evidence_receipts
+      WHERE id=? AND evidence_kind='pdf' AND verification_status='verified'`).get(id) as
+      { source_id: string; locator_json: string } | undefined).find(Boolean);
+    if (pdfReceipt && row.source_version_id) {
+      const page = Number((JSON.parse(pdfReceipt.locator_json) as { page?: number }).page ?? 1);
+      const token = randomUUID();
+      this.#database.prepare("INSERT INTO source_open_tokens(token,proposal_id,paper_version_id,source_handle,issued_at) VALUES (?,?,?,?,?)")
+        .run(token, proposalId, row.source_version_id, `pdf-page:${page}`, new Date().toISOString());
+      return { pdfUrl: `/api/paper-versions/${encodeURIComponent(row.source_version_id)}/pdf?openToken=${token}#page=${page}`, page };
     }
     const handle = payload.sourceHandles?.find((candidate) => candidate.startsWith("pdf-page:"));
     if (!handle || !row.source_version_id) return null;
@@ -954,7 +972,7 @@ export class ImportStore {
   }
 
   #storeArtifact(id: string, artifactType: string, bytes: Uint8Array, extension: string, createdByKind: string,
-    createdById: string | null, parentArtifactId: string | null): void {
+    createdById: string | null, parentArtifactId: string | null): string {
     const hash = createHash("sha256").update(bytes).digest("hex");
     const storageRef = join("derived", artifactType, hash.slice(0, 2), `${hash}.${extension}`);
     const absolute = join(this.#artifactRoot, storageRef);
@@ -968,8 +986,11 @@ export class ImportStore {
     this.#database.prepare(`INSERT OR IGNORE INTO artifacts(id,artifact_type,content_hash,storage_ref,media_type,byte_size,created_by_kind,retention_class,integrity_status,created_at,created_by_id)
       VALUES (?,?,?,?,?,?,?,'historical','verified',?,?)`).run(id, artifactType, hash, storageRef,
         extension === "json" ? "application/json" : "text/markdown", bytes.byteLength, createdByKind, new Date().toISOString(), createdById);
+    const storedId = (this.#database.prepare("SELECT id FROM artifacts WHERE artifact_type=? AND content_hash=?")
+      .get(artifactType, hash) as { id: string }).id;
     if (parentArtifactId) this.#database.prepare(`INSERT OR IGNORE INTO artifact_parents(artifact_id,parent_artifact_id,relationship,ordinal)
-      VALUES (?,?,'derived-from',0)`).run(id, parentArtifactId);
+      VALUES (?,?,'derived-from',0)`).run(storedId, parentArtifactId);
+    return storedId;
   }
 
   #artifactIsValid(id: string): boolean {

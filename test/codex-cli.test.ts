@@ -89,4 +89,39 @@ process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
       process.env.PATH = originalPath;
     }
   });
+
+  it("launches one strict workspace-scoped Agentic Evidence exec and normalizes JSONL activity", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-agentic-codex-"));
+    const workspace = join(directory, "workspace");
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(workspace));
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] !== "exec" || !args.includes("--strict-config") || args[args.indexOf("--sandbox") + 1] !== "read-only") process.exit(51);
+if (args.includes("resume") || args[args.indexOf("--cd") + 1] !== ${JSON.stringify(workspace)}) process.exit(52);
+if (process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.ALL_PROXY || process.env.http_proxy || process.env.https_proxy) process.exit(53);
+const output = args[args.indexOf("--output-last-message") + 1];
+process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "rg evidence paper" } }) + "\\n");
+fs.writeFileSync(output, JSON.stringify({ answer: "grounded", groundingStatus: "answered",
+  citations: [{ path: "paper/pages/page-0001.md", lineStart: 10, lineEnd: 10, quote: "evidence" }],
+  proposedTakeaways: [], usage: { status: "reported", inputTokens: 10, cachedInputTokens: 2, outputTokens: 3, totalTokens: 13 } }));
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    process.env.HTTP_PROXY = "http://should-be-scrubbed.invalid";
+    const activities: string[] = [];
+    try {
+      const result = await new CodexCliRunner({ canaries: false, outerSandbox: false }).run({ attemptId: "job:1", runEpoch: 1,
+        workspaceRoot: workspace, question: "question", signal: new AbortController().signal,
+        onActivity(activity) { activities.push(`${activity.type}:${activity.text}`); } });
+      expect(result).toMatchObject({ answer: "grounded", citations: [{ quote: "evidence" }], usage: { totalTokens: 13 } });
+      expect(activities).toEqual(expect.arrayContaining([expect.stringMatching(/^started:/), expect.stringMatching(/^command:/)]));
+    } finally {
+      process.env.PATH = originalPath;
+      delete process.env.HTTP_PROXY;
+    }
+  });
 });

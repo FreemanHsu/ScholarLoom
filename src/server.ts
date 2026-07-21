@@ -10,10 +10,42 @@ import { assertDataRootWritable, DATA_MANIFEST_NAME, defaultDataRoot, initialize
 import { acquireRuntimeLock } from "./storage/runtime-lock.js";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { PaperSourceError } from "./adapters/safe-pdf-downloader.js";
+import type { AgenticEvidenceRunner } from "./agent/agentic-evidence-runner.js";
 
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
 const fixtureChatFailures = new Set<string>();
+const fixtureAgenticRunner: AgenticEvidenceRunner = {
+  async run(input) {
+    input.onActivity({ type: "workspace", text: "正在检查冻结 Evidence Workspace" });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, 1_200);
+      input.signal.addEventListener("abort", () => { clearTimeout(timer); reject(input.signal.reason); }, { once: true });
+    });
+    if (input.question.includes("FAIL_CHAT_FIXTURE") && !fixtureChatFailures.has(input.question)) {
+      fixtureChatFailures.add(input.question);
+      throw new Error("fixture-codex-failure");
+    }
+    const manifest = JSON.parse(readFileSync(join(input.workspaceRoot, "MANIFEST.json"), "utf8")) as {
+      sources: Array<{ kind: string; path: string; sourceId: string; revision?: string; contentHash: string; citable: boolean }>;
+    };
+    const candidates = ["pdf", "code", "library", "summary"].flatMap((kind) =>
+      manifest.sources.filter((source) => source.kind === kind && source.citable).slice(0, 1));
+    const selected = candidates.slice(0, 3);
+    const citations = selected.map((source) => {
+      const content = readFileSync(join(input.workspaceRoot, source.path), "utf8");
+      const lines = content.split("\n");
+      const line = Math.max(1, lines.findIndex((value) => value.trim() && !value.startsWith("---") && !value.includes(":")) + 1);
+      const quote = lines[line - 1]?.trim() || lines.find((value) => value.trim())!.trim();
+      return { path: source.path, lineStart: line, lineEnd: line, quote };
+    });
+    input.onActivity({ type: "grounding", text: `已验证 ${citations.length} 条最终引用` });
+    return { answer: "## 回答\n\n冻结的论文、代码与 curated library 证据支持这一结论。", groundingStatus: "answered",
+      citations, proposedTakeaways: citations.length ? [{ claim: "冻结证据连接了论文结论与实现。", receiptOrdinals: [1] }] : [],
+      usage: { status: "reported", inputTokens: 38_400, cachedInputTokens: 12_000, outputTokens: 940, totalTokens: 39_340 } };
+  },
+};
 const paperSource: PaperSource = fixture ? {
   async resolve(arxivId) { return { arxivId, latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
   async fetchPdf() { return createFixturePdf(); },
@@ -40,6 +72,7 @@ assertDataRootWritable(layout);
 const releaseRuntimeLock = acquireRuntimeLock(layout);
 try {
   const fixtureRepository = fixture ? prepareFixtureRepository(layout.tmpRoot) : null;
+  const productionCodex = fixture ? null : new CodexCliRunner();
   const app = await createApp({ paperSource, directPdfSource, storageLayout: layout, ...(fixture ? {
       repositoryAdapter: new GitRepositoryAdapter({ "https://github.com/example/fixture": fixtureRepository! }),
       codexRunner: {
@@ -60,7 +93,8 @@ try {
         async runEntry(context) { return { answer: "已确认结论与 active Summary 支持可追溯阅读。",
           sourceHandles: context.sources.map((source) => source.handle), uncertainty: null }; },
       },
-    } : { repositoryAdapter: new GitRepositoryAdapter(), codexRunner: new CodexCliRunner() }) });
+      agenticEvidenceRunner: fixtureAgenticRunner,
+    } : { repositoryAdapter: new GitRepositoryAdapter(), codexRunner: productionCodex!, agenticEvidenceRunner: productionCodex! }) });
   let closing = false;
   const shutdown = async () => {
     if (closing) return;

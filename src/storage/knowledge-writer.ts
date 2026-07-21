@@ -97,7 +97,8 @@ export class KnowledgeWriter {
       phase = "renamed";
     }
     if (phase === "renamed") {
-      const summaryArtifact = this.database.prepare(`SELECT 'artifact:' || id artifact_id FROM summary_revisions WHERE paper_id=? AND status='active'`)
+      const summaryArtifact = this.database.prepare(`SELECT a.id artifact_id FROM summary_revisions s JOIN artifacts a
+        ON a.artifact_type='paper-summary' AND a.content_hash=s.markdown_hash WHERE s.paper_id=? AND s.status='active'`)
         .get(payload.paperId) as { artifact_id: string } | undefined;
       this.ports.storeArtifact(`artifact:${payload.revisionId}`, readFileSync(targetPath), payload.body.reviewDecision.id,
         summaryArtifact?.artifact_id ?? null);

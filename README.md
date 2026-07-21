@@ -51,6 +51,13 @@ Conversation 使用稳定 URL 和不可变 Context Snapshot；Message、Agent at
 引用与 Takeaway Proposal 可在刷新或重启后恢复。失败和中断只允许显式 retry，
 不会在启动时静默重跑。
 
+Discussion 已使用 Codex-native Agentic Evidence Retrieval。每次 Attempt 运行一个
+`codex exec`，在只读、content-addressed Evidence Workspace 内用 shell/`rg`/文件阅读
+自主定位冻结的 PDF extraction、Summary、固定 commit、近期 Conversation context 与
+创建时冻结的 curated library。最终引用必须带逐字 quote，并通过 MANIFEST、hash、路径和
+行号校验后才生成 Evidence Receipt；Activity 只用于进度/audit。默认跨 Conversation
+并发 2，支持 durable queue、cancel、timeout、restart-interrupted 与显式 retry。
+
 ## 本地运行
 
 要求 Node.js 22+、Git 和已完成登录的 Codex CLI。
@@ -145,8 +152,10 @@ codex exec --sandbox read-only --ephemeral --output-schema <schema> \
   --output-last-message <result> -
 ```
 
-应用向 Codex 提供 opaque source handle manifest，校验结构化结果与 Evidence Anchor 后才
-写入。运行 `npm start` 后导入一篇允许下载的 arXiv 论文或公开 PDF 直链即可做 opt-in
+Summary/Entry 继续使用各自的结构化 context；Discussion 启动前执行 CLI/sandbox canary，
+并用内层 read-only sandbox 与外层 macOS deny-default filesystem profile 限制能力。任何
+canary 失败都会 fail closed，不回退 legacy one-shot。运行 `npm start` 后导入一篇允许下载
+的 arXiv 论文或公开 PDF 直链即可做 opt-in
 smoke；这会使用网络和 Codex 配额。公开 PDF 仅接受 URL 直接返回的 PDF，不解析 landing
 page、DOI、OpenReview 或登录态链接。仓库不会自动安装依赖或执行论文代码，也不会提交
 下载的 PDF/runtime assets。

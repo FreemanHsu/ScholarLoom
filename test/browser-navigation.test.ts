@@ -15,6 +15,7 @@ describe("browser navigation", () => {
       pdfOpen: true,
       page: 7,
       anchor: "evidence:claim:1",
+      evidenceReceiptId: null,
     });
   });
 
@@ -30,6 +31,7 @@ describe("browser navigation", () => {
       pdfOpen: true,
       page: 3,
       anchor: "evidence:3",
+      evidenceReceiptId: null,
     });
     expect(readBrowserRoute({ pathname: "/papers/paper%3Afixture", search: "?mode=knowledge" })).toMatchObject({
       mode: "knowledge",
@@ -54,5 +56,15 @@ describe("browser navigation", () => {
     })).toBe("/papers/paper%3Afixture%3A2024%3Atraceable?pdf=open&page=2&anchor=evidence%3Aclaim%3Atable+1");
     expect(paperHref("paper:fixture:2024:traceable", { pdfOpen: false, page: 1, anchor: null }))
       .toBe("/papers/paper%3Afixture%3A2024%3Atraceable");
+  });
+
+  it("restores the verified Evidence Receipt inspector from the Conversation URL", () => {
+    expect(readBrowserRoute({
+      pathname: "/papers/paper%3Afixture/conversations/conversation%3Aone",
+      search: "?evidence=evidence-receipt%3Aone",
+    })).toMatchObject({ evidenceReceiptId: "evidence-receipt:one" });
+    expect(paperHref("paper:fixture", { mode: "discussion", conversationId: "conversation:one",
+      pdfOpen: false, page: 1, anchor: null, evidenceReceiptId: "evidence-receipt:one" }))
+      .toBe("/papers/paper%3Afixture/conversations/conversation%3Aone?evidence=evidence-receipt%3Aone");
   });
 });
