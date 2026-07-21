@@ -57,7 +57,7 @@ describe("browser route delivery", () => {
     expect(papers.json().papers).toEqual([
       expect.objectContaining({
         title: "Running Fixture",
-        processing: { state: "running", progress: 0.1, needsAttention: false },
+        processing: { state: "running", progress: 0.1, needsAttention: false, error: null },
         summaryStatus: "processing",
       }),
     ]);

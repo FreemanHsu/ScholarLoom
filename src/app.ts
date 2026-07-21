@@ -39,6 +39,21 @@ export type CreateAppOptions = {
   clock?: { now(): Date };
 };
 
+function classifyPaperResolutionError(error: unknown): { status: 404 | 503; code: string; detail: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "paper-source-unavailable:not-found" || message === "paper-source-unavailable:404") {
+    return { status: 404, code: "paper-source-not-found", detail: "arXiv 未找到这篇论文，请检查编号是否正确。" };
+  }
+  const status = message.match(/^paper-source-unavailable:(\d{3})$/)?.[1];
+  return {
+    status: 503,
+    code: "paper-source-unavailable",
+    detail: status
+      ? `arXiv 暂时不可用（HTTP ${status}），请稍后重试。`
+      : "无法连接 arXiv，请检查网络后重试。",
+  };
+}
+
 export async function createApp(options: CreateAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, routerOptions: { maxParamLength: 1024 } });
   const now = options.clock ? () => options.clock!.now() : undefined;
@@ -77,8 +92,16 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     catch (error) { return reply.code(503).send({ code: "data-root-not-writable", detail: (error as Error).message }); }
 
     const frozen = reference.explicitVersion === null ? store.findFrozenArxiv(reference.arxivId) : null;
-    const resolved = frozen ? store.getResolvedMetadata(frozen.id)!
-      : await options.paperSource.resolve(reference.arxivId);
+    let resolved: ResolvedPaper;
+    try {
+      resolved = frozen ? store.getResolvedMetadata(frozen.id)!
+        : await options.paperSource.resolve(reference.arxivId);
+    } catch (error) {
+      const failure = classifyPaperResolutionError(error);
+      const importRequest = store.recordFailedImport({ originalInput: request.body.arxivUrl,
+        normalizedInput: reference.arxivId, code: failure.code, detail: failure.detail });
+      return reply.code(failure.status).send({ code: failure.code, detail: failure.detail, importRequest });
+    }
     const version = reference.explicitVersion ?? resolved.latestVersion;
     const processing = Boolean(options.paperSource.fetchPdf && options.codexRunner);
     const { paper, importRequest, job } = store.importPaper({

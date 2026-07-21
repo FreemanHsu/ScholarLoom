@@ -10,7 +10,7 @@ describe("import progress monitoring", () => {
     const onProgress = vi.fn();
     const adapter: ImportProgressAdapter = {
       subscribe() { return unsubscribe; },
-      async read() { return "succeeded"; },
+      async read() { return { state: "succeeded", error: null }; },
       repeat(callback) { poll = callback; return stopPolling; },
     };
     const monitor = createImportMonitor(adapter);
@@ -27,7 +27,7 @@ describe("import progress monitoring", () => {
   it("treats an interrupted import as retryable terminal state", async () => {
     const adapter: ImportProgressAdapter = {
       subscribe() { return () => undefined; },
-      async read() { return "interrupted"; },
+      async read() { return { state: "interrupted", error: null }; },
       repeat(callback) { void callback(); return () => undefined; },
     };
 
@@ -38,11 +38,26 @@ describe("import progress monitoring", () => {
   it("treats a cancelled import as terminal without suggesting retry", async () => {
     const adapter: ImportProgressAdapter = {
       subscribe() { return () => undefined; },
-      async read() { return "cancelled"; },
+      async read() { return { state: "cancelled", error: null }; },
       repeat(callback) { void callback(); return () => undefined; },
     };
 
     await expect(createImportMonitor(adapter).wait("import:cancelled", () => undefined))
       .rejects.toThrow("导入已取消");
+  });
+
+  it("reports the stored Job Run reason instead of a generic failure", async () => {
+    const adapter: ImportProgressAdapter = {
+      subscribe() { return () => undefined; },
+      async read() { return { state: "failed", error: { code: "summary-generation-failed", message: "Codex CLI 超时",
+        stage: "paper-summary", retryable: true, action: "retry" } }; },
+      repeat(callback) { void callback(); return () => undefined; },
+    };
+
+    const result = await Promise.race([
+      createImportMonitor(adapter).wait("import:failed", () => undefined).catch((error: Error) => error.message),
+      new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 50)),
+    ]);
+    expect(result).toBe("Paper Summary 生成失败：Codex CLI 超时（summary-generation-failed）");
   });
 });

@@ -22,7 +22,7 @@ export type StoredPaper = {
   version: number;
   title: string;
   updatedAt?: string;
-  processing?: { state: ImportJobState; progress: number; needsAttention: boolean } | null;
+  processing?: { state: ImportJobState; progress: number; needsAttention: boolean; error: ImportJobError | null } | null;
   summaryStatus?: "ready" | "processing" | "failed";
   codeStatus?: "ready" | "failed" | "not-linked";
   pendingReviewCount?: number;
@@ -42,7 +42,8 @@ export type ChatResult = {
 export type EntryResult = { answer: string; sourceHandles: string[]; uncertainty: string | null };
 
 type ImportStatus = {
-  importRequest: { id: string; paperId: string; resolutionStatus: string };
+  importRequest: { id: string; paperId: string | null; resolutionStatus: string;
+    error: { code: string; detail: string } | null };
   jobs: Array<{ id: string; jobType: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null }>;
 };
 
@@ -826,11 +827,24 @@ export class ImportStore {
     })();
   }
 
+  recordFailedImport(input: { originalInput: string; normalizedInput: string; code: string; detail: string }): {
+    id: string; status: "failed";
+  } {
+    const id = `import:${randomUUID()}`;
+    const now = this.#now().toISOString();
+    this.#database.prepare(`INSERT INTO import_requests
+      (id,original_input,normalized_input,submitted_at,resolution_status,error_code,error_detail,completed_at)
+      VALUES (?,?,?,?,'failed',?,?,?)`)
+      .run(id, input.originalInput, input.normalizedInput, now, input.code, input.detail, now);
+    return { id, status: "failed" };
+  }
+
   finishImport(jobId: string, error?: unknown, stage: ImportStage = "knowledge-write"): void {
     const now = new Date().toISOString();
     const state = error ? "failed" : "succeeded";
     const progress = error ? 0.1 : 1;
-    const errorJson = error ? JSON.stringify(classifyImportError(error, stage)) : null;
+    const jobError = error ? classifyImportError(error, stage) : null;
+    const errorJson = jobError ? JSON.stringify(jobError) : null;
     const job = this.#database.prepare(`UPDATE job_runs SET state=?,progress=?,error_json=?,completed_at=?,heartbeat_at=?
       WHERE id=? AND job_type='paper-import' RETURNING id,import_request_id,paper_id,input_json`).get(state, progress, errorJson, now, now, jobId) as
       { id: string; import_request_id: string; paper_id: string; input_json: string } | undefined;
@@ -841,7 +855,7 @@ export class ImportStore {
           .get(job.paper_id) as { current_version_id: string }).current_version_id;
         this.#database.prepare("UPDATE paper_versions SET processing_status='failed',updated_at=? WHERE id=?").run(now, versionId);
       }
-      this.#event(job.import_request_id, "job-progress", { jobId: job.id, jobType: "paper-import", state, progress });
+      this.#event(job.import_request_id, "job-progress", { jobId: job.id, jobType: "paper-import", state, progress, error: jobError });
     }
   }
 
@@ -893,12 +907,14 @@ export class ImportStore {
   }
 
   getImport(id: string): ImportStatus | null {
-    const row = this.#database.prepare(`SELECT id,resolved_paper_id,resolution_status FROM import_requests WHERE id=?`).get(id) as
-      { id: string; resolved_paper_id: string; resolution_status: string } | undefined;
+    const row = this.#database.prepare(`SELECT id,resolved_paper_id,resolution_status,error_code,error_detail
+      FROM import_requests WHERE id=?`).get(id) as
+      { id: string; resolved_paper_id: string | null; resolution_status: string; error_code: string | null; error_detail: string | null } | undefined;
     if (!row) return null;
     const jobs = this.#database.prepare(`SELECT id,job_type,state,progress,attempt,error_json FROM job_runs WHERE import_request_id=? ORDER BY attempt,queued_at,id`).all(id) as
       Array<{ id: string; job_type: string; state: string; progress: number; attempt: number; error_json: string | null }>;
-    return { importRequest: { id: row.id, paperId: row.resolved_paper_id, resolutionStatus: row.resolution_status },
+    return { importRequest: { id: row.id, paperId: row.resolved_paper_id, resolutionStatus: row.resolution_status,
+      error: row.error_code && row.error_detail ? { code: row.error_code, detail: row.error_detail } : null },
       jobs: jobs.map((job) => ({ id: job.id, jobType: job.job_type, state: requireImportJobState(job.state), progress: job.progress,
         attempt: job.attempt, error: parseStoredImportError(job.error_json) })) };
   }
@@ -920,6 +936,8 @@ export class ImportStore {
         ORDER BY j.attempt DESC,j.queued_at DESC,j.id DESC LIMIT 1) job_state,
       (SELECT j.progress FROM job_runs j WHERE j.paper_id=p.id AND j.job_type='paper-import'
         ORDER BY j.attempt DESC,j.queued_at DESC,j.id DESC LIMIT 1) job_progress,
+      (SELECT j.error_json FROM job_runs j WHERE j.paper_id=p.id AND j.job_type='paper-import'
+        ORDER BY j.attempt DESC,j.queued_at DESC,j.id DESC LIMIT 1) job_error_json,
       CASE WHEN EXISTS (SELECT 1 FROM summary_revisions s WHERE s.paper_id=p.id AND s.status='active') THEN 'ready'
         WHEN v.processing_status='failed' THEN 'failed' ELSE 'processing' END summary_status,
       CASE WHEN EXISTS (SELECT 1 FROM paper_code_links pcl WHERE pcl.paper_id=p.id AND pcl.status='confirmed') THEN 'ready'
@@ -931,12 +949,13 @@ export class ImportStore {
       JOIN paper_external_identities i ON i.paper_id=p.id AND i.identity_type='arxiv'
       JOIN paper_versions v ON v.id=p.current_version_id ORDER BY p.updated_at DESC,p.id`).all() as
       Array<{ id: string; title: string; updated_at: string; normalized_value: string; source_version: string;
-        job_state: string | null; job_progress: number | null; summary_status: "ready" | "processing" | "failed";
+        job_state: string | null; job_progress: number | null; job_error_json: string | null;
+        summary_status: "ready" | "processing" | "failed";
         code_status: "ready" | "failed" | "not-linked"; pending_review_count: number }>).map((row) => ({
         id: row.id, arxivId: row.normalized_value, title: row.title, version: Number.parseInt(row.source_version.slice(1), 10),
         updatedAt: row.updated_at,
         processing: row.job_state ? { state: requireImportJobState(row.job_state), progress: row.job_progress ?? 0,
-          needsAttention: isRetryableImportJobState(row.job_state) } : null,
+          needsAttention: isRetryableImportJobState(row.job_state), error: parseStoredImportError(row.job_error_json) } : null,
         summaryStatus: row.summary_status,
         codeStatus: row.code_status,
         pendingReviewCount: row.pending_review_count,

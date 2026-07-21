@@ -17,7 +17,7 @@ type Paper = {
   arxivId: string;
   version: number;
   updatedAt?: string;
-  processing?: { state: ImportJobState; progress: number; needsAttention: boolean } | null;
+  processing?: { state: ImportJobState; progress: number; needsAttention: boolean; error: ImportJobError | null } | null;
   summaryStatus?: "ready" | "processing" | "failed";
   codeStatus?: "ready" | "failed" | "not-linked";
   pendingReviewCount?: number;
@@ -229,9 +229,14 @@ function App() {
       await refreshPapers();
       void importMonitor.wait(body.importRequest.id, setProgress)
         .then(async () => { await refreshPapers(); await refreshWorkspace(body.paper.id); })
-        .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "导入失败"))
+        .catch(async (cause: unknown) => {
+          await refreshPapers();
+          await refreshWorkspace(body.paper.id);
+          setError(cause instanceof Error ? cause.message : "导入失败");
+        })
         .finally(() => setProgress(null));
     } catch (cause) {
+      setProgress(null);
       setError(cause instanceof Error ? cause.message : "导入失败");
     } finally {
       setBusy(false);
@@ -253,9 +258,14 @@ function App() {
       await refreshWorkspace(workspace.paper.id);
       void importMonitor.wait(body.importRequest.id, setProgress)
         .then(async () => { await refreshPapers(); await refreshWorkspace(workspace.paper.id); })
-        .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "重试失败"))
+        .catch(async (cause: unknown) => {
+          await refreshPapers();
+          await refreshWorkspace(workspace.paper.id);
+          setError(cause instanceof Error ? cause.message : "重试失败");
+        })
         .finally(() => setProgress(null));
     } catch (cause) {
+      setProgress(null);
       setError(cause instanceof Error ? cause.message : "重试失败");
     } finally {
       setBusy(false);
@@ -380,6 +390,7 @@ function PaperCard({ paper, onNavigate }: { paper: Paper; onNavigate(href: strin
   return <a className="paper-card" href={href} onClick={(event) => { if (!event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
     event.preventDefault(); onNavigate(href); } }}><span>v{paper.version}</span><div><h3>{paper.title}</h3><p>arXiv:{paper.arxivId}</p>
       <div className="paper-badges"><small>{processingLabel}</small><small>{codeLabel}</small>{Boolean(paper.pendingReviewCount) && <small>待审核 {paper.pendingReviewCount}</small>}</div>
+      {paper.processing?.error && <p className="paper-error">失败原因：{paper.processing.error.message}</p>}
     </div><b>→</b></a>;
 }
 

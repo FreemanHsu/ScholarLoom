@@ -252,6 +252,17 @@ describe("paper ingestion lifecycle", () => {
     expect(failedWorkspace.json()).toMatchObject({ summary: null, processing: { state: "failed",
       jobId: failedStatus.json().jobs[0].id, attempt: 1,
       error: { code: "summary-generation-failed", stage: "paper-summary", retryable: true } } });
+    const failedPapers = await app.inject({ method: "GET", url: "/api/papers" });
+    expect(failedPapers.json().papers[0]).toMatchObject({
+      processing: {
+        state: "failed",
+        error: {
+          code: "summary-generation-failed",
+          message: "fixture-codex-interrupted",
+          stage: "paper-summary",
+        },
+      },
+    });
 
     await chmod(join(storageLayout.originalsRoot, "papers"), 0o500);
     const blockedRetry = await app.inject({ method: "POST", url: `/api/jobs/${failedStatus.json().jobs[0].id}/retry`,

@@ -150,6 +150,40 @@ describe("POST /api/imports", () => {
     expect(papers.json()).toEqual({ papers: [] });
     await app.close();
   });
+
+  it("records a failed Import Request and explains an arXiv resolution failure", async () => {
+    const app = await createApp({
+      storageLayout: await testLayout(),
+      paperSource: {
+        async resolve() { throw new Error("paper-source-unavailable:not-found"); },
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2607.99999" },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({
+      code: "paper-source-not-found",
+      detail: "arXiv 未找到这篇论文，请检查编号是否正确。",
+      importRequest: { status: "failed" },
+    });
+    const status = await app.inject({ method: "GET", url: `/api/imports/${response.json().importRequest.id}` });
+    expect(status.json()).toMatchObject({
+      importRequest: {
+        resolutionStatus: "failed",
+        error: {
+          code: "paper-source-not-found",
+          detail: "arXiv 未找到这篇论文，请检查编号是否正确。",
+        },
+      },
+      jobs: [],
+    });
+    await app.close();
+  });
 });
 import { chmod, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
