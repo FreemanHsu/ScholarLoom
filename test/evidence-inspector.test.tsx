@@ -30,4 +30,15 @@ describe("Evidence inspector", () => {
     expect(html).toContain("src/main.ts");
     expect(html).not.toContain("Agent Activity");
   });
+
+  it("presents verified evidence in a modal surface without joining the workspace layout", () => {
+    const html = renderToStaticMarkup(<EvidenceInspector evidence={{ id: "receipt:1", evidenceKind: "pdf",
+      sourceId: "paper-version:1", sourceRevision: "sha256:abc", workspacePath: null,
+      quote: "A bounded quote.", verificationStatus: "verified", locator: { page: 2 } }}
+      onClose={() => undefined} />);
+
+    expect(html).toContain('class="evidence-modal-backdrop"');
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('aria-modal="true"');
+  });
 });
