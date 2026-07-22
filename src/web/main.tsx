@@ -10,6 +10,8 @@ import { paperHref, readBrowserRoute, type BrowserRoute } from "./browser-naviga
 import { importMonitor } from "./import-monitor.js";
 import { SummaryMarkdown } from "./summary-markdown.js";
 import { ConversationMessageBody, ConversationProposalGroup } from "./conversation-message.js";
+import { conversationListStatus, ConversationHeaderActions, ContinueConversationAction, NewConversationButton }
+  from "./conversation-controls.js";
 import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspector.js";
 import "./styles.css";
 
@@ -71,9 +73,9 @@ function PdfFrame({ src }: { src: string }) {
   return <iframe ref={frame} title="原始 PDF" src={initialSrc.current} />;
 }
 type ConversationSummary = { id: string; paperId: string; title: string; status: "active" | "archived";
-  snapshotIntegrity: "frozen" | "legacy"; updatedAt: string };
+  snapshotIntegrity: "frozen" | "legacy"; continuedFromConversationId: string | null; updatedAt: string };
 type ConversationDetail = {
-  conversation: ConversationSummary & { contextSnapshotId: string; continuedFromConversationId: string | null };
+  conversation: ConversationSummary & { contextSnapshotId: string };
   contextSnapshot: { id: string; paperVersionId: string; summaryRevisionId: string; extractionRunId: string;
     pageCount: number; repositorySnapshots: Array<{ id: string; commitSha: string }> } | null;
   messages: Array<{ id: string; role: "user" | "assistant"; content: string; inReplyToMessageId: string | null;
@@ -709,23 +711,30 @@ function PaperWorkspace(props: {
     </nav>
     {route.mode === "discussion" && <div className="discussion-layout">
       <aside className="conversation-list"><div className="conversation-list-heading"><div><span className="eyebrow">CONVERSATIONS</span><h2>论文讨论</h2></div>
-        <button onClick={() => props.onNavigate(modeHref("discussion"))}>新对话</button></div>
+        <NewConversationButton onCreate={() => props.onNavigate(modeHref("discussion"))} /></div>
         {props.conversations.length === 0 && <p className="empty">还没有 Conversation。</p>}
         {props.conversations.map((item) => <a key={item.id}
           className={route.conversationId === item.id ? "selected" : ""}
           href={paperHref(workspace.paper.id, { mode: "discussion", conversationId: item.id, pdfOpen: false, page: 1, anchor: null })}
           onClick={(event) => { event.preventDefault(); props.onNavigate(paperHref(workspace.paper.id,
             { mode: "discussion", conversationId: item.id, pdfOpen: false, page: 1, anchor: null })); }}>
-          <strong>{item.title}</strong><small>{item.status === "archived" ? "已归档" : item.snapshotIntegrity === "legacy" ? "Legacy · 只读" : "上下文已冻结"}</small></a>)}
+          <strong>{item.title}</strong><small className={item.continuedFromConversationId ? "successor" : undefined}>
+            {conversationListStatus({ archived: item.status === "archived", legacy: item.snapshotIntegrity === "legacy",
+              successor: item.continuedFromConversationId !== null })}</small></a>)}
       </aside>
       <section className="discussion-pane">
-        {!route.conversationId && <div className="discussion-empty"><span className="eyebrow">NEW CONVERSATION</span><h2>从一个问题开始</h2>
-          <p>发送后将立即冻结当前 Paper、Summary、Extraction 与 Repository Snapshots。</p></div>}
+        {!route.conversationId && <div className="discussion-empty"><span className="eyebrow">INDEPENDENT CONVERSATION</span><h2>开启独立新对话</h2>
+          <p>不关联现有 Conversation；发送第一条消息时，将冻结当前 Paper、Summary、Extraction 与 Repository Snapshots。</p></div>}
         {route.conversationId && !props.conversation && <div className="discussion-empty"><h2>正在恢复 Conversation…</h2></div>}
         {props.conversation && <><header className="conversation-header"><div><span className="eyebrow">{props.conversation.conversation.snapshotIntegrity === "legacy" ? "LEGACY · READ ONLY" : "FROZEN CONTEXT"}</span>
-          <h2>{props.conversation.conversation.title}</h2></div><div className="conversation-actions"><small>{props.conversation.contextSnapshot?.repositorySnapshots.length ?? 0} repository snapshots</small>
-            <button onClick={() => { const title = window.prompt("Conversation 标题", props.conversation!.conversation.title); if (title) void props.onManageConversation("rename", title); }}>重命名</button>
-            <button onClick={() => void props.onManageConversation(props.conversation!.conversation.status === "archived" ? "restore" : "archive")}>{props.conversation.conversation.status === "archived" ? "恢复" : "归档"}</button></div></header>
+          <h2>{props.conversation.conversation.title}</h2></div><ConversationHeaderActions
+            repositorySnapshotCount={props.conversation.contextSnapshot?.repositorySnapshots.length ?? 0}
+            isSuccessor={props.conversation.conversation.continuedFromConversationId !== null}
+            archived={props.conversation.conversation.status === "archived"}
+            onRename={() => { const title = window.prompt("Conversation 标题", props.conversation!.conversation.title);
+              if (title) void props.onManageConversation("rename", title); }}
+            onToggleArchive={() => void props.onManageConversation(
+              props.conversation!.conversation.status === "archived" ? "restore" : "archive")} /></header>
           <div className="message-timeline">{props.conversation.messages.map((message) => {
             const messageProposals = discussionProposals.filter((proposal) => proposal.source.messageId === message.id);
             const openInlineEvidence = (page: number) => props.onNavigate(paperHref(workspace.paper.id, { mode: "discussion",
@@ -784,9 +793,9 @@ function PaperWorkspace(props: {
           <form className="chat-form discussion-composer" onSubmit={props.onAskPaper}><input aria-label="Paper question" value={props.question}
             onChange={(event) => props.onQuestion(event.target.value)} placeholder="论文、Summary 或固定代码快照中的问题…" disabled={running}/>
             <button disabled={running || !props.question.trim()}>{running ? "处理中" : "发送"}</button></form>}
-        {props.conversation && <button className="continue-latest" onClick={() => void props.onContinueConversation()}>
-          {props.conversation.conversation.snapshotIntegrity === "legacy" ? "使用最新上下文继续" : "使用最新知识创建后继 Conversation"}
-        </button>}
+        {props.conversation && props.conversation.messages.length > 0 && <ContinueConversationAction
+          legacy={props.conversation.conversation.snapshotIntegrity === "legacy"}
+          onContinue={() => void props.onContinueConversation()} />}
       </section>
       {route.pdfOpen && <aside className="pdf-pane source-view"><div className="pdf-toolbar"><strong>固定 PDF 证据</strong>
         <button aria-label="上一页" disabled={route.page <= 1} onClick={() => changePdfPage(-1)}>←</button>
