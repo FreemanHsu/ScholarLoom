@@ -79,9 +79,9 @@ export class AnswerGroundingGate {
       const source = this.#sources.get(citation.path);
       if (!source?.citable || source.kind === "conversation" || !citation.quote || citation.quote.length > 500) return citation;
       const lines = readFileSync(this.#resolve(citation.path), "utf8").split(/\r?\n/);
-      const matches = lines.flatMap((line, index) => normalizeText(line).includes(normalizeText(citation.quote))
-        ? [{ lineStart: index + 1, lineEnd: index + 1 }] : []);
-      return matches.length === 1 ? { ...citation, ...matches[0] } : citation;
+      const match = locateUniqueLineRange(lines, citation.quote,
+        typeof source.locator?.contentStartLine === "number" ? source.locator.contentStartLine : 1);
+      return match ? { ...citation, ...match } : citation;
     });
     return this.verify(repaired);
   }
@@ -133,4 +133,37 @@ export class AnswerGroundingGate {
 
 function normalizeText(value: string): string {
   return value.normalize("NFC").replace(/\s+/g, " ").trim();
+}
+
+function locateUniqueLineRange(lines: string[], quote: string, contentStartLine: number): { lineStart: number; lineEnd: number } | null {
+  const segments: Array<{ line: number; start: number; end: number }> = [];
+  let searchable = "";
+  for (let index = Math.max(0, contentStartLine - 1); index < lines.length; index += 1) {
+    const normalized = normalizeText(lines[index]!);
+    if (!normalized) continue;
+    if (searchable) searchable += " ";
+    const start = searchable.length;
+    searchable += normalized;
+    segments.push({ line: index + 1, start, end: searchable.length });
+  }
+  const needle = normalizeText(quote);
+  if (!needle) return null;
+  const offset = searchable.indexOf(needle);
+  if (offset === -1 || searchable.indexOf(needle, offset + 1) !== -1) return null;
+  const first = segmentAtOffset(segments, offset);
+  const last = segmentAtOffset(segments, offset + needle.length - 1);
+  return first && last ? { lineStart: first.line, lineEnd: last.line } : null;
+}
+
+function segmentAtOffset(segments: Array<{ line: number; start: number; end: number }>, offset: number) {
+  let low = 0;
+  let high = segments.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const segment = segments[middle]!;
+    if (offset < segment.start) high = middle - 1;
+    else if (offset >= segment.end) low = middle + 1;
+    else return segment;
+  }
+  return null;
 }

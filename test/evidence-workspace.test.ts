@@ -70,7 +70,7 @@ describe("EvidenceWorkspaceBuilder", () => {
       mkdir(join(workspace, "paper", "pages"), { recursive: true }),
       mkdir(join(workspace, "conversation"), { recursive: true }),
     ]).then(async () => {
-      const paper = "first line\nBounded verbatim evidence.\nlast line\n";
+      const paper = "first line\nBounded verbatim evidence.\nEvidence can span\nmultiple extracted lines.\nRepeated evidence. Repeated evidence.\nlast line\n";
       const context = "private conversation context\n";
       await writeFile(join(workspace, "paper", "pages", "page-0001.md"), paper);
       await writeFile(join(workspace, "conversation", "recent-messages.md"), context);
@@ -97,5 +97,11 @@ describe("EvidenceWorkspaceBuilder", () => {
       quote: "Bounded verbatim evidence." }])).toEqual([
       expect.objectContaining({ locator: expect.objectContaining({ lineStart: 2, lineEnd: 2 }) }),
     ]);
+    expect(gate.repair([{ path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
+      quote: "Evidence can span multiple extracted lines." }])).toEqual([
+      expect.objectContaining({ locator: expect.objectContaining({ lineStart: 3, lineEnd: 4 }) }),
+    ]);
+    expect(() => gate.repair([{ path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
+      quote: "Repeated evidence." }])).toThrow(/citation-quote-mismatch/);
   });
 });
