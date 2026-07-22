@@ -1,22 +1,31 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { conversationListStatus, ConversationHeaderActions, ContinueConversationAction, NewConversationButton }
+import { conversationListStatus, ConversationHeaderActions, NewConversationButton }
   from "../src/web/conversation-controls.js";
 
 describe("Conversation controls", () => {
   it("distinguishes an independent draft from a linked successor", () => {
     const independent = renderToStaticMarkup(<NewConversationButton onCreate={() => undefined} />);
-    const successor = renderToStaticMarkup(<ContinueConversationAction legacy={false} onContinue={() => undefined} />);
+    const successor = renderToStaticMarkup(<ConversationHeaderActions repositorySnapshotCount={1} isSuccessor={false}
+      archived={false} canContinue={true} legacy={false} onContinue={() => undefined}
+      onRename={() => undefined} onToggleArchive={() => undefined} />);
+    const legacy = renderToStaticMarkup(<ConversationHeaderActions repositorySnapshotCount={0} isSuccessor={false}
+      archived={false} canContinue={true} legacy={true} onContinue={() => undefined}
+      onRename={() => undefined} onToggleArchive={() => undefined} />);
 
     expect(independent).toContain("独立新对话");
     expect(successor).toContain("创建关联后继");
     expect(successor).toContain("当前对话及其证据保持冻结");
+    expect(successor).toContain('role="tooltip"');
+    expect(legacy).toContain("使用最新上下文继续");
+    expect(legacy).toContain("创建可继续讨论的关联 Conversation");
   });
 
   it("groups frozen-context status separately from management actions", () => {
     const html = renderToStaticMarkup(<ConversationHeaderActions repositorySnapshotCount={2} isSuccessor={true}
-      archived={false} onRename={() => undefined} onToggleArchive={() => undefined} />);
+      archived={false} canContinue={false} legacy={false} onContinue={() => undefined}
+      onRename={() => undefined} onToggleArchive={() => undefined} />);
 
     expect(html).toContain("2 个代码快照");
     expect(html).toContain("关联后继");

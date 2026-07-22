@@ -10,7 +10,7 @@ import { paperHref, readBrowserRoute, type BrowserRoute } from "./browser-naviga
 import { importMonitor } from "./import-monitor.js";
 import { SummaryMarkdown } from "./summary-markdown.js";
 import { ConversationMessageBody, ConversationProposalGroup } from "./conversation-message.js";
-import { conversationListStatus, ConversationHeaderActions, ContinueConversationAction, NewConversationButton }
+import { conversationListStatus, ConversationHeaderActions, NewConversationButton }
   from "./conversation-controls.js";
 import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspector.js";
 import "./styles.css";
@@ -731,6 +731,9 @@ function PaperWorkspace(props: {
             repositorySnapshotCount={props.conversation.contextSnapshot?.repositorySnapshots.length ?? 0}
             isSuccessor={props.conversation.conversation.continuedFromConversationId !== null}
             archived={props.conversation.conversation.status === "archived"}
+            canContinue={props.conversation.messages.length > 0}
+            legacy={props.conversation.conversation.snapshotIntegrity === "legacy"}
+            onContinue={() => void props.onContinueConversation()}
             onRename={() => { const title = window.prompt("Conversation 标题", props.conversation!.conversation.title);
               if (title) void props.onManageConversation("rename", title); }}
             onToggleArchive={() => void props.onManageConversation(
@@ -793,9 +796,6 @@ function PaperWorkspace(props: {
           <form className="chat-form discussion-composer" onSubmit={props.onAskPaper}><input aria-label="Paper question" value={props.question}
             onChange={(event) => props.onQuestion(event.target.value)} placeholder="论文、Summary 或固定代码快照中的问题…" disabled={running}/>
             <button disabled={running || !props.question.trim()}>{running ? "处理中" : "发送"}</button></form>}
-        {props.conversation && props.conversation.messages.length > 0 && <ContinueConversationAction
-          legacy={props.conversation.conversation.snapshotIntegrity === "legacy"}
-          onContinue={() => void props.onContinueConversation()} />}
       </section>
       {route.pdfOpen && <aside className="pdf-pane source-view"><div className="pdf-toolbar"><strong>固定 PDF 证据</strong>
         <button aria-label="上一页" disabled={route.page <= 1} onClick={() => changePdfPage(-1)}>←</button>
