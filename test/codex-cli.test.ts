@@ -1,10 +1,10 @@
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { CodexCliRunner } from "../src/adapters/codex-cli.js";
+import { assertDiscussionCapability, CodexCliRunner } from "../src/adapters/codex-cli.js";
 
 describe("CodexCliRunner Paper Summary contract", () => {
   it("constrains every Key Claim to one exact handle from the context manifest", async () => {
@@ -93,14 +93,24 @@ process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
   it("launches one strict workspace-scoped Agentic Evidence exec and normalizes JSONL activity", async () => {
     const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-agentic-codex-"));
     const workspace = join(directory, "workspace");
+    const runtimeRoot = join(directory, "runtime");
     await import("node:fs/promises").then(({ mkdir }) => mkdir(workspace));
+    await mkdir(runtimeRoot);
     const executable = join(directory, "codex");
     await writeFile(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-if (args[0] !== "exec" || !args.includes("--strict-config") || args[args.indexOf("--sandbox") + 1] !== "read-only") process.exit(51);
+if (args[0] !== "exec" || !args.includes("--strict-config") || args.includes("--sandbox")) process.exit(51);
+const configValues = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
+if (!configValues.includes('default_permissions="scholarloom-evidence"')) process.exit(54);
+if (!configValues.some((value) => value.includes('permissions.scholarloom-evidence=') &&
+  value.includes('":root"="deny"') && value.includes('":minimal"="read"') &&
+  value.includes('":workspace_roots"={"."="read"}') && value.includes('network={enabled=false}'))) process.exit(55);
 if (args.includes("resume") || args[args.indexOf("--cd") + 1] !== ${JSON.stringify(workspace)}) process.exit(52);
-if (process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.ALL_PROXY || process.env.http_proxy || process.env.https_proxy) process.exit(53);
+if (process.env.SCHOLARLOOM_FAKE_TOKEN !== "model-auth-sentinel") process.exit(53);
+if (!configValues.some((value) => value.includes('shell_environment_policy.exclude=') &&
+  value.includes('*PROXY*') && value.includes('*TOKEN*'))) process.exit(57);
+if (!process.env.TMPDIR?.startsWith(${JSON.stringify(`${runtimeRoot}/`)})) process.exit(56);
 const output = args[args.indexOf("--output-last-message") + 1];
 process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "rg evidence paper" } }) + "\\n");
@@ -110,18 +120,91 @@ fs.writeFileSync(output, JSON.stringify({ answer: "grounded", groundingStatus: "
 `, "utf8");
     await chmod(executable, 0o700);
     const originalPath = process.env.PATH;
+    const originalHttpProxy = process.env.HTTP_PROXY;
+    const originalNoProxy = process.env.NO_PROXY;
+    const originalFakeToken = process.env.SCHOLARLOOM_FAKE_TOKEN;
     process.env.PATH = `${directory}:${originalPath ?? ""}`;
     process.env.HTTP_PROXY = "http://should-be-scrubbed.invalid";
+    process.env.NO_PROXY = "should-also-be-scrubbed.invalid";
+    process.env.SCHOLARLOOM_FAKE_TOKEN = "model-auth-sentinel";
     const activities: string[] = [];
     try {
-      const result = await new CodexCliRunner({ canaries: false, outerSandbox: false }).run({ attemptId: "job:1", runEpoch: 1,
+      const result = await new CodexCliRunner({ canaries: false, runtimeRoot }).run({ attemptId: "job:1", runEpoch: 1,
         workspaceRoot: workspace, question: "question", signal: new AbortController().signal,
         onActivity(activity) { activities.push(`${activity.type}:${activity.text}`); } });
       expect(result).toMatchObject({ answer: "grounded", citations: [{ quote: "evidence" }], usage: { totalTokens: 13 } });
       expect(activities).toEqual(expect.arrayContaining([expect.stringMatching(/^started:/), expect.stringMatching(/^command:/)]));
     } finally {
       process.env.PATH = originalPath;
-      delete process.env.HTTP_PROXY;
+      restoreEnvironment("HTTP_PROXY", originalHttpProxy);
+      restoreEnvironment("NO_PROXY", originalNoProxy);
+      restoreEnvironment("SCHOLARLOOM_FAKE_TOKEN", originalFakeToken);
     }
   });
+
+  it("runs the launch capability canary through the same native permission profile", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-sandbox-codex-path-"));
+    const workspace = join(directory, "workspace");
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(workspace));
+    await writeFile(join(workspace, "MANIFEST.json"), "{}", "utf8");
+    const codex = join(directory, "codex");
+    const canaryLog = join(directory, "canary.log");
+    await writeFile(codex, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.145.1"; exit 0; fi
+if [ "$1" = "exec" ]; then echo --strict-config --json --output-schema; exit 0; fi
+if [ "$1" = "sandbox" ]; then
+  printf '%s\\n' "$@" > ${JSON.stringify(canaryLog)}
+  case " $* " in *" -P scholarloom-evidence "*) ;; *) exit 72 ;; esac
+  case " $* " in *" default_permissions=\\\"scholarloom-evidence\\\" "*) ;; *) exit 73 ;; esac
+  case " $* " in *" permissions.scholarloom-evidence="*) ;; *) exit 74 ;; esac
+  case " $* " in *" shell_environment_policy.inherit="*) ;; *) exit 75 ;; esac
+  case " $* " in *" shell_environment_policy.exclude="*) ;; *) exit 76 ;; esac
+  case " $* " in *"MANIFEST.json"*) ;; *) exit 77 ;; esac
+  case " $* " in *"parent-write-canary"*) ;; *) exit 78 ;; esac
+  case " $* " in *"127.0.0.1"*) ;; *) exit 79 ;; esac
+  case " $* " in *"example.com"*) ;; *) exit 80 ;; esac
+  exit 0
+fi
+exit 70
+`, "utf8");
+    await chmod(codex, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      await expect(assertDiscussionCapability({ workspaceRoot: workspace, runDirectory: directory })).resolves.toBeUndefined();
+      await expect(readFile(canaryLog, "utf8")).resolves.toMatch(/sandbox[\s\S]*scholarloom-evidence/);
+    } finally { process.env.PATH = originalPath; }
+  });
+
+  it("cleans the Attempt run directory when the Codex executable is unavailable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-missing-codex-"));
+    const workspace = join(directory, "workspace");
+    const runtimeRoot = join(directory, "runtime");
+    await Promise.all([mkdir(workspace), mkdir(runtimeRoot)]);
+    const originalPath = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      await expect(new CodexCliRunner({ canaries: false, runtimeRoot }).run({
+        attemptId: "job:missing", runEpoch: 1, workspaceRoot: workspace, question: "question",
+        signal: new AbortController().signal, onActivity() {},
+      })).rejects.toThrow("discussion-capability-executable-unavailable:codex");
+      await expect(readdir(runtimeRoot)).resolves.toEqual([]);
+    } finally { process.env.PATH = originalPath; }
+  });
+
+  it("fails closed when the private runtime root is accessible by another account", async () => {
+    const runtimeRoot = await mkdtemp(join(process.cwd(), ".scholarloom-shared-runtime-"));
+    await chmod(runtimeRoot, 0o750);
+    try {
+      await expect(new CodexCliRunner({ runtimeRoot }).run({
+        attemptId: "job:shared", runEpoch: 1, workspaceRoot: process.cwd(), question: "question",
+        signal: new AbortController().signal, onActivity() {},
+      })).rejects.toThrow("discussion-runtime-root-permissions");
+    } finally { await rm(runtimeRoot, { recursive: true, force: true }); }
+  });
 });
+
+function restoreEnvironment(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}

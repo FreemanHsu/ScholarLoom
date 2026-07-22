@@ -309,8 +309,10 @@ gain extra pass-through interfaces.
 
 ## 6. Codex CLI execution contract
 
-The command surface was verified against the installed `codex-cli 0.144.6` on
-2026-07-19 and must be rechecked when the CLI version changes.
+The command surface and native permission profiles were verified against
+`codex-cli 0.144.6`. This is a minimum tested version, not an exact allowlist:
+every launch runs capability canaries, and a major CLI upgrade requires manual
+recertification.
 
 CodexRunner accepts a typed task rather than an arbitrary shell command:
 
@@ -332,9 +334,11 @@ one long-lived process per Attempt, equivalent to:
 codex exec
   --ephemeral
   --ignore-user-config
-  --sandbox read-only
+  --strict-config
   --skip-git-repo-check
   --cd <job-context>
+  -c default_permissions="scholarloom-evidence"
+  -c <workspace-read/current-run-write/network-denied-profile>
   --output-schema <schema.json>
   --json
   --output-last-message <result.json>
@@ -365,9 +369,12 @@ Rules:
 - Final citations are revalidated against the workspace MANIFEST and create Receipts;
   sanitized JSONL Activity is progress/audit only. Conversation continuity is
   reconstructed from frozen durable state, never hidden Codex session state.
-- The inner Codex sandbox and outer deny-default macOS profile allow reads only from
-  the Evidence Workspace, per-run temp, and minimum runtime/auth paths. Shell network
-  is denied and proxy variables are scrubbed; launch canaries fail closed.
+- A single Codex-native permission profile allows shell reads only from the Evidence
+  Workspace and minimal runtime, and writes only to the current Attempt run
+  directory. The run directory is under the private data-root runtime area, not
+  shared system temp. Shell network, including loopback, is denied; proxy, key,
+  secret, and token variables are scrubbed. The same profile powers launch canaries,
+  which fail closed.
 - Timeouts send graceful termination, then force termination after a bounded grace
   period. Partial output never becomes active knowledge.
 

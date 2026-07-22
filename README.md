@@ -148,12 +148,14 @@ HTTPS URL。`/api/events` 每 20 秒发送 heartbeat；事件先持久化，再�
 生产模式使用 arXiv Atom/PDF、安全公开 HTTPS PDF 下载、真实 `git clone` 和：
 
 ```text
-codex exec --sandbox read-only --ephemeral --output-schema <schema> \
+codex exec --ephemeral --strict-config --output-schema <schema> \
   --output-last-message <result> -
 ```
 
-Summary/Entry 继续使用各自的结构化 context；Discussion 启动前执行 CLI/sandbox canary，
-并用内层 read-only sandbox 与外层 macOS deny-default filesystem profile 限制能力。任何
+Summary/Entry 继续使用各自的结构化 context；Discussion 使用单一 Codex-native custom
+permission profile，把 shell 读取限制到 Evidence Workspace 与 minimal runtime、写入限制到
+当前 Attempt 的私有 run directory，并关闭外网与 loopback。每次启动都执行同一 profile 的
+capability canary；CLI 只设 minimum tested version，major upgrade 需人工重新认证。任何
 canary 失败都会 fail closed，不回退 legacy one-shot。运行 `npm start` 后导入一篇允许下载
 的 arXiv 论文或公开 PDF 直链即可做 opt-in
 smoke；这会使用网络和 Codex 配额。公开 PDF 仅接受 URL 直接返回的 PDF，不解析 landing

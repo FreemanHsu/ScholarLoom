@@ -72,7 +72,7 @@ assertDataRootWritable(layout);
 const releaseRuntimeLock = acquireRuntimeLock(layout);
 try {
   const fixtureRepository = fixture ? prepareFixtureRepository(layout.tmpRoot) : null;
-  const productionCodex = fixture ? null : new CodexCliRunner();
+  const productionCodex = fixture ? null : new CodexCliRunner({ runtimeRoot: layout.tmpRoot });
   const app = await createApp({ paperSource, directPdfSource, storageLayout: layout, ...(fixture ? {
       repositoryAdapter: new GitRepositoryAdapter({ "https://github.com/example/fixture": fixtureRepository! }),
       codexRunner: {

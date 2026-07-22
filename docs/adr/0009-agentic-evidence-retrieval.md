@@ -31,12 +31,24 @@ explicit retry. Restart changes running/canceling work to `interrupted` and neve
 silently reruns it. Retry reuses the User Message and frozen Snapshot but creates a
 new Attempt.
 
-The Codex adapter uses strict config, JSONL, structured output, read-only inner
-sandboxing, and a deny-default macOS filesystem profile. Launch-time capability
-canaries verify the minimum tested CLI version (`0.144.6`), strict flags, JSONL and
-visual-shim contracts, workspace access, protected-path denial, proxy scrubbing, and
-shell-network denial. Failure is infrastructure failure; there is no one-shot
-fallback.
+The Codex adapter uses strict config, JSONL, structured output, and one native custom
+permission profile for model-generated commands. The profile denies filesystem reads
+by default, grants only Codex's minimal runtime plus the Evidence Workspace, grants
+writes only to the current Attempt run directory, and disables shell network. It does
+not combine legacy `--sandbox` settings with an outer `sandbox-exec`: Codex's
+legacy read-only profile allowed broad host reads, while applying it inside an outer
+Seatbelt profile failed at runtime.
+
+Attempt run directories live under the current user's `0700` private
+`StorageLayout.tmpRoot`, outside system `/tmp` and `$TMPDIR` paths included by the
+native minimal runtime policy.
+Launch-time capability canaries use the same permission profile and verify the
+minimum tested CLI version (`0.144.6`), strict/JSONL flags and the deterministic
+JSONL normalizer contract, workspace access, current-run writes, sibling/parent
+denial, proxy and secret-variable scrubbing, and external plus loopback shell-network
+denial. Minor or patch CLI upgrades are accepted only when those canaries pass; a
+major upgrade requires a source-level baseline update and manual recertification.
+Failure is infrastructure failure; there is no one-shot fallback.
 
 Final citations include a bounded verbatim quote. `AnswerGroundingGate` maps each
 citation through `MANIFEST.json`, checks citable scope, source ownership, hash, path,
