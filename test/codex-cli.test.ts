@@ -155,6 +155,9 @@ fs.writeFileSync(output, JSON.stringify({ answer: "grounded", groundingStatus: "
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 const output = args[args.indexOf("--output-last-message") + 1];
+const schema = JSON.parse(fs.readFileSync(args[args.indexOf("--output-schema") + 1], "utf8"));
+const citationBranches = schema.properties.citations.items.anyOf;
+if (!citationBranches.every((branch) => branch.properties.kind.type === "string")) process.exit(58);
 process.stdin.resume();
 process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({
   answer: "the orange bar is tallest", groundingStatus: "answered",
@@ -174,6 +177,35 @@ process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({
       });
       expect(result.citations).toEqual([{ kind: "visual", sourceId: "artifact:pdf:fixture", page: 2,
         imageHash: "a".repeat(64), observation: "The orange bar labelled B is tallest." }]);
+    } finally { process.env.PATH = originalPath; }
+  });
+
+  it("surfaces a sanitized Codex JSONL failure code when stderr is empty", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-jsonl-failure-"));
+    const workspace = join(directory, "workspace");
+    const runtimeRoot = join(directory, "runtime");
+    await mkdir(workspace);
+    await mkdir(runtimeRoot);
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/usr/bin/env node
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({ type: "error", message: JSON.stringify({ error: {
+    code: "invalid_json_schema", message: "sensitive raw provider detail" } }) }) + "\\n");
+  process.exit(1);
+});
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      let failure = "";
+      try {
+        await new CodexCliRunner({ canaries: false, runtimeRoot }).run({ attemptId: "job:jsonl-failure", runEpoch: 1,
+          workspaceRoot: workspace, question: "question", signal: new AbortController().signal, onActivity() {} });
+      } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+      expect(failure).toBe("agentic-codex-failed:1:invalid-json-schema");
+      expect(failure).not.toContain("sensitive raw provider detail");
     } finally { process.env.PATH = originalPath; }
   });
 

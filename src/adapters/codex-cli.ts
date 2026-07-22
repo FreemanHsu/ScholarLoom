@@ -40,11 +40,11 @@ const agenticEvidenceSchema = {
     groundingStatus: { enum: ["answered", "partially_answered", "insufficient_evidence", "conflicting_evidence"] },
     citations: { type: "array", items: { anyOf: [
       { type: "object", additionalProperties: false, required: ["kind", "path", "lineStart", "lineEnd", "quote"], properties: {
-        kind: { const: "text" }, path: { type: "string" }, lineStart: { type: "integer", minimum: 1 },
+        kind: { type: "string", const: "text" }, path: { type: "string" }, lineStart: { type: "integer", minimum: 1 },
         lineEnd: { type: "integer", minimum: 1 }, quote: { type: "string", minLength: 1, maxLength: 500 },
       } },
       { type: "object", additionalProperties: false, required: ["kind", "sourceId", "page", "imageHash", "observation"], properties: {
-        kind: { const: "visual" }, sourceId: { type: "string", minLength: 1 }, page: { type: "integer", minimum: 1 },
+        kind: { type: "string", const: "visual" }, sourceId: { type: "string", minLength: 1 }, page: { type: "integer", minimum: 1 },
         imageHash: { type: "string", pattern: "^[a-f0-9]{64}$" }, observation: { type: "string", minLength: 1, maxLength: 1000 },
       } },
     ] } },
@@ -139,6 +139,7 @@ ${JSON.stringify(context)}`);
           env: processEnvironment });
         let stderr = "";
         let buffer = "";
+        let failureCode: string | null = null;
         const terminate = () => {
           if (!child.pid) return;
           try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
@@ -152,6 +153,7 @@ ${JSON.stringify(context)}`);
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
           for (const line of lines) {
+            failureCode = codexFailureCode(line) ?? failureCode;
             const activity = normalizeCodexEvent(line);
             if (activity) input.onActivity(activity);
           }
@@ -162,7 +164,7 @@ ${JSON.stringify(context)}`);
           input.signal.removeEventListener("abort", abort);
           if (input.signal.aborted) reject(input.signal.reason ?? new Error("agent-aborted"));
           else if (code === 0) resolve();
-          else reject(new Error(`agentic-codex-failed:${code}:${stderr.slice(-1000)}`));
+          else reject(new Error(`agentic-codex-failed:${code}:${failureCode ?? (stderr ? "stderr" : "no-diagnostic")}`));
         });
         child.stdin.end(prompt);
       });
@@ -257,6 +259,21 @@ function normalizeCodexEvent(line: string): AgentActivity | null {
   if (event.item?.type === "command_execution") return { type: "command", text: summarizeCommand(event.item.command ?? "shell") };
   if (event.type === "turn.completed") return { type: "converging", text: "Agent 已完成证据整理" };
   return null;
+}
+
+function codexFailureCode(line: string): string | null {
+  let event: { type?: string; message?: unknown; error?: { message?: unknown } };
+  try { event = JSON.parse(line) as typeof event; } catch { return null; }
+  if (event.type !== "error" && event.type !== "turn.failed") return null;
+  const message = event.type === "error" ? event.message : event.error?.message;
+  if (typeof message !== "string") return "codex-turn-failed";
+  try {
+    const payload = JSON.parse(message) as { error?: { code?: unknown } };
+    if (typeof payload.error?.code === "string" && /^[a-z0-9_-]{1,80}$/i.test(payload.error.code)) {
+      return payload.error.code.toLowerCase().replaceAll("_", "-");
+    }
+  } catch { /* Provider messages are untrusted diagnostics; do not surface them. */ }
+  return "codex-turn-failed";
 }
 
 function summarizeCommand(command: string): string {
