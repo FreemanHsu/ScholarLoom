@@ -10,6 +10,32 @@ import { createApp } from "../src/app.js";
 import { initializeDataRoot } from "../src/storage/layout.js";
 
 describe("agentic evidence schema", () => {
+  it("installs forward-only visual evidence storage without overloading text receipts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-visual-schema-"));
+    const layout = initializeDataRoot(join(root, "data"));
+    const app = await createApp({ storageLayout: layout, paperSource: { async resolve() { throw new Error("unused"); } } });
+    await app.close();
+
+    const database = new Database(layout.databasePath);
+    const tables = database.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").pluck().all() as string[];
+    expect(tables).toEqual(expect.arrayContaining([
+      "visual_render_artifacts",
+      "visual_page_inspections",
+      "visual_evidence_receipts",
+    ]));
+    expect(database.prepare("SELECT name FROM sqlite_master WHERE type='view' AND name='all_evidence_receipts'").get()).toBeTruthy();
+    expect(database.prepare("PRAGMA table_info(visual_render_artifacts)").all())
+      .toEqual(expect.arrayContaining([expect.objectContaining({ name: "page_count", notnull: 1 })]));
+    expect(database.prepare("PRAGMA foreign_key_list(visual_page_inspections)").all())
+      .toEqual(expect.arrayContaining([expect.objectContaining({ from: "render_artifact_id", on_delete: "SET NULL" })]));
+    expect(() => database.prepare(`INSERT INTO evidence_receipts
+      (id,job_run_id,run_epoch,message_id,ordinal,evidence_kind,source_id,workspace_path,locator_json,
+       content_hash,quote_text,verification_status,created_at)
+      VALUES ('receipt:visual-invalid','missing-job',1,NULL,1,'visual','source','visual','{}','hash','fake','verified','now')`).run())
+      .toThrow();
+    database.close();
+  });
+
   it("installs frozen corpus/workspace/run records and immutable Summary source guards", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-agentic-schema-"));
     const layout = initializeDataRoot(join(root, "data"));

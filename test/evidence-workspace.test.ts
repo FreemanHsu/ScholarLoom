@@ -84,24 +84,24 @@ describe("EvidenceWorkspaceBuilder", () => {
     }));
 
     const gate = AnswerGroundingGate.open(workspace);
-    expect(gate.verify([{ path: "paper/pages/page-0001.md", lineStart: 2, lineEnd: 2,
+    expect(gate.verify([{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 2, lineEnd: 2,
       quote: "Bounded verbatim evidence." }])).toEqual([
       expect.objectContaining({ evidenceKind: "pdf", sourceId: "paper-version:1", quote: "Bounded verbatim evidence.",
         locator: expect.objectContaining({ page: 1, elementId: "element:1", lineStart: 2, lineEnd: 2 }) }),
     ]);
-    expect(() => gate.verify([{ path: "conversation/recent-messages.md", lineStart: 1, lineEnd: 1,
+    expect(() => gate.verify([{ kind: "text", path: "conversation/recent-messages.md", lineStart: 1, lineEnd: 1,
       quote: "private conversation context" }])).toThrow(/citation-scope-forbidden/);
-    expect(() => gate.verify([{ path: "paper/pages/page-0001.md", lineStart: 2, lineEnd: 2,
+    expect(() => gate.verify([{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 2, lineEnd: 2,
       quote: "invented quote" }])).toThrow(/citation-quote-mismatch/);
-    expect(gate.repair([{ path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
+    expect(gate.repair([{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
       quote: "Bounded verbatim evidence." }])).toEqual([
       expect.objectContaining({ locator: expect.objectContaining({ lineStart: 2, lineEnd: 2 }) }),
     ]);
-    expect(gate.repair([{ path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
+    expect(gate.repair([{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
       quote: "Evidence can span multiple extracted lines." }])).toEqual([
       expect.objectContaining({ locator: expect.objectContaining({ lineStart: 3, lineEnd: 4 }) }),
     ]);
-    expect(() => gate.repair([{ path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
+    expect(() => gate.repair([{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
       quote: "Repeated evidence." }])).toThrow(/citation-quote-mismatch/);
   });
 });

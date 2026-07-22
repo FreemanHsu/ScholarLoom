@@ -312,3 +312,21 @@ The next accepted slice is **Recoverable Research Navigation**.
 Later slices can add reading-state persistence, notification history, Conversation
 Digest, and richer knowledge-node types without changing this route and recovery
 foundation.
+
+## 13. Visual Evidence Retrieval extension
+
+Visual Evidence is an incremental extension of the existing Discussion receipt flow,
+not a new workspace mode. While an Attempt is running, sanitized Activity may report
+that a PDF page is being inspected; Activity remains progress/audit and never becomes
+evidence by itself.
+
+A grounded visual citation is rendered inline as `Visual · p. N`. Selecting it uses
+the existing `?evidence=:receiptId` URL contract. The Evidence Inspector shows the
+frozen rendered page, bounded visual observation, page number, renderer/settings,
+and image-hash verification state. On narrow screens the same URL opens a full-screen
+Evidence View, and refresh/back/forward restore it like text evidence.
+
+Missing derived images are rebuilt from the frozen PDF. A renderer/settings mismatch
+is shown as `renderer-unavailable`; a rebuilt hash mismatch is shown as `render-drift`.
+Both states fail closed and must not display the image as verified. Visual Activity
+and verified Visual Evidence use distinct labels and styling.

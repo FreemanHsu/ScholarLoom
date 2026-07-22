@@ -822,7 +822,7 @@ export class ImportStore {
         .run(token, proposalId, payload.candidateVersionId, "pdf-page:1", new Date().toISOString());
       return { pdfUrl: `/api/paper-versions/${encodeURIComponent(payload.candidateVersionId)}/pdf?openToken=${token}#page=1`, page: 1 };
     }
-    const pdfReceipt = payload.receiptIds?.map((id) => this.#database.prepare(`SELECT source_id,locator_json FROM evidence_receipts
+    const pdfReceipt = payload.receiptIds?.map((id) => this.#database.prepare(`SELECT source_id,locator_json FROM all_evidence_receipts
       WHERE id=? AND evidence_kind='pdf' AND verification_status='verified'`).get(id) as
       { source_id: string; locator_json: string } | undefined).find(Boolean);
     if (pdfReceipt && row.source_version_id) {

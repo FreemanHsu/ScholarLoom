@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { assertDiscussionCapability, CodexCliRunner } from "../src/adapters/codex-cli.js";
+import { initializeDataRoot } from "../src/storage/layout.js";
 
 describe("CodexCliRunner Paper Summary contract", () => {
   it("constrains every Key Claim to one exact handle from the context manifest", async () => {
@@ -113,9 +114,9 @@ if (!configValues.some((value) => value.includes('shell_environment_policy.exclu
 if (!process.env.TMPDIR?.startsWith(${JSON.stringify(`${runtimeRoot}/`)})) process.exit(56);
 const output = args[args.indexOf("--output-last-message") + 1];
 process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
-process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "rg evidence paper" } }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "rg user-secret-quote paper" } }) + "\\n");
 fs.writeFileSync(output, JSON.stringify({ answer: "grounded", groundingStatus: "answered",
-  citations: [{ path: "paper/pages/page-0001.md", lineStart: 10, lineEnd: 10, quote: "evidence" }],
+  citations: [{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 10, lineEnd: 10, quote: "evidence" }],
   proposedTakeaways: [], usage: { status: "reported", inputTokens: 10, cachedInputTokens: 2, outputTokens: 3, totalTokens: 13 } }));
 `, "utf8");
     await chmod(executable, 0o700);
@@ -134,12 +135,82 @@ fs.writeFileSync(output, JSON.stringify({ answer: "grounded", groundingStatus: "
         onActivity(activity) { activities.push(`${activity.type}:${activity.text}`); } });
       expect(result).toMatchObject({ answer: "grounded", citations: [{ quote: "evidence" }], usage: { totalTokens: 13 } });
       expect(activities).toEqual(expect.arrayContaining([expect.stringMatching(/^started:/), expect.stringMatching(/^command:/)]));
+      expect(activities.join(" ")).not.toContain("user-secret-quote");
     } finally {
       process.env.PATH = originalPath;
       restoreEnvironment("HTTP_PROXY", originalHttpProxy);
       restoreEnvironment("NO_PROXY", originalNoProxy);
       restoreEnvironment("SCHOLARLOOM_FAKE_TOKEN", originalFakeToken);
     }
+  });
+
+  it("accepts a visual citation without requiring a fabricated text quote", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-visual-codex-"));
+    const workspace = join(directory, "workspace");
+    const runtimeRoot = join(directory, "runtime");
+    await mkdir(workspace);
+    await mkdir(runtimeRoot);
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const output = args[args.indexOf("--output-last-message") + 1];
+process.stdin.resume();
+process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({
+  answer: "the orange bar is tallest", groundingStatus: "answered",
+  citations: [{ kind: "visual", sourceId: "artifact:pdf:fixture", page: 2,
+    imageHash: "${"a".repeat(64)}", observation: "The orange bar labelled B is tallest." }],
+  proposedTakeaways: [], usage: { status: "unavailable", inputTokens: null, cachedInputTokens: null,
+    outputTokens: null, totalTokens: null }
+})));
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      const result = await new CodexCliRunner({ canaries: false, runtimeRoot }).run({
+        attemptId: "job:visual", runEpoch: 1, workspaceRoot: workspace, question: "question",
+        signal: new AbortController().signal, onActivity() {},
+      });
+      expect(result.citations).toEqual([{ kind: "visual", sourceId: "artifact:pdf:fixture", page: 2,
+        imageHash: "a".repeat(64), observation: "The orange bar labelled B is tallest." }]);
+    } finally { process.env.PATH = originalPath; }
+  });
+
+  it("registers the two-tool visual shim over stdio in the same strict exec", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-visual-mcp-"));
+    const layout = initializeDataRoot(join(directory, "data"));
+    const workspace = join(directory, "workspace");
+    await mkdir(workspace);
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const configs = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
+if (!configs.includes('approval_policy="never"')) process.exit(61);
+const visual = configs.find((value) => value.startsWith("mcp_servers.visual="));
+if (!visual || !visual.includes("visual-evidence-mcp-server.ts") || !visual.includes("command=")) process.exit(62);
+if (visual.includes("http") || visual.includes("filesystem") || visual.includes("search")) process.exit(63);
+const binding = process.env.SCHOLARLOOM_VISUAL_BINDING_FILE;
+if (!binding || !fs.existsSync(binding)) process.exit(64);
+const parsed = JSON.parse(fs.readFileSync(binding, "utf8"));
+if (parsed.attemptId !== "job:visual-mcp" || parsed.runEpoch !== 7) process.exit(65);
+const output = args[args.indexOf("--output-last-message") + 1];
+process.stdin.resume();
+process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({ answer: "insufficient",
+  groundingStatus: "insufficient_evidence", citations: [], proposedTakeaways: [], usage: { status: "unavailable",
+  inputTokens: null, cachedInputTokens: null, outputTokens: null, totalTokens: null } })));
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      await expect(new CodexCliRunner({ canaries: false, runtimeRoot: layout.tmpRoot, storageLayout: layout }).run({
+        attemptId: "job:visual-mcp", runEpoch: 7, workspaceRoot: workspace, question: "question",
+        signal: new AbortController().signal, onActivity() {},
+      })).resolves.toMatchObject({ groundingStatus: "insufficient_evidence" });
+      await expect(readdir(join(layout.tmpRoot, "visual-bindings"))).resolves.toEqual([]);
+    } finally { process.env.PATH = originalPath; }
   });
 
   it("runs the launch capability canary through the same native permission profile", async () => {
@@ -150,7 +221,7 @@ fs.writeFileSync(output, JSON.stringify({ answer: "grounded", groundingStatus: "
     const codex = join(directory, "codex");
     const canaryLog = join(directory, "canary.log");
     await writeFile(codex, `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "codex-cli 0.145.1"; exit 0; fi
+if [ "$1" = "--version" ]; then echo "codex-cli 0.144.6"; exit 0; fi
 if [ "$1" = "exec" ]; then echo --strict-config --json --output-schema; exit 0; fi
 if [ "$1" = "sandbox" ]; then
   printf '%s\\n' "$@" > ${JSON.stringify(canaryLog)}

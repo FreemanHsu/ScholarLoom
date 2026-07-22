@@ -78,7 +78,8 @@ type ConversationDetail = {
     pageCount: number; repositorySnapshots: Array<{ id: string; commitSha: string }> } | null;
   messages: Array<{ id: string; role: "user" | "assistant"; content: string; inReplyToMessageId: string | null;
     groundingStatus?: string | null;
-    citations: Array<{ id?: string; evidenceKind?: string; quote?: string; kind?: string; sourceHandle?: string;
+    citations: Array<{ id?: string; evidenceKind?: string; quote?: string | null; visualObservation?: string | null;
+      page?: number | null; kind?: string; sourceHandle?: string;
       verificationStatus: string; locator: Record<string, unknown> }>;
     attempts: Array<{ id: string; attemptNo: number; state: string; runnerKind?: string | null; error: { code?: string } | null;
       receiptCounts?: Record<string, number> & { total: number };
@@ -195,6 +196,16 @@ function App() {
     }
   };
 
+  const refreshEvidence = async (receiptId: string) => {
+    try {
+      const response = await fetch(`/api/evidence/${encodeURIComponent(receiptId)}`);
+      if (!response.ok) throw new Error("引用证据不可用");
+      setEvidence(await response.json() as EvidenceInspectorModel);
+    } catch (cause) {
+      setDiscussionError(cause instanceof Error ? cause.message : "引用证据不可用");
+    }
+  };
+
   useEffect(() => {
     const onPopState = () => setRoute(readBrowserRoute(window.location));
     window.addEventListener("popstate", onPopState);
@@ -225,10 +236,7 @@ function App() {
 
   useEffect(() => {
     if (route.name !== "paper" || !route.evidenceReceiptId) { setEvidence(null); return; }
-    void fetch(`/api/evidence/${encodeURIComponent(route.evidenceReceiptId)}`).then(async (response) => {
-      if (!response.ok) throw new Error("引用证据不可用");
-      setEvidence(await response.json() as EvidenceInspectorModel);
-    }).catch((cause: unknown) => setDiscussionError(cause instanceof Error ? cause.message : "引用证据不可用"));
+    void refreshEvidence(route.evidenceReceiptId);
   }, [route.name === "paper" ? route.evidenceReceiptId : null]);
 
   useEffect(() => {
@@ -484,6 +492,7 @@ function App() {
           conversation={conversation} knowledge={knowledge} question={question} onQuestion={updateQuestion}
           onAskPaper={askPaper} onRetryMessage={retryMessage} onAcceptProposal={acceptProposal}
           onCancelAttempt={cancelAttempt} evidence={evidence}
+          onEvidenceIntegrityFailure={() => route.evidenceReceiptId && void refreshEvidence(route.evidenceReceiptId)}
           onReviewProposal={reviewProposal}
           onManageConversation={manageConversation} onContinueConversation={continueConversation}
           onRetry={retryImport} onNavigate={navigate} />)}
@@ -662,6 +671,7 @@ function PaperWorkspace(props: {
   onRetry(): void;
   onNavigate(href: string, replace?: boolean): void;
   evidence: EvidenceInspectorModel | null;
+  onEvidenceIntegrityFailure(): void;
 }) {
   const { workspace, route } = props;
   const codeStatus = workspace.repository?.status === "ready" ? "代码可用于讨论"
@@ -733,7 +743,8 @@ function PaperWorkspace(props: {
                   pdfOpen: false, page: 1, anchor: null, evidenceReceiptId: citation.id });
                 return <a key={citation.id} className={`citation receipt ${citation.evidenceKind}`} href={receiptHref}
                   onClick={(event) => { event.preventDefault(); props.onNavigate(receiptHref); }}>
-                  {citation.evidenceKind.toUpperCase()} · {citation.quote?.slice(0, 48)}</a>;
+                  {citation.evidenceKind === "visual" ? `Visual · p. ${String(citation.page ?? citation.locator.page ?? "?")}`
+                    : `${citation.evidenceKind.toUpperCase()} · ${citation.quote?.slice(0, 48)}`}</a>;
               }
               const label = locator.type === "pdf" ? `PDF · p. ${String(locator.page)}`
                 : locator.type === "code" ? `${String(locator.path)} · ${String(locator.commitSha).slice(0, 8)}`
@@ -782,7 +793,8 @@ function PaperWorkspace(props: {
         <span>Page {route.page} / {pdfPageCount}</span>
         <button aria-label="下一页" disabled={route.page >= pdfPageCount} onClick={() => changePdfPage(1)}>→</button></div>
         <PdfFrame src={`/api/paper-versions/${encodeURIComponent(props.conversation?.contextSnapshot?.paperVersionId ?? workspace.paper.versionId)}/pdf#page=${route.page}`} /></aside>}
-      {route.evidenceReceiptId && props.evidence && <EvidenceInspector evidence={props.evidence} onClose={() => props.onNavigate(
+      {route.evidenceReceiptId && props.evidence && <EvidenceInspector evidence={props.evidence}
+        onIntegrityFailure={props.onEvidenceIntegrityFailure} onClose={() => props.onNavigate(
         paperHref(workspace.paper.id, { mode: "discussion", conversationId: route.conversationId, pdfOpen: false,
           page: 1, anchor: null, evidenceReceiptId: null }))} />}
     </div>}

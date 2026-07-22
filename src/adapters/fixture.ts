@@ -1,4 +1,4 @@
-import { PDFDocument, StandardFonts } from "pdf-lib";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -7,7 +7,12 @@ export async function createFixturePdf(): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   pdf.addPage().drawText("ScholarLoom fixture introduction", { x: 40, y: 700, font });
-  pdf.addPage().drawText("Table 1 reports accuracy 91.2. Code: https://github.com/example/fixture", { x: 40, y: 700, font, size: 10 });
+  const visualPage = pdf.addPage();
+  visualPage.drawText("Table 1 reports accuracy 91.2. Code: https://github.com/example/fixture", { x: 40, y: 700, font, size: 10 });
+  visualPage.drawRectangle({ x: 80, y: 160, width: 70, height: 180, color: rgb(.35, .5, .7) });
+  visualPage.drawRectangle({ x: 190, y: 160, width: 70, height: 300, color: rgb(1, .5, 0) });
+  visualPage.drawText("A", { x: 110, y: 140, font });
+  visualPage.drawText("B", { x: 220, y: 140, font });
   return pdf.save();
 }
 

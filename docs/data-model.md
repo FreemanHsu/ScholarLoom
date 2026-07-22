@@ -553,11 +553,19 @@ KnowledgeNode
 Cross-cutting
 ├── Artifact lineage
 ├── EvidenceAnchor
+├── VisualRenderArtifact / VisualPageInspection / VisualEvidenceReceipt
 ├── ProvenanceLink
 ├── SemanticRelation
 ├── Proposal / ReviewDecision
 └── ImportRequest / JobRun / AgentRun
 ```
+
+Visual Evidence Receipts are authoritative historical records attached to committed
+Messages. They freeze the source PDF hash, page, renderer fingerprint/settings, image
+hash, and bounded observation. Rendered PNGs remain rebuildable derived data. A render
+artifact is GC-pinned exactly while reachable from a Visual Receipt; cache loss does
+not delete or mutate the Receipt. Rebuild mismatch creates render-drift presentation
+state while preserving the Message and immutable receipt metadata.
 
 ## 15. Explicitly deferred
 

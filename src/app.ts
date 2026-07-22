@@ -321,6 +321,12 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     const evidence = agentCoordinator?.readReceipt(request.params.id);
     return evidence ?? reply.code(404).send({ code: "evidence-receipt-not-found" });
   });
+  app.get<{ Params: { id: string } }>("/api/evidence/:id/image", async (request, reply) => {
+    const result = await agentCoordinator?.readReceiptImage(request.params.id);
+    if (!result) return reply.code(404).send({ code: "visual-evidence-not-found" });
+    if (result.status !== "verified") return reply.code(409).send({ code: result.status });
+    return reply.type("image/png").header("Cache-Control", "private, no-store").send(result.imageBytes);
+  });
 
   app.post<{ Params: { id: string } }>("/api/messages/:id/retry", async (request, reply) => {
     const key = request.headers["idempotency-key"];

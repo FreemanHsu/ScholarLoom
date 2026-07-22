@@ -1,12 +1,29 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, join, normalize, relative } from "node:path";
 import type Database from "better-sqlite3";
+import type { StorageLayout } from "./layout.js";
 
-export type ProposedCitation = { path: string; lineStart: number; lineEnd: number; quote: string };
+export type TextProposedCitation = {
+  kind: "text";
+  path: string;
+  lineStart: number;
+  lineEnd: number;
+  quote: string;
+};
 
-export type GroundedReceipt = {
-  evidenceKind: "pdf" | "summary" | "code" | "library" | "visual";
+export type VisualProposedCitation = {
+  kind: "visual";
+  sourceId: string;
+  page: number;
+  imageHash: string;
+  observation: string;
+};
+
+export type ProposedCitation = TextProposedCitation | VisualProposedCitation;
+
+export type GroundedTextReceipt = {
+  evidenceKind: "pdf" | "summary" | "code" | "library";
   sourceId: string;
   sourceRevision: string | null;
   workspacePath: string;
@@ -14,6 +31,24 @@ export type GroundedReceipt = {
   quote: string;
   locator: Record<string, unknown> & { lineStart: number; lineEnd: number };
 };
+
+export type GroundedVisualReceipt = {
+  evidenceKind: "visual";
+  sourceId: string;
+  sourceRevision: string | null;
+  sourceArtifactId: string;
+  sourceContentHash: string;
+  page: number;
+  rendererName: string;
+  rendererVersion: string;
+  rendererFingerprint: string;
+  renderSettings: Record<string, unknown>;
+  renderArtifactId: string;
+  imageHash: string;
+  observation: string;
+};
+
+export type GroundedReceipt = GroundedTextReceipt | GroundedVisualReceipt;
 
 type ManifestSource = {
   kind: "pdf" | "summary" | "code" | "library" | "conversation" | "visual";
@@ -26,13 +61,16 @@ type ManifestSource = {
 };
 
 export class AnswerGroundingGate {
-  static open(workspaceRoot: string, database?: Database.Database, contextSnapshotId?: string): AnswerGroundingGate {
-    return new AnswerGroundingGate(workspaceRoot, database, contextSnapshotId);
+  static open(workspaceRoot: string, database?: Database.Database, contextSnapshotId?: string,
+    visualAttempt?: { attemptId: string; runEpoch: number; layout: StorageLayout }): AnswerGroundingGate {
+    return new AnswerGroundingGate(workspaceRoot, database, contextSnapshotId, visualAttempt);
   }
 
   readonly #sources: Map<string, ManifestSource>;
 
-  private constructor(private readonly workspaceRoot: string, database?: Database.Database, contextSnapshotId?: string) {
+  private constructor(private readonly workspaceRoot: string, private readonly database?: Database.Database,
+    private readonly contextSnapshotId?: string,
+    private readonly visualAttempt?: { attemptId: string; runEpoch: number; layout: StorageLayout }) {
     const manifest = JSON.parse(readFileSync(join(workspaceRoot, "MANIFEST.json"), "utf8")) as { sources?: ManifestSource[] };
     if (!Array.isArray(manifest.sources)) throw new Error("grounding-manifest-invalid");
     this.#sources = new Map(manifest.sources.map((source) => [source.path, source]));
@@ -41,6 +79,7 @@ export class AnswerGroundingGate {
 
   verify(citations: ProposedCitation[]): GroundedReceipt[] {
     return citations.map((citation) => {
+      if (citation.kind === "visual") return this.#verifyVisual(citation);
       const source = this.#sources.get(citation.path);
       if (!source) throw new Error(`citation-source-unknown:${citation.path}`);
       if (!source.citable || source.kind === "conversation") throw new Error(`citation-scope-forbidden:${citation.path}`);
@@ -70,12 +109,13 @@ export class AnswerGroundingGate {
         contentHash: source.contentHash,
         quote: citation.quote,
         locator: { ...(source.locator ?? {}), lineStart: citation.lineStart, lineEnd: citation.lineEnd },
-      } as GroundedReceipt;
+      } as GroundedTextReceipt;
     });
   }
 
   repair(citations: ProposedCitation[]): GroundedReceipt[] {
     const repaired = citations.map((citation) => {
+      if (citation.kind === "visual") return citation;
       const source = this.#sources.get(citation.path);
       if (!source?.citable || source.kind === "conversation" || !citation.quote || citation.quote.length > 500) return citation;
       const lines = readFileSync(this.#resolve(citation.path), "utf8").split(/\r?\n/);
@@ -91,6 +131,50 @@ export class AnswerGroundingGate {
     const absolute = join(this.workspaceRoot, path);
     if (relative(this.workspaceRoot, absolute).startsWith("..")) throw new Error("citation-path-unsafe");
     return absolute;
+  }
+
+  #verifyVisual(citation: VisualProposedCitation): GroundedVisualReceipt {
+    if (!this.database || !this.contextSnapshotId || !this.visualAttempt) throw new Error("visual-citation-verifier-unavailable");
+    if (!Number.isInteger(citation.page) || citation.page < 1 || !/^[a-f0-9]{64}$/.test(citation.imageHash) ||
+        !citation.observation || [...citation.observation].length > 1000) throw new Error("visual-citation-invalid");
+    const row = this.database.prepare(`SELECT cs.paper_version_id,cs.extraction_run_id,source.id source_artifact_id,
+      source.content_hash source_content_hash,extraction.page_count,inspection.render_artifact_id,
+      render.renderer_name,render.renderer_version,render.renderer_fingerprint,render.render_settings_json,
+      render.image_content_hash,render.storage_ref,render.byte_size,render.cache_state
+      FROM job_runs job JOIN conversation_turn_attempts attempt ON attempt.job_run_id=job.id
+      JOIN messages user_message ON user_message.id=attempt.user_message_id
+      JOIN context_snapshots cs ON cs.id=user_message.context_snapshot_id
+      JOIN paper_versions version ON version.id=cs.paper_version_id
+      JOIN artifacts source ON source.id=version.pdf_artifact_id
+      JOIN extraction_runs extraction ON extraction.id=cs.extraction_run_id
+      JOIN visual_page_inspections inspection ON inspection.job_run_id=job.id AND inspection.run_epoch=job.run_epoch
+        AND inspection.source_artifact_id=source.id AND inspection.page_number=? AND inspection.inspection_status='ready'
+      JOIN visual_render_artifacts render ON render.id=inspection.render_artifact_id
+      WHERE job.id=? AND job.run_epoch=? AND job.state='running' AND cs.id=? AND cs.paper_version_id=?`)
+      .get(citation.page, this.visualAttempt.attemptId, this.visualAttempt.runEpoch, this.contextSnapshotId, citation.sourceId) as {
+        paper_version_id: string; extraction_run_id: string; source_artifact_id: string; source_content_hash: string;
+        page_count: number; render_artifact_id: string; renderer_name: string; renderer_version: string;
+        renderer_fingerprint: string; render_settings_json: string; image_content_hash: string; storage_ref: string;
+        byte_size: number; cache_state: string;
+      } | undefined;
+    if (!row || citation.page > row.page_count) throw new Error("visual-citation-source-unknown");
+    if (row.cache_state !== "complete" || row.image_content_hash !== citation.imageHash) throw new Error("visual-citation-hash-mismatch");
+    const imagePath = join(this.visualAttempt.layout.root, row.storage_ref);
+    const fromDerived = relative(this.visualAttempt.layout.derivedRoot, imagePath);
+    if (!fromDerived || fromDerived.startsWith("..") || isAbsolute(fromDerived)) throw new Error("visual-citation-path-unsafe");
+    const stat = lstatSync(imagePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size !== row.byte_size) {
+      throw new Error("visual-citation-artifact-invalid");
+    }
+    if (createHash("sha256").update(readFileSync(imagePath)).digest("hex") !== citation.imageHash) {
+      throw new Error("visual-citation-hash-mismatch");
+    }
+    return { evidenceKind: "visual", sourceId: row.paper_version_id, sourceRevision: row.extraction_run_id,
+      sourceArtifactId: row.source_artifact_id, sourceContentHash: row.source_content_hash, page: citation.page,
+      rendererName: row.renderer_name, rendererVersion: row.renderer_version,
+      rendererFingerprint: row.renderer_fingerprint,
+      renderSettings: JSON.parse(row.render_settings_json) as Record<string, unknown>,
+      renderArtifactId: row.render_artifact_id, imageHash: row.image_content_hash, observation: citation.observation };
   }
 
   #verifyAuthority(database: Database.Database, snapshotId: string, source: ManifestSource): void {

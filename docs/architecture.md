@@ -489,3 +489,16 @@ knowledge policy.
 - sandboxed execution of paper code;
 - cloud sync and multi-user authorization;
 - automatic cross-Paper conflict synthesis.
+
+## 12. Visual Evidence Retrieval
+
+Visual Evidence extends ADR 0009 without changing its lifecycle owner. The same
+long-lived `codex exec` calls a two-tool stdio shim. The shim resolves only frozen
+Context Snapshot source identities, enforces Attempt epoch and four-page budget, and
+delegates verified PDF bytes to an isolated deterministic renderer child. Web handlers
+only read Receipt-shaped results; they do not coordinate rendering or grounding.
+
+`VisualEvidenceStore` owns content addressing, atomic publication, rebuild, Receipt-
+derived pinning, LRU, and render-drift. `AnswerGroundingGate` owns both branches of the
+text/visual citation union. `AgentRunCoordinator` remains the only module allowed to
+atomically commit Message, Proposals, Receipts, usage, and Attempt success.

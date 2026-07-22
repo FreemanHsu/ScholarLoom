@@ -5,7 +5,10 @@ import Database from "better-sqlite3";
 import type { AgentActivity, AgenticEvidenceRunner, AgentUsage } from "../agent/agentic-evidence-runner.js";
 import { AnswerGroundingGate } from "./answer-grounding-gate.js";
 import { EvidenceWorkspaceBuilder } from "./evidence-workspace-builder.js";
+import { FrozenPdfSourceResolver } from "./frozen-pdf-source-resolver.js";
 import type { StorageLayout } from "./layout.js";
+import { PDF_RENDERER_FINGERPRINT, PdfPageRenderer } from "./pdf-page-renderer.js";
+import { VisualEvidenceStore } from "./visual-evidence-store.js";
 
 type CoordinatorOptions = { concurrency?: number; hardTimeoutMs?: number; now?: () => Date };
 
@@ -71,14 +74,47 @@ export class AgentRunCoordinator {
 
   readReceipt(id: string): unknown | null {
     const row = this.#database.prepare(`SELECT id,evidence_kind,source_id,source_revision,workspace_path,locator_json,
-      content_hash,quote_text,verification_status,visual_observation,created_at FROM evidence_receipts WHERE id=?`).get(id) as
+      content_hash,quote_text,verification_status,visual_observation,page_number,renderer_name,renderer_version,
+      renderer_fingerprint,render_settings_json,render_artifact_id,image_content_hash,created_at FROM all_evidence_receipts WHERE id=?`).get(id) as
       { id: string; evidence_kind: string; source_id: string; source_revision: string | null; workspace_path: string;
-        locator_json: string; content_hash: string; quote_text: string; verification_status: string;
-        visual_observation: string | null; created_at: string } | undefined;
-    return row ? { id: row.id, evidenceKind: row.evidence_kind, sourceId: row.source_id, sourceRevision: row.source_revision,
+        locator_json: string; content_hash: string; quote_text: string | null; verification_status: string;
+        visual_observation: string | null; page_number: number | null; renderer_name: string | null;
+        renderer_version: string | null; renderer_fingerprint: string | null; render_settings_json: string | null;
+        render_artifact_id: string | null; image_content_hash: string | null; created_at: string } | undefined;
+    if (!row) return null;
+    let runtimeStatus = row.verification_status;
+    if (row.evidence_kind === "visual") {
+      const artifactState = this.#database.prepare("SELECT cache_state FROM visual_render_artifacts WHERE id=?")
+        .pluck().get(row.render_artifact_id) as string | undefined;
+      if (row.renderer_fingerprint !== PDF_RENDERER_FINGERPRINT) runtimeStatus = "renderer-unavailable";
+      else if (artifactState === "render-drift") runtimeStatus = "render-drift";
+    }
+    return { id: row.id, evidenceKind: row.evidence_kind, sourceId: row.source_id, sourceRevision: row.source_revision,
       workspacePath: row.workspace_path, locator: JSON.parse(row.locator_json) as unknown, contentHash: row.content_hash,
-      quote: row.quote_text, verificationStatus: row.verification_status, visualObservation: row.visual_observation,
-      createdAt: row.created_at } : null;
+      quote: row.quote_text, verificationStatus: runtimeStatus, visualObservation: row.visual_observation,
+      page: row.page_number, rendererName: row.renderer_name, rendererVersion: row.renderer_version,
+      rendererFingerprint: row.renderer_fingerprint,
+      renderSettings: row.render_settings_json ? JSON.parse(row.render_settings_json) as unknown : null,
+      imageHash: row.image_content_hash,
+      imageUrl: row.evidence_kind === "visual" ? `/api/evidence/${encodeURIComponent(row.id)}/image` : null,
+      createdAt: row.created_at };
+  }
+
+  async readReceiptImage(id: string): Promise<{ status: "verified"; imageBytes: Buffer } |
+    { status: "renderer-unavailable" | "render-drift" } | null> {
+    const row = this.#database.prepare(`SELECT receipt.source_artifact_id,receipt.source_content_hash,receipt.page_number,
+      receipt.render_artifact_id,receipt.renderer_fingerprint,receipt.render_settings_json,receipt.image_content_hash,
+      source.storage_ref,source.byte_size
+      FROM visual_evidence_receipts receipt JOIN artifacts source ON source.id=receipt.source_artifact_id
+      WHERE receipt.id=?`).get(id) as { source_artifact_id: string; source_content_hash: string; page_number: number;
+        render_artifact_id: string; renderer_fingerprint: string; render_settings_json: string; image_content_hash: string;
+        storage_ref: string; byte_size: number } | undefined;
+    if (!row) return null;
+    const source = new FrozenPdfSourceResolver(this.layout).open({ artifactId: row.source_artifact_id,
+      contentHash: row.source_content_hash, storageRef: row.storage_ref, byteSize: row.byte_size });
+    return new VisualEvidenceStore(this.layout, this.#database, new PdfPageRenderer()).recoverReceiptImage({ source,
+      page: row.page_number, renderArtifactId: row.render_artifact_id, rendererFingerprint: row.renderer_fingerprint,
+      renderSettings: JSON.parse(row.render_settings_json) as Record<string, unknown>, imageHash: row.image_content_hash });
   }
 
   cancel(jobRunId: string): boolean {
@@ -201,8 +237,10 @@ export class AgentRunCoordinator {
       const result = await this.runner.run({ attemptId: attempt.id, runEpoch: attempt.run_epoch,
         workspaceRoot: workspace.root, question: input.content, signal: controller.signal,
         onActivity: (activity) => this.#activity(attempt.id, attempt.run_epoch, activity) });
+      this.#assertVisualInfraHealthy(attempt.id, attempt.run_epoch);
       if (!result.answer || result.proposedTakeaways.length > 3) throw new Error("codex-output-invalid");
-      const gate = AnswerGroundingGate.open(workspace.root, this.#database, input.contextSnapshotId);
+      const gate = AnswerGroundingGate.open(workspace.root, this.#database, input.contextSnapshotId,
+        { attemptId: attempt.id, runEpoch: attempt.run_epoch, layout: this.layout });
       let receipts: ReturnType<AnswerGroundingGate["verify"]>;
       try { receipts = gate.verify(result.citations); }
       catch { receipts = gate.repair(result.citations); }
@@ -214,6 +252,15 @@ export class AgentRunCoordinator {
         controller.signal.reason.message === "agent-hard-timeout";
       this.#commitFailure(attempt, timedOut ? "timed_out" : "failed", error);
     } finally { clearTimeout(timer); clearTimeout(convergence); clearInterval(heartbeat); }
+  }
+
+  #assertVisualInfraHealthy(jobRunId: string, epoch: number): void {
+    const unhealthy = this.#database.prepare(`SELECT 1 FROM visual_page_inspections inspection
+      LEFT JOIN visual_render_artifacts artifact ON artifact.id=inspection.render_artifact_id
+      WHERE inspection.job_run_id=? AND inspection.run_epoch=?
+        AND (inspection.inspection_status='failed_infra' OR artifact.cache_state='render-drift') LIMIT 1`)
+      .get(jobRunId, epoch);
+    if (unhealthy) throw new Error("visual-render-inspection-failed");
   }
 
   #heartbeat(jobRunId: string, epoch: number): void {
@@ -249,12 +296,26 @@ export class AgentRunCoordinator {
         (id,conversation_id,context_snapshot_id,role,content,citations_json,created_at,ordinal,in_reply_to_message_id,grounding_status)
         VALUES (?,?,?,'assistant',?,'[]',?,?,?,?)`).run(assistantId, attempt.conversation_id, snapshotId, answer, now, ordinal,
           attempt.user_message_id, groundingStatus);
-      receipts.forEach((receipt, index) => this.#database.prepare(`INSERT INTO evidence_receipts
-        (id,job_run_id,run_epoch,message_id,ordinal,evidence_kind,source_id,source_revision,workspace_path,locator_json,
-          content_hash,quote_text,verification_status,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'verified',?)`).run(receiptIds[index], attempt.id, attempt.run_epoch,
-          assistantId, index + 1, receipt.evidenceKind, receipt.sourceId, receipt.sourceRevision, receipt.workspacePath,
-          JSON.stringify(receipt.locator), receipt.contentHash, receipt.quote, now));
+      receipts.forEach((receipt, index) => {
+        if (receipt.evidenceKind === "visual") {
+          this.#database.prepare(`INSERT INTO visual_evidence_receipts
+            (id,job_run_id,run_epoch,message_id,ordinal,source_id,source_revision,source_artifact_id,source_content_hash,
+             page_number,renderer_name,renderer_version,renderer_fingerprint,render_settings_json,render_artifact_id,
+             image_content_hash,visual_observation,verification_status,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'verified',?)`).run(receiptIds[index], attempt.id, attempt.run_epoch,
+              assistantId, index + 1, receipt.sourceId, receipt.sourceRevision, receipt.sourceArtifactId,
+              receipt.sourceContentHash, receipt.page, receipt.rendererName, receipt.rendererVersion,
+              receipt.rendererFingerprint, JSON.stringify(receipt.renderSettings), receipt.renderArtifactId,
+              receipt.imageHash, receipt.observation, now);
+        } else {
+          this.#database.prepare(`INSERT INTO evidence_receipts
+            (id,job_run_id,run_epoch,message_id,ordinal,evidence_kind,source_id,source_revision,workspace_path,locator_json,
+              content_hash,quote_text,verification_status,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'verified',?)`).run(receiptIds[index], attempt.id, attempt.run_epoch,
+              assistantId, index + 1, receipt.evidenceKind, receipt.sourceId, receipt.sourceRevision, receipt.workspacePath,
+              JSON.stringify(receipt.locator), receipt.contentHash, receipt.quote, now);
+        }
+      });
       proposals.forEach((proposal) => {
         if (!proposal.claim.trim() || proposal.receiptOrdinals.some((ordinal) => ordinal < 1 || ordinal > receipts.length)) {
           throw new Error("proposal-receipt-invalid");
@@ -291,7 +352,9 @@ export class AgentRunCoordinator {
     const now = this.#now().toISOString();
     this.#database.transaction(() => {
       const detail = error instanceof Error ? error.message : String(error);
-      const failureKind = detail.startsWith("evidence-workspace-") ? "failed_infra" : state === "timed_out" ? "timed_out" : "runner_failed";
+      const infraFailure = ["evidence-workspace-", "visual-render-", "renderer-", "visual-source-drift",
+        "agentic-codex-failed", "discussion-capability-"].some((prefix) => detail.startsWith(prefix));
+      const failureKind = infraFailure ? "failed_infra" : state === "timed_out" ? "timed_out" : "runner_failed";
       const changed = this.#database.prepare(`UPDATE job_runs SET state=?,progress=1,error_json=?,failure_kind=?,completed_at=?,heartbeat_at=?,
         lease_owner=NULL,lease_expires_at=NULL WHERE id=? AND state='running' AND run_epoch=?`)
         .run(state, JSON.stringify({ code: detail }), failureKind, now, now, attempt.id, attempt.run_epoch).changes;

@@ -610,6 +610,16 @@ Phase 1 的范围已经确认以单篇论文深读闭环为中心；Phase 2 和 
 - 维护人工标注的问题、答案、证据区域和已知冲突，用于回归评估检索和引用质量。
 - 模型输出不做脆弱的逐字匹配；评估结构完整性、证据支持和关键事实是否正确。
 
+### 15.4 Visual Evidence 验收
+
+- 同一个 Message Attempt 中按需检查冻结 PDF 页面，不启动 host-side model loop。
+- 每个 Attempt 最多请求四个 unique pages（失败请求也占其 unique page slot）；重复页复用且仍记录 Activity。
+- visual citation 冻结 PDF/image hash、page、renderer/settings 与 bounded observation，
+  且不能填写文本 quote。
+- cache 丢失可确定性重建；hash 不一致以 render-drift fail closed。
+- verified visual citation 与 Activity 分离，Receipt inspector 支持 URL、刷新、前进/后退和
+  narrow-screen full-screen Evidence View。
+
 ## 16. Out of Scope（首期）
 
 - 多用户协作、权限系统、公开知识库和社交功能。

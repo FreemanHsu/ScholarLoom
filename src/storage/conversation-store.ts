@@ -67,7 +67,7 @@ export class ConversationStore {
               FROM agent_run_usage WHERE job_run_id=? ORDER BY run_epoch DESC LIMIT 1`).get(attempt.job_run_id) as
               { status: string; input_tokens: number | null; cached_input_tokens: number | null; output_tokens: number | null;
                 total_tokens: number | null; elapsed_ms: number | null } | undefined;
-            const receiptRows = this.database.prepare(`SELECT evidence_kind,count(*) count FROM evidence_receipts
+            const receiptRows = this.database.prepare(`SELECT evidence_kind,count(*) count FROM all_evidence_receipts
               WHERE job_run_id=? GROUP BY evidence_kind`).all(attempt.job_run_id) as Array<{ evidence_kind: string; count: number }>;
             const receiptCounts = Object.fromEntries(receiptRows.map((item) => [item.evidence_kind, item.count]));
             return { id: attempt.job_run_id, attemptNo: attempt.attempt_no, state: attempt.state,
@@ -85,14 +85,23 @@ export class ConversationStore {
             kind: string; source_handle: string; locator_json: string; verification_status: string;
           }>;
         const receipts = this.database.prepare(`SELECT id,evidence_kind,source_id,source_revision,workspace_path,locator_json,
-          content_hash,quote_text,verification_status FROM evidence_receipts WHERE message_id=? ORDER BY ordinal`).all(message.id) as Array<{
+          content_hash,quote_text,verification_status,visual_observation,page_number,renderer_name,renderer_version,
+          renderer_fingerprint,render_settings_json,image_content_hash FROM all_evidence_receipts
+          WHERE message_id=? ORDER BY ordinal`).all(message.id) as Array<{
             id: string; evidence_kind: string; source_id: string; source_revision: string | null; workspace_path: string;
-            locator_json: string; content_hash: string; quote_text: string; verification_status: string;
+            locator_json: string; content_hash: string; quote_text: string | null; verification_status: string;
+            visual_observation: string | null; page_number: number | null; renderer_name: string | null;
+            renderer_version: string | null; renderer_fingerprint: string | null; render_settings_json: string | null;
+            image_content_hash: string | null;
           }>;
         const citations = receipts.length > 0 ? receipts.map((receipt) => ({ id: receipt.id, evidenceKind: receipt.evidence_kind,
           sourceId: receipt.source_id, sourceRevision: receipt.source_revision, workspacePath: receipt.workspace_path,
           locator: JSON.parse(receipt.locator_json) as unknown, contentHash: receipt.content_hash, quote: receipt.quote_text,
-          verificationStatus: receipt.verification_status })) : normalized.length > 0
+          verificationStatus: receipt.verification_status, visualObservation: receipt.visual_observation,
+          page: receipt.page_number, rendererName: receipt.renderer_name, rendererVersion: receipt.renderer_version,
+          rendererFingerprint: receipt.renderer_fingerprint,
+          renderSettings: receipt.render_settings_json ? JSON.parse(receipt.render_settings_json) as unknown : null,
+          imageHash: receipt.image_content_hash })) : normalized.length > 0
           ? normalized.map((citation) => ({ kind: citation.kind, sourceHandle: citation.source_handle,
             locator: JSON.parse(citation.locator_json) as unknown, verificationStatus: citation.verification_status }))
           : JSON.parse(message.citations_json) as unknown[];

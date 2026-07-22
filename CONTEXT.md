@@ -142,3 +142,18 @@ _Avoid_: Conversation, Message
 **Agent Activity**:
 A sanitized append-only progress/audit event emitted by a running Agent. It is never verified evidence.
 _Avoid_: chain of thought, Evidence Receipt
+
+**Visual Evidence Receipt**:
+A verified, recoverable citation to one page of a frozen PDF, binding the PDF hash, page, deterministic
+renderer identity/settings, rendered image hash, and a bounded visual observation.
+_Avoid_: PDF text quote, Evidence Anchor, Agent Activity
+
+**Visual Page Inspection**:
+An Attempt-scoped audit record that a frozen PDF page was requested through the epoch-validated visual shim.
+It consumes the Attempt's unique-page budget but is not evidence until grounding commits a Visual Evidence Receipt.
+_Avoid_: Visual Evidence Receipt, arbitrary image read
+
+**Render Drift**:
+A fail-closed recovery state where re-rendering the same frozen PDF page with the frozen renderer/settings produces
+an image hash different from the verified Visual Evidence Receipt.
+_Avoid_: cache miss, renderer unavailable
