@@ -1,10 +1,17 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { conversationListStatus, ConversationHeaderActions, NewConversationButton }
+import { conversationActionRequest, conversationListStatus, ConversationHeaderActions, NewConversationButton }
   from "../src/web/conversation-controls.js";
 
 describe("Conversation controls", () => {
+  it("only declares a JSON body for rename commands", () => {
+    expect(conversationActionRequest("archive")).toEqual({ method: "POST" });
+    expect(conversationActionRequest("restore")).toEqual({ method: "POST" });
+    expect(conversationActionRequest("rename", "新标题")).toEqual({ method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "新标题" }) });
+  });
+
   it("distinguishes an independent draft from a linked successor", () => {
     const independent = renderToStaticMarkup(<NewConversationButton onCreate={() => undefined} />);
     const successor = renderToStaticMarkup(<ConversationHeaderActions repositorySnapshotCount={1} isSuccessor={false}

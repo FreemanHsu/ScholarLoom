@@ -10,7 +10,7 @@ import { paperHref, readBrowserRoute, type BrowserRoute } from "./browser-naviga
 import { importMonitor } from "./import-monitor.js";
 import { SummaryMarkdown } from "./summary-markdown.js";
 import { ConversationMessageBody, ConversationProposalGroup } from "./conversation-message.js";
-import { conversationListStatus, ConversationHeaderActions, NewConversationButton }
+import { conversationActionRequest, conversationListStatus, ConversationHeaderActions, NewConversationButton }
   from "./conversation-controls.js";
 import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspector.js";
 import "./styles.css";
@@ -307,9 +307,8 @@ function App() {
 
   async function manageConversation(action: "rename" | "archive" | "restore", title?: string) {
     if (route.name !== "paper" || !route.conversationId) return;
-    const response = await fetch(`/api/conversations/${encodeURIComponent(route.conversationId)}/${action}`, {
-      method: "POST", headers: { "content-type": "application/json" }, ...(title ? { body: JSON.stringify({ title }) } : {}),
-    });
+    const response = await fetch(`/api/conversations/${encodeURIComponent(route.conversationId)}/${action}`,
+      conversationActionRequest(action, title));
     if (!response.ok) { setDiscussionError("Conversation 状态更新失败。"); return; }
     await refreshConversationWorkspace(route.paperId, route.conversationId);
   }
