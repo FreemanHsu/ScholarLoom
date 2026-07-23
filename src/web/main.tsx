@@ -10,7 +10,8 @@ import { paperHref, readBrowserRoute, type BrowserRoute } from "./browser-naviga
 import { importMonitor } from "./import-monitor.js";
 import { SummaryMarkdown } from "./summary-markdown.js";
 import { ConversationMessageBody, ConversationProposalGroup } from "./conversation-message.js";
-import { conversationActionRequest, conversationListStatus, ConversationHeaderActions, NewConversationButton }
+import { conversationActionRequest, filterConversationsByArchive, conversationListStatus, ConversationHeaderActions,
+  NewConversationButton }
   from "./conversation-controls.js";
 import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspector.js";
 import "./styles.css";
@@ -488,7 +489,7 @@ function App() {
       ? <main className="page-state loading-state"><span className="eyebrow">PAPER WORKSPACE</span><h1>正在载入 Paper…</h1></main>
       : workspaceError && !workspace
         ? <main className="page-state"><span className="eyebrow">PAPER UNAVAILABLE</span><h1>{workspaceError}</h1><button onClick={() => navigate("/papers")}>返回论文库</button></main>
-        : workspace && workspace.paper.id === route.paperId && <PaperWorkspace workspace={workspace} route={route} busy={busy} progress={progress}
+        : workspace && workspace.paper.id === route.paperId && <PaperWorkspace key={workspace.paper.id} workspace={workspace} route={route} busy={busy} progress={progress}
           error={workspaceError ?? discussionError} openedPdfSource={openedPdfSource} conversations={conversations}
           conversation={conversation} knowledge={knowledge} question={question} onQuestion={updateQuestion}
           onAskPaper={askPaper} onRetryMessage={retryMessage} onAcceptProposal={acceptProposal}
@@ -675,6 +676,7 @@ function PaperWorkspace(props: {
   onEvidenceIntegrityFailure(): void;
 }) {
   const { workspace, route } = props;
+  const [showArchivedConversations, setShowArchivedConversations] = useState(false);
   const codeStatus = workspace.repository?.status === "ready" ? "代码可用于讨论"
     : workspace.repository?.status === "failed" ? "代码关联失败"
       : workspace.processing && !isTerminalImportJobState(workspace.processing.state) ? "正在检查代码关联" : "未发现明确代码链接";
@@ -694,6 +696,12 @@ function PaperWorkspace(props: {
   const running = props.conversation?.messages.some((message) => message.attempts.some((attempt) => attempt.state === "running")) ?? false;
   const discussionProposals = props.knowledge.pendingProposals.filter((proposal) =>
     proposal.source.conversationId === props.conversation?.conversation.id);
+  const visibleConversations = filterConversationsByArchive(props.conversations, showArchivedConversations);
+  const archivedConversationCount = props.conversations.filter((item) => item.status === "archived").length;
+  const activeConversationCount = props.conversations.length - archivedConversationCount;
+  const currentConversationHidden = props.conversation
+    ? (props.conversation.conversation.status === "archived") !== showArchivedConversations
+    : false;
   return <main className="app workspace">
     <header className="topbar"><a className="ghost" href="/papers" onClick={(event) => { event.preventDefault(); props.onNavigate("/papers"); }}>← 论文库</a>
       <div><span className="eyebrow">PAPER WORKSPACE</span><h1>{workspace.paper.title}</h1>
@@ -710,9 +718,17 @@ function PaperWorkspace(props: {
     </nav>
     {route.mode === "discussion" && <div className="discussion-layout">
       <aside className="conversation-list"><div className="conversation-list-heading"><div><span className="eyebrow">CONVERSATIONS</span><h2>论文讨论</h2></div>
-        <NewConversationButton onCreate={() => props.onNavigate(modeHref("discussion"))} /></div>
-        {props.conversations.length === 0 && <p className="empty">还没有 Conversation。</p>}
-        {props.conversations.map((item) => <a key={item.id}
+        <NewConversationButton onCreate={() => { setShowArchivedConversations(false); props.onNavigate(modeHref("discussion")); }} /></div>
+        <button className="conversation-archive-filter" type="button" aria-label="显示已归档 Conversation"
+          aria-pressed={showArchivedConversations}
+          onClick={() => setShowArchivedConversations((current) => !current)}>
+          {showArchivedConversations ? `查看进行中 · ${activeConversationCount}` : `查看已归档 · ${archivedConversationCount}`}
+        </button>
+        {currentConversationHidden && <p className="conversation-filter-note">
+          当前 Conversation {props.conversation!.conversation.status === "archived" ? "已归档" : "正在进行中"}，已从此列表隐藏。</p>}
+        {visibleConversations.length === 0 && <p className="empty">
+          {showArchivedConversations ? "还没有已归档 Conversation。" : "还没有进行中的 Conversation。"}</p>}
+        {visibleConversations.map((item) => <a key={item.id}
           className={route.conversationId === item.id ? "selected" : ""}
           href={paperHref(workspace.paper.id, { mode: "discussion", conversationId: item.id, pdfOpen: false, page: 1, anchor: null })}
           onClick={(event) => { event.preventDefault(); props.onNavigate(paperHref(workspace.paper.id,

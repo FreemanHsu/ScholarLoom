@@ -1,10 +1,17 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { conversationActionRequest, conversationListStatus, ConversationHeaderActions, NewConversationButton }
+import { conversationActionRequest, filterConversationsByArchive, conversationListStatus, ConversationHeaderActions, NewConversationButton }
   from "../src/web/conversation-controls.js";
 
 describe("Conversation controls", () => {
+  it("selects active or archived Conversations for the list filter", () => {
+    const conversations = [{ id: "active", status: "active" as const }, { id: "archived", status: "archived" as const }];
+
+    expect(filterConversationsByArchive(conversations, false).map((item) => item.id)).toEqual(["active"]);
+    expect(filterConversationsByArchive(conversations, true).map((item) => item.id)).toEqual(["archived"]);
+  });
+
   it("only declares a JSON body for rename commands", () => {
     expect(conversationActionRequest("archive")).toEqual({ method: "POST" });
     expect(conversationActionRequest("restore")).toEqual({ method: "POST" });

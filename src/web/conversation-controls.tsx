@@ -7,6 +7,12 @@ export function conversationActionRequest(action: ConversationAction, title?: st
   return { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) };
 }
 
+export function filterConversationsByArchive<T extends { status: "active" | "archived" }>(
+  conversations: T[], showArchived: boolean,
+): T[] {
+  return conversations.filter((conversation) => (conversation.status === "archived") === showArchived);
+}
+
 export function NewConversationButton({ onCreate }: { onCreate(): void }) {
   return <button className="new-conversation-button" type="button" onClick={onCreate}>独立新对话</button>;
 }
