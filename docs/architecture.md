@@ -183,6 +183,8 @@ start(input: { paperId: string; continuedFromConversationId?: string }): Convers
 send(input: { conversationId: string; text: string; idempotencyKey: string }): AttemptHandle
 retry(input: { userMessageId: string; idempotencyKey: string }): AttemptHandle
 read(conversationId: string): ConversationReadModel
+readLineage(conversationId: string): ConversationLineageReadModel
+previewContinuation(conversationId: string): ContinuationPreview
 ```
 
 It freezes a Context Snapshot, persists the user Message and attempt before invoking
@@ -197,6 +199,13 @@ read, rename/archive, and retry eligibility; `ContextSnapshotBuilder` owns creat
 and freeze validation; startup recovery owns running-to-interrupted reconciliation.
 Agent invocation and its two transaction protocol remain orchestrated behind the
 facade so this slice does not force an unrelated repository-wide storage rewrite.
+
+`ContextSnapshotDiffReader` is the shared deterministic comparator for saved
+lineage, read-only continuation preview, and authoritative creation checks.
+`KnowledgeCorpusManifestBuilder.build()` is side-effect free; `persist()` is called
+only inside the successful Conversation creation transaction. The lineage reader
+walks parent links defensively, preserves stable root-to-parent ordering, and
+localizes malformed repository data to that comparison section.
 
 ### 4.4 KnowledgeReview
 

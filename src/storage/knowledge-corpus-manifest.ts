@@ -14,7 +14,7 @@ export type FrozenKnowledgeCorpus = {
 export class KnowledgeCorpusManifestBuilder {
   constructor(private readonly database: Database.Database, private readonly now: () => Date) {}
 
-  freeze(currentPaperId: string): FrozenKnowledgeCorpus {
+  build(currentPaperId: string): FrozenKnowledgeCorpus {
     const summaries = (this.database.prepare(`SELECT paper_id,id,markdown_path,markdown_hash
       FROM summary_revisions WHERE status='active' AND paper_id<>? ORDER BY paper_id,id`).all(currentPaperId) as Array<{
         paper_id: string; id: string; markdown_path: string; markdown_hash: string;
@@ -28,8 +28,11 @@ export class KnowledgeCorpusManifestBuilder {
     const canonical = JSON.stringify(manifest);
     const hash = createHash("sha256").update(canonical).digest("hex");
     const id = `knowledge-corpus:${hash}`;
-    this.database.prepare(`INSERT OR IGNORE INTO knowledge_corpus_manifests(id,manifest_hash,manifest_json,created_at)
-      VALUES (?,?,?,?)`).run(id, hash, canonical, this.now().toISOString());
     return { id, hash, manifest };
+  }
+
+  persist(corpus: FrozenKnowledgeCorpus): void {
+    this.database.prepare(`INSERT OR IGNORE INTO knowledge_corpus_manifests(id,manifest_hash,manifest_json,created_at)
+      VALUES (?,?,?,?)`).run(corpus.id, corpus.hash, JSON.stringify(corpus.manifest), this.now().toISOString());
   }
 }

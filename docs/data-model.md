@@ -279,6 +279,20 @@ with newer material creates a new Conversation linked by `continuedFromConversat
 Migration diagnostics classify pre-slice rows as `frozen` or `legacy`. A legacy row
 is readable but cannot create new Agent Runs or confirmed knowledge.
 
+Conversation lineage is Paper-scoped and independent of archive lifecycle. Its read
+model exposes the direct parent, direct successors, and a root-to-parent ancestor
+breadcrumb. A deterministic Context Snapshot comparison classifies Paper Version,
+Summary Revision, Extraction Run, Repository commit, and Knowledge Corpus Manifest
+changes without mutating either snapshot. Repository comparison keys by
+`code_repository_id`; Knowledge entries use the full
+`(paperId, revisionId, contentHash)` identity.
+
+A linked successor is rejected when the latest freeze candidate is semantically
+identical to its parent. If the same parent already has a child with that candidate,
+creation returns that child's identity as a conflict rather than silently reusing or
+duplicating it. Legacy Conversations may still create a new frozen successor, but
+their historical Context Diff is explicitly unavailable.
+
 ### 8.2 Message
 
 Messages form immutable process history. They may be archived and are available to

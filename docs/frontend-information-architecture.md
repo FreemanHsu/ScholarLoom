@@ -150,6 +150,19 @@ expanded Paper-level and global review views.
 Opening a saved Conversation uses its stable Conversation URL and preserves the
 Context Snapshot boundary defined by the data model.
 
+The Conversation header includes a lightweight “关系与上下文” panel. It shows the
+parent, direct successors, root-to-parent breadcrumb, and readable Paper/Summary/
+Code/Knowledge changes; Extraction IDs, hashes, and other provenance remain in
+expandable technical details. On narrow screens the same panel becomes a full-width
+overlay rather than introducing a tree sidebar.
+
+Before linked-successor creation the client requests a read-only continuation
+preview. No Context change blocks creation with an explanation and keeps independent
+new Conversation available. A changed preview is confirmed with a readable list of
+materials; the POST repeats the authoritative comparison. Archive status never hides
+lineage and an active child remains in the active list even when its parent is
+archived.
+
 ### 6.3 Knowledge
 
 Knowledge shows confirmed Paper-scoped Takeaways and related pending Proposals. It is

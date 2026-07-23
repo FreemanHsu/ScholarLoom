@@ -1,7 +1,12 @@
 import type Database from "better-sqlite3";
+import { ConversationLineageReader } from "./conversation-lineage-reader.js";
 
 export class ConversationStore {
-  constructor(private readonly database: Database.Database, private readonly now: () => Date) {}
+  readonly #lineage: ConversationLineageReader;
+
+  constructor(private readonly database: Database.Database, private readonly now: () => Date) {
+    this.#lineage = new ConversationLineageReader(database);
+  }
 
   listForPaper(paperId: string): unknown[] {
     return (this.database.prepare(`SELECT id,paper_id,title,status,snapshot_integrity,active_context_snapshot_id,
@@ -121,6 +126,10 @@ export class ConversationStore {
         repositorySnapshots: JSON.parse(row.repositories_json ?? "[]") as unknown[] } : null,
       messages,
     };
+  }
+
+  readLineage(conversationId: string): unknown | null {
+    return this.#lineage.read(conversationId);
   }
 
   turnBlock(conversationId: string, idempotencyKey: string): string | null {

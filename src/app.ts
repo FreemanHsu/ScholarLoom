@@ -8,6 +8,7 @@ import { DirectPdfPreparationError, type DirectPdfSource, type PreparedDirectPdf
 import { PaperSourceError } from "./adapters/safe-pdf-downloader.js";
 import type { ImportStage } from "./domain/import-job.js";
 import { ImportStore } from "./storage/import-store.js";
+import { ConversationCreationConflict } from "./storage/context-snapshot-builder.js";
 import type { RepositoryAdapter } from "./adapters/git-repository.js";
 import type { StorageLayout } from "./storage/layout.js";
 import { assertDataRootWritable } from "./storage/layout.js";
@@ -260,7 +261,15 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   app.post<{ Params: { id: string }; Body: { continuedFromConversationId?: unknown } }>("/api/papers/:id/conversations", async (request, reply) => {
     const continuedFrom = typeof request.body?.continuedFromConversationId === "string" ? request.body.continuedFromConversationId : null;
-    const conversation = store.startConversation(request.params.id, continuedFrom);
+    let conversation: unknown | null;
+    try {
+      conversation = store.startConversation(request.params.id, continuedFrom);
+    } catch (error) {
+      if (error instanceof ConversationCreationConflict) {
+        return reply.code(409).send({ code: error.code, ...error.details });
+      }
+      throw error;
+    }
     if (conversation) return reply.code(201).send(conversation);
     return store.paperExists(request.params.id)
       ? reply.code(409).send({ code: continuedFrom ? "continued-conversation-invalid" : "conversation-context-unavailable" })
@@ -284,6 +293,16 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   app.get<{ Params: { id: string } }>("/api/conversations/:id", async (request, reply) => {
     const conversation = store.getConversation(request.params.id);
     return conversation ?? reply.code(404).send({ code: "conversation-not-found" });
+  });
+
+  app.get<{ Params: { id: string } }>("/api/conversations/:id/lineage", async (request, reply) => {
+    const lineage = store.getConversationLineage(request.params.id);
+    return lineage ?? reply.code(404).send({ code: "conversation-not-found" });
+  });
+
+  app.get<{ Params: { id: string } }>("/api/conversations/:id/continuation-preview", async (request, reply) => {
+    const preview = store.previewConversationContinuation(request.params.id);
+    return preview ?? reply.code(404).send({ code: "conversation-not-found" });
   });
 
   app.get<{ Params: { id: string } }>("/api/papers/:id/knowledge", async (request, reply) => {

@@ -52,8 +52,8 @@ function options(storageLayout: ReturnType<typeof initializeDataRoot>): CreateAp
   return {
     storageLayout,
     paperSource: {
-      async resolve() {
-        return { arxivId: "2401.54321", latestVersion: 1, title: "Discussion Fixture", authors: ["Ada Fixture"], year: 2024 };
+      async resolve(arxivId) {
+        return { arxivId, latestVersion: 1, title: `Discussion Fixture ${arxivId}`, authors: ["Ada Fixture"], year: 2024 };
       },
       async fetchPdf() { return fixturePdf(); },
     },
@@ -70,6 +70,375 @@ function options(storageLayout: ReturnType<typeof initializeDataRoot>): CreateAp
 }
 
 describe("recoverable paper conversation workspace", () => {
+  it("rejects a linked successor when the frozen material has not changed without writing rows", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-successor-unchanged-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const paperId = imported.json().paper.id as string;
+    const parent = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
+    const database = new Database(storageLayout.databasePath, { readonly: true });
+    const before = {
+      conversations: (database.prepare("SELECT count(*) count FROM conversations").get() as { count: number }).count,
+      snapshots: (database.prepare("SELECT count(*) count FROM context_snapshots").get() as { count: number }).count,
+      manifests: (database.prepare("SELECT count(*) count FROM knowledge_corpus_manifests").get() as { count: number }).count,
+    };
+
+    const successor = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: parent.json().conversation.id } });
+
+    expect(successor.statusCode).toBe(409);
+    expect(successor.json()).toEqual({ code: "conversation-context-unchanged", parentStatus: "active" });
+    expect({
+      conversations: (database.prepare("SELECT count(*) count FROM conversations").get() as { count: number }).count,
+      snapshots: (database.prepare("SELECT count(*) count FROM context_snapshots").get() as { count: number }).count,
+      manifests: (database.prepare("SELECT count(*) count FROM knowledge_corpus_manifests").get() as { count: number }).count,
+    }).toEqual(before);
+    database.close();
+    await app.close();
+  });
+
+  it("previews an unchanged continuation without persisting a Knowledge Corpus Manifest", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-continuation-preview-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const parent = await app.inject({ method: "POST",
+      url: `/api/papers/${imported.json().paper.id}/conversations` });
+    const database = new Database(storageLayout.databasePath, { readonly: true });
+    const manifestsBefore = (database.prepare("SELECT count(*) count FROM knowledge_corpus_manifests").get() as { count: number }).count;
+
+    const preview = await app.inject({ method: "GET",
+      url: `/api/conversations/${parent.json().conversation.id}/continuation-preview` });
+
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({
+      status: "no-change",
+      parentStatus: "active",
+      comparison: {
+        status: "available",
+        identical: true,
+        diff: {
+          paperVersion: { status: "unchanged" },
+          summaryRevision: { status: "unchanged" },
+          extractionRun: { status: "unchanged" },
+          repositories: { status: "available", added: [], removed: [], changed: [] },
+          knowledgeCorpus: { status: "unchanged" },
+        },
+      },
+    });
+    expect((database.prepare("SELECT count(*) count FROM knowledge_corpus_manifests").get() as { count: number }).count)
+      .toBe(manifestsBefore);
+    database.close();
+    await app.close();
+  });
+
+  it("rejects an equivalent second successor and identifies the existing child", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-successor-duplicate-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const paperId = imported.json().paper.id as string;
+    const parent = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
+    const corpusChange = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54322v1" } });
+    await waitForImport(app, corpusChange.json().importRequest.id);
+    const firstChild = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: parent.json().conversation.id } });
+
+    const duplicate = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: parent.json().conversation.id } });
+
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json()).toEqual({
+      code: "conversation-successor-already-exists",
+      existingConversationId: firstChild.json().conversation.id,
+      existingConversationStatus: "active",
+    });
+    const conversations = await app.inject({ method: "GET", url: `/api/papers/${paperId}/conversations` });
+    expect(conversations.json().conversations).toHaveLength(2);
+    await app.close();
+  });
+
+  it("reads an independent Conversation as lineage without a parent or successors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-independent-lineage-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const created = await app.inject({ method: "POST",
+      url: `/api/papers/${imported.json().paper.id}/conversations` });
+
+    const lineage = await app.inject({ method: "GET",
+      url: `/api/conversations/${created.json().conversation.id}/lineage` });
+
+    expect(lineage.statusCode).toBe(200);
+    expect(lineage.json()).toEqual({
+      conversation: expect.objectContaining({ id: created.json().conversation.id, status: "active" }),
+      parent: null,
+      ancestors: [],
+      successors: [],
+      contextComparison: { status: "independent" },
+    });
+    await app.close();
+  });
+
+  it("reads a linked successor from both its parent and child", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-parent-child-lineage-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const paperId = imported.json().paper.id as string;
+    const parent = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
+    const corpusChange = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54322v1" } });
+    await waitForImport(app, corpusChange.json().importRequest.id);
+    const successor = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: parent.json().conversation.id } });
+
+    const parentLineage = await app.inject({ method: "GET",
+      url: `/api/conversations/${parent.json().conversation.id}/lineage` });
+    const childLineage = await app.inject({ method: "GET",
+      url: `/api/conversations/${successor.json().conversation.id}/lineage` });
+
+    expect(parentLineage.json().successors).toEqual([
+      expect.objectContaining({ id: successor.json().conversation.id, status: "active" }),
+    ]);
+    expect(childLineage.json()).toMatchObject({
+      parent: { id: parent.json().conversation.id, status: "active" },
+      ancestors: [{ id: parent.json().conversation.id }],
+      successors: [],
+      contextComparison: {
+        status: "available",
+        identical: false,
+        diff: {
+          paperVersion: { status: "unchanged" },
+          summaryRevision: { status: "unchanged" },
+          extractionRun: { status: "unchanged" },
+          repositories: { status: "available", added: [], removed: [], changed: [] },
+          knowledgeCorpus: {
+            status: "changed",
+            summaries: { added: [expect.objectContaining({ paperId: corpusChange.json().paper.id })], removed: [], changed: [] },
+            knowledge: { added: [], removed: [] },
+          },
+        },
+      },
+    });
+    await app.close();
+  });
+
+  it("keeps a multi-generation ancestor breadcrumb ordered from root to parent after restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-ancestor-order-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    let app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const paperId = imported.json().paper.id as string;
+    const first = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
+    const corpusChangeOne = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54322v1" } });
+    await waitForImport(app, corpusChangeOne.json().importRequest.id);
+    const second = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: first.json().conversation.id } });
+    const corpusChangeTwo = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54323v1" } });
+    await waitForImport(app, corpusChangeTwo.json().importRequest.id);
+    const third = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: second.json().conversation.id } });
+    await app.close();
+
+    app = await createApp(options(storageLayout));
+    const lineage = await app.inject({ method: "GET",
+      url: `/api/conversations/${third.json().conversation.id}/lineage` });
+
+    expect(lineage.json().ancestors.map((ancestor: { id: string }) => ancestor.id)).toEqual([
+      first.json().conversation.id,
+      second.json().conversation.id,
+    ]);
+    await app.close();
+  });
+
+  it("keeps archived lineage readable while the active child remains in the default lifecycle list", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-archived-lineage-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const paperId = imported.json().paper.id as string;
+    const parent = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
+    const corpusChange = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54322v1" } });
+    await waitForImport(app, corpusChange.json().importRequest.id);
+    const child = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: parent.json().conversation.id } });
+    await app.inject({ method: "POST", url: `/api/conversations/${parent.json().conversation.id}/archive` });
+
+    const parentLineage = await app.inject({ method: "GET",
+      url: `/api/conversations/${parent.json().conversation.id}/lineage` });
+    const childLineage = await app.inject({ method: "GET",
+      url: `/api/conversations/${child.json().conversation.id}/lineage` });
+    const list = await app.inject({ method: "GET", url: `/api/papers/${paperId}/conversations` });
+
+    expect(parentLineage.json()).toMatchObject({
+      conversation: { status: "archived" },
+      successors: [{ id: child.json().conversation.id, status: "active" }],
+    });
+    expect(childLineage.json().parent).toMatchObject({ id: parent.json().conversation.id, status: "archived" });
+    expect(list.json().conversations.find((item: { id: string }) => item.id === child.json().conversation.id))
+      .toMatchObject({ status: "active", continuedFromConversationId: parent.json().conversation.id });
+    await app.inject({ method: "POST", url: `/api/conversations/${child.json().conversation.id}/archive` });
+    const unchangedFromArchived = await app.inject({ method: "POST",
+      url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: child.json().conversation.id } });
+    expect(unchangedFromArchived.statusCode).toBe(409);
+    expect(unchangedFromArchived.json()).toEqual({
+      code: "conversation-context-unchanged",
+      parentStatus: "archived",
+    });
+    await app.close();
+  });
+
+  it("allows a legacy Conversation to continue while failing its Context Diff safely", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-legacy-lineage-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const paperId = imported.json().paper.id as string;
+    const parent = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
+    const database = new Database(storageLayout.databasePath);
+    database.prepare("UPDATE conversations SET snapshot_integrity='legacy' WHERE id=?")
+      .run(parent.json().conversation.id);
+    database.close();
+    const corpusChange = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54322v1" } });
+    await waitForImport(app, corpusChange.json().importRequest.id);
+
+    const child = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: parent.json().conversation.id } });
+    const lineage = await app.inject({ method: "GET",
+      url: `/api/conversations/${child.json().conversation.id}/lineage` });
+    const duplicate = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: parent.json().conversation.id } });
+
+    expect(child.statusCode).toBe(201);
+    expect(lineage.json().contextComparison).toEqual({
+      status: "unavailable",
+      reason: "conversation-context-legacy",
+    });
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json()).toMatchObject({
+      code: "conversation-successor-already-exists",
+      existingConversationId: child.json().conversation.id,
+    });
+    await app.close();
+  });
+
+  it("classifies multiple repositories by repository identity and commit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-repository-diff-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const paperId = imported.json().paper.id as string;
+    const database = new Database(storageLayout.databasePath);
+    const timestamp = "2026-07-23T00:00:00.000Z";
+    const insertRepository = database.prepare(`INSERT INTO code_repositories
+      (id,canonical_url,host,owner_name,repository_name,availability_status,created_at,updated_at)
+      VALUES (?,?, 'fixture.local','fixture',?,'available',?,?)`);
+    const insertSnapshot = database.prepare(`INSERT INTO repository_snapshots
+      (id,code_repository_id,commit_sha,local_path,created_at) VALUES (?,?,?,?,?)`);
+    const insertLink = database.prepare(`INSERT INTO paper_code_links
+      (id,paper_id,code_repository_id,link_type,origin,status,repository_snapshot_id,created_at)
+      VALUES (?,?,?,'official','fixture','confirmed',?,?)`);
+    for (const repository of ["a", "b", "c", "d"]) {
+      insertRepository.run(`repo:${repository}`, `https://fixture.local/${repository}`, repository, timestamp, timestamp);
+    }
+    insertSnapshot.run("snapshot:a-old", "repo:a", "a-old", "synthetic/a-old", timestamp);
+    insertSnapshot.run("snapshot:a-new", "repo:a", "a-new", "synthetic/a-new", timestamp);
+    insertSnapshot.run("snapshot:b", "repo:b", "b-same", "synthetic/b", timestamp);
+    insertSnapshot.run("snapshot:c", "repo:c", "c-new", "synthetic/c", timestamp);
+    insertSnapshot.run("snapshot:d", "repo:d", "d-same", "synthetic/d", timestamp);
+    insertLink.run("link:a", paperId, "repo:a", "snapshot:a-old", timestamp);
+    insertLink.run("link:b", paperId, "repo:b", "snapshot:b", timestamp);
+    insertLink.run("link:d", paperId, "repo:d", "snapshot:d", timestamp);
+    database.close();
+    const parent = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
+    const changedDatabase = new Database(storageLayout.databasePath);
+    changedDatabase.prepare("UPDATE paper_code_links SET repository_snapshot_id='snapshot:a-new' WHERE id='link:a'").run();
+    changedDatabase.prepare("UPDATE paper_code_links SET status='rejected' WHERE id='link:b'").run();
+    changedDatabase.prepare(`INSERT INTO paper_code_links
+      (id,paper_id,code_repository_id,link_type,origin,status,repository_snapshot_id,created_at)
+      VALUES ('link:c',?, 'repo:c','official','fixture','confirmed','snapshot:c',?)`).run(paperId, timestamp);
+    changedDatabase.close();
+
+    const child = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: parent.json().conversation.id } });
+    const lineage = await app.inject({ method: "GET",
+      url: `/api/conversations/${child.json().conversation.id}/lineage` });
+    const repositories = lineage.json().contextComparison.diff.repositories;
+
+    expect(repositories.added.map((item: { repositoryId: string }) => item.repositoryId)).toEqual(["repo:c"]);
+    expect(repositories.removed.map((item: { repositoryId: string }) => item.repositoryId)).toEqual(["repo:b"]);
+    expect(repositories.changed).toEqual([
+      expect.objectContaining({ repositoryId: "repo:a",
+        before: expect.objectContaining({ commitSha: "a-old" }),
+        after: expect.objectContaining({ commitSha: "a-new" }) }),
+    ]);
+    expect(repositories.unchanged.map((item: { repositoryId: string }) => item.repositoryId)).toEqual(["repo:d"]);
+    await app.close();
+  });
+
+  it("localizes a malformed Knowledge Corpus Manifest to an unavailable diff section", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-malformed-manifest-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const app = await createApp(options(storageLayout));
+    const imported = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
+    await waitForImport(app, imported.json().importRequest.id);
+    const paperId = imported.json().paper.id as string;
+    const parent = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
+    const corpusChange = await app.inject({ method: "POST", url: "/api/imports",
+      payload: { arxivUrl: "https://arxiv.org/abs/2401.54322v1" } });
+    await waitForImport(app, corpusChange.json().importRequest.id);
+    const child = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: parent.json().conversation.id } });
+    const database = new Database(storageLayout.databasePath);
+    database.prepare("DROP TRIGGER knowledge_corpus_manifests_no_update").run();
+    database.prepare(`UPDATE knowledge_corpus_manifests SET manifest_json='{"summaries":[null],"knowledge":[]}'
+      WHERE id=?`).run(child.json().contextSnapshot.knowledgeCorpusManifestId);
+    database.close();
+
+    const lineage = await app.inject({ method: "GET",
+      url: `/api/conversations/${child.json().conversation.id}/lineage` });
+
+    expect(lineage.statusCode).toBe(200);
+    expect(lineage.json().contextComparison).toMatchObject({
+      status: "available",
+      identical: false,
+      diff: {
+        paperVersion: { status: "unchanged" },
+        summaryRevision: { status: "unchanged" },
+        repositories: { status: "available" },
+        knowledgeCorpus: { status: "unavailable", reason: "conversation-knowledge-manifest-invalid" },
+      },
+    });
+    await app.close();
+  });
+
   it("lists multiple paper-scoped conversations in stable order after restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-conversations-"));
     const storageLayout = initializeDataRoot(join(root, "data"));

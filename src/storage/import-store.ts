@@ -506,6 +506,14 @@ export class ImportStore {
     return this.#conversations.read(conversationId);
   }
 
+  getConversationLineage(conversationId: string): unknown | null {
+    return this.#conversations.readLineage(conversationId);
+  }
+
+  previewConversationContinuation(conversationId: string): unknown | null {
+    return this.#contextSnapshots.preview(conversationId);
+  }
+
   conversationTurnBlock(conversationId: string, idempotencyKey: string): string | null {
     return this.#conversations.turnBlock(conversationId, idempotencyKey);
   }

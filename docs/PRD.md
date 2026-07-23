@@ -368,6 +368,13 @@ Discussion 使用 Codex-native Agentic Evidence Retrieval：每次 Message Attem
 校验；Activity 不等于证据。跨论文 curated corpus 在 Conversation 创建时冻结，刷新
 知识只能创建 linked successor Conversation。
 
+linked successor 的父子关系必须可见、可跳转，并在 header 中解释新 Context
+Snapshot 相对父 Conversation 的 Paper、Summary、Code 与 Knowledge 变化。系统以
+确定性 storage read model 比较冻结材料，不调用模型。若最新材料与父 Conversation
+完全相同则阻止创建；若同一父节点已存在相同材料的后继则返回该后继供用户打开。
+archive 生命周期与 lineage 独立，legacy Conversation 保留 lineage 与“基于最新材料
+继续”入口，但不伪造无法可靠计算的历史 diff。
+
 ## 9. 关键交互
 
 ### 9.1 导入

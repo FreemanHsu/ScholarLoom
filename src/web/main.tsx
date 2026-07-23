@@ -10,8 +10,8 @@ import { paperHref, readBrowserRoute, type BrowserRoute } from "./browser-naviga
 import { importMonitor } from "./import-monitor.js";
 import { SummaryMarkdown } from "./summary-markdown.js";
 import { ConversationMessageBody, ConversationProposalGroup } from "./conversation-message.js";
-import { conversationActionRequest, filterConversationsByArchive, conversationListStatus, ConversationHeaderActions,
-  NewConversationButton }
+import { canContinueConversation, conversationActionRequest, filterConversationsByArchive, conversationListStatus, ConversationHeaderActions,
+  NewConversationButton, type ConversationLineage }
   from "./conversation-controls.js";
 import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspector.js";
 import "./styles.css";
@@ -117,6 +117,7 @@ function App() {
   const [entryAnswer, setEntryAnswer] = useState<EntryAnswer | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
+  const [conversationLineage, setConversationLineage] = useState<ConversationLineage | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgeModel>({ pendingProposals: [], confirmedTakeaways: [] });
   const [discussionError, setDiscussionError] = useState<string | null>(null);
   const [evidence, setEvidence] = useState<EvidenceInspectorModel | null>(null);
@@ -185,16 +186,31 @@ function App() {
       if (!listResponse.ok || !knowledgeResponse.ok) throw new Error("Discussion / Knowledge 暂时不可用");
       setConversations((await listResponse.json() as { conversations: ConversationSummary[] }).conversations);
       setKnowledge(await knowledgeResponse.json() as KnowledgeModel);
+      let lineageWarning: string | null = null;
       if (selectedId) {
         const detailResponse = await fetch(`/api/conversations/${encodeURIComponent(selectedId)}`);
-        if (!detailResponse.ok) throw new Error(detailResponse.status === 404 ? "找不到这个 Conversation" : "Conversation 暂时不可用");
+        if (!detailResponse.ok) {
+          throw new Error(detailResponse.status === 404 ? "找不到这个 Conversation" : "Conversation 暂时不可用");
+        }
         const detail = await detailResponse.json() as ConversationDetail;
         if (detail.conversation.paperId !== paperId) throw new Error("Conversation 不属于 URL 中的 Paper");
         setConversation(detail);
-      } else setConversation(null);
-      setDiscussionError(null);
+        try {
+          const lineageResponse = await fetch(`/api/conversations/${encodeURIComponent(selectedId)}/lineage`);
+          if (!lineageResponse.ok) throw new Error("lineage-unavailable");
+          setConversationLineage(await lineageResponse.json() as ConversationLineage);
+        } catch {
+          setConversationLineage(null);
+          lineageWarning = "Conversation 消息仍可阅读，但关系与 Context Diff 暂时不可用。";
+        }
+      } else {
+        setConversation(null);
+        setConversationLineage(null);
+      }
+      setDiscussionError(lineageWarning);
     } catch (cause) {
       setConversation(null);
+      setConversationLineage(null);
       setDiscussionError(cause instanceof Error ? cause.message : "Discussion / Knowledge 暂时不可用");
     }
   };
@@ -316,9 +332,51 @@ function App() {
 
   async function continueConversation() {
     if (route.name !== "paper" || !route.conversationId) return;
+    const previewResponse = await fetch(`/api/conversations/${encodeURIComponent(route.conversationId)}/continuation-preview`);
+    if (!previewResponse.ok) { setDiscussionError("无法检查最新材料，请稍后重试。"); return; }
+    const preview = await previewResponse.json() as {
+      status: string;
+      parentStatus: string;
+      comparison?: { status: string; diff?: {
+        paperVersion?: { status: string }; summaryRevision?: { status: string };
+        extractionRun?: { status: string };
+        repositories?: { added?: unknown[]; removed?: unknown[]; changed?: unknown[] };
+        knowledgeCorpus?: { status: string };
+      } };
+    };
+    if (preview.status === "no-change") {
+      setDiscussionError(preview.parentStatus === "archived"
+        ? "当前冻结材料没有变化。可先恢复此 Conversation 继续，或开启独立新对话。"
+        : "当前冻结材料没有变化，请直接在此 Conversation 继续，或开启独立新对话。");
+      return;
+    }
+    if (preview.status === "unavailable") {
+      setDiscussionError("当前材料不足，无法创建新的冻结 Conversation。");
+      return;
+    }
+    const diff = preview.comparison?.diff;
+    const changes = [
+      diff?.paperVersion?.status === "changed" ? "Paper" : null,
+      diff?.summaryRevision?.status === "changed" ? "Summary" : null,
+      ((diff?.repositories?.added?.length ?? 0) + (diff?.repositories?.removed?.length ?? 0) +
+        (diff?.repositories?.changed?.length ?? 0)) > 0 ? "Code" : null,
+      diff?.knowledgeCorpus?.status === "changed" ? "Knowledge" : null,
+      diff?.extractionRun?.status === "changed" ? "Extraction（技术上下文）" : null,
+    ].filter((item): item is string => item !== null);
+    if (!window.confirm(`将基于最新材料创建关联后继。\n变化：${changes.join("、") || "Legacy Context Diff 不可用"}\n旧 Conversation 与旧 Context Snapshot 不会改变。`)) return;
     const response = await fetch(`/api/papers/${encodeURIComponent(route.paperId)}/conversations`, { method: "POST",
       headers: { "content-type": "application/json" }, body: JSON.stringify({ continuedFromConversationId: route.conversationId }) });
-    if (!response.ok) { setDiscussionError("当前材料不足，无法创建新的冻结 Conversation。"); return; }
+    if (!response.ok) {
+      const failure = await response.json() as { code?: string; existingConversationId?: string };
+      if (failure.code === "conversation-context-unchanged") {
+        setDiscussionError("确认期间材料状态发生变化，目前已没有 Context 差异。");
+      } else if (failure.code === "conversation-successor-already-exists" && failure.existingConversationId) {
+        setDiscussionError("相同材料的关联后继已经存在，正在打开它。");
+        navigate(paperHref(route.paperId, { mode: "discussion", conversationId: failure.existingConversationId,
+          pdfOpen: false, page: 1, anchor: null }));
+      } else setDiscussionError("当前材料不足，无法创建新的冻结 Conversation。");
+      return;
+    }
     const created = await response.json();
     navigate(paperHref(route.paperId, { mode: "discussion", conversationId: created.conversation.id,
       pdfOpen: false, page: 1, anchor: null }));
@@ -491,7 +549,7 @@ function App() {
         ? <main className="page-state"><span className="eyebrow">PAPER UNAVAILABLE</span><h1>{workspaceError}</h1><button onClick={() => navigate("/papers")}>返回论文库</button></main>
         : workspace && workspace.paper.id === route.paperId && <PaperWorkspace key={workspace.paper.id} workspace={workspace} route={route} busy={busy} progress={progress}
           error={workspaceError ?? discussionError} openedPdfSource={openedPdfSource} conversations={conversations}
-          conversation={conversation} knowledge={knowledge} question={question} onQuestion={updateQuestion}
+          conversation={conversation} lineage={conversationLineage} knowledge={knowledge} question={question} onQuestion={updateQuestion}
           onAskPaper={askPaper} onRetryMessage={retryMessage} onAcceptProposal={acceptProposal}
           onCancelAttempt={cancelAttempt} evidence={evidence}
           onEvidenceIntegrityFailure={() => route.evidenceReceiptId && void refreshEvidence(route.evidenceReceiptId)}
@@ -660,6 +718,7 @@ function PaperWorkspace(props: {
   openedPdfSource: OpenedPdfSource | null;
   conversations: ConversationSummary[];
   conversation: ConversationDetail | null;
+  lineage: ConversationLineage | null;
   knowledge: KnowledgeModel;
   question: string;
   onQuestion(value: string): void;
@@ -746,8 +805,16 @@ function PaperWorkspace(props: {
             repositorySnapshotCount={props.conversation.contextSnapshot?.repositorySnapshots.length ?? 0}
             isSuccessor={props.conversation.conversation.continuedFromConversationId !== null}
             archived={props.conversation.conversation.status === "archived"}
-            canContinue={props.conversation.messages.length > 0}
+            canContinue={canContinueConversation({
+              archived: props.conversation.conversation.status === "archived",
+              legacy: props.conversation.conversation.snapshotIntegrity === "legacy",
+              messageCount: props.conversation.messages.length,
+            })}
             legacy={props.conversation.conversation.snapshotIntegrity === "legacy"}
+            lineage={props.lineage}
+            conversationHref={(conversationId) => paperHref(workspace.paper.id,
+              { mode: "discussion", conversationId, pdfOpen: false, page: 1, anchor: null })}
+            onNavigate={props.onNavigate}
             onContinue={() => void props.onContinueConversation()}
             onRename={() => { const title = window.prompt("Conversation 标题", props.conversation!.conversation.title);
               if (title) void props.onManageConversation("rename", title); }}
