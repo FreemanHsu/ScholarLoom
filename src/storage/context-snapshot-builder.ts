@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { KnowledgeCorpusManifestBuilder, type FrozenKnowledgeCorpus } from "./knowledge-corpus-manifest.js";
 import { ContextSnapshotDiffReader, type ContextSnapshotMaterial } from "./context-snapshot-diff.js";
+import { isRepositoryMaterialized } from "./repository-materialization.js";
 
 export class ConversationCreationConflict extends Error {
   constructor(
@@ -18,7 +19,11 @@ export class ContextSnapshotBuilder {
   readonly #corpus: KnowledgeCorpusManifestBuilder;
   readonly #diff: ContextSnapshotDiffReader;
 
-  constructor(private readonly database: Database.Database, private readonly now: () => Date) {
+  constructor(
+    private readonly database: Database.Database,
+    private readonly now: () => Date,
+    private readonly repositoryRoot: string,
+  ) {
     this.#corpus = new KnowledgeCorpusManifestBuilder(database, now);
     this.#diff = new ContextSnapshotDiffReader(database);
   }
@@ -132,14 +137,16 @@ export class ContextSnapshotBuilder {
         extractor_version: string; extraction_hash: string | null;
       } | undefined;
     if (!row) return null;
-    const repositories = this.database.prepare(`SELECT rs.id,rs.commit_sha,rs.code_repository_id,
+    const repositories = this.database.prepare(`SELECT rs.id,rs.commit_sha,rs.local_path,rs.code_repository_id,
       cr.canonical_url,cr.owner_name,cr.repository_name FROM paper_code_links pcl
       JOIN repository_snapshots rs ON rs.id=pcl.repository_snapshot_id
       JOIN code_repositories cr ON cr.id=rs.code_repository_id
       WHERE pcl.paper_id=? AND pcl.status='confirmed' ORDER BY rs.id`).all(paperId) as Array<{
-        id: string; commit_sha: string; code_repository_id: string; canonical_url: string;
+        id: string; commit_sha: string; local_path: string; code_repository_id: string; canonical_url: string;
         owner_name: string | null; repository_name: string | null;
       }>;
+    if (repositories.some((repository) =>
+      !isRepositoryMaterialized(this.repositoryRoot, repository.local_path, repository.commit_sha))) return null;
     const corpus = this.#corpus.build(paperId);
     const frozenRepositories = repositories.map((repository) => ({ id: repository.id, commitSha: repository.commit_sha }));
     return {

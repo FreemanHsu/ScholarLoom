@@ -86,11 +86,17 @@ function classifyDirectPdfError(error: unknown): { code: string; detail: string;
 export async function createApp(options: CreateAppOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, routerOptions: { maxParamLength: 1024 } });
   const now = options.clock ? () => options.clock!.now() : undefined;
-  const store = ImportStore.open(options.storageLayout, options.knowledgeWriteFailurePoint ?? null, now);
+  const backgroundTasks = new Set<Promise<void>>();
+  const store = ImportStore.open(options.storageLayout, options.knowledgeWriteFailurePoint ?? null, now, {
+    ...(options.repositoryAdapter ? { adapter: options.repositoryAdapter } : {}),
+    schedule(task) {
+      backgroundTasks.add(task);
+      void task.finally(() => backgroundTasks.delete(task));
+    },
+  });
   const agentCoordinator = options.agenticEvidenceRunner ? new AgentRunCoordinator(options.storageLayout,
     options.agenticEvidenceRunner, { ...(options.agentMessageTimeoutMs ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
       ...(options.clock ? { now: () => options.clock!.now() } : {}) }) : null;
-  const backgroundTasks = new Set<Promise<void>>();
   const chatControllers = new Set<AbortController>();
   app.addHook("onClose", async () => {
     for (const controller of chatControllers) controller.abort(new Error("application-closing"));
@@ -125,8 +131,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
         }
         await store.ingestPaper({ paper: execution.paper, pdfBytes,
           onStage(nextStage) { stage = nextStage; },
-          runSummary: (context) => options.codexRunner!.runSummary(context),
-          ...(options.repositoryAdapter ? { repositoryAdapter: options.repositoryAdapter } : {}) });
+          runSummary: (context) => options.codexRunner!.runSummary(context) });
         store.finishImport(execution.job.id);
       } catch (error) { store.finishImport(execution.job.id, error, stage); }
     }).finally(() => backgroundTasks.delete(task));
@@ -239,6 +244,54 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   });
 
   app.get("/api/papers", async () => ({ papers: store.listPapers() }));
+
+  app.get<{ Params: { id: string } }>("/api/papers/:id/repositories", async (request, reply) => {
+    if (!store.paperExists(request.params.id)) return reply.code(404).send({ code: "paper-not-found" });
+    return { repositories: store.listRepositoryAssociations(request.params.id) };
+  });
+
+  app.post<{ Params: { id: string }; Body: { url?: unknown } }>("/api/papers/:id/repositories", async (request, reply) => {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    if (typeof request.body?.url !== "string") return reply.code(422).send({ code: "invalid-github-repository-url" });
+    const result = store.addManualRepositoryAssociation(request.params.id, request.body.url, key) as
+      { ok: false; code: string } | { ok: true; replayed: boolean; association: unknown };
+    if (!result.ok) {
+      const status = result.code === "paper-not-found" ? 404 : result.code === "paper-not-active" ? 409 : 422;
+      return reply.code(status).send({ code: result.code });
+    }
+    return reply.code(result.replayed ? 200 : 202).send(result);
+  });
+
+  app.post<{ Params: { id: string; associationId: string } }>(
+    "/api/papers/:id/repositories/:associationId/confirm",
+    async (request, reply) => {
+      const key = request.headers["idempotency-key"];
+      if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+      const result = store.confirmRepositoryAssociation(request.params.id, request.params.associationId, key) as
+        { ok: false; code: string } | { ok: true; replayed: boolean; association: unknown };
+      if (!result.ok) {
+        const status = result.code === "paper-not-found" || result.code === "repository-association-not-found" ? 404
+          : result.code === "paper-not-active" ? 409 : 503;
+        return reply.code(status).send({ code: result.code });
+      }
+      return reply.code(result.replayed ? 200 : 202).send(result);
+    });
+
+  app.post<{ Params: { id: string; associationId: string } }>(
+    "/api/papers/:id/repositories/:associationId/retry",
+    async (request, reply) => {
+      const key = request.headers["idempotency-key"];
+      if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+      const result = store.retryRepositoryAssociation(request.params.id, request.params.associationId, key) as
+        { ok: false; code: string } | { ok: true; replayed: boolean; association: unknown };
+      if (!result.ok) {
+        const status = result.code === "paper-not-found" || result.code === "repository-association-not-found" ? 404
+          : result.code === "repository-runner-unavailable" ? 503 : 409;
+        return reply.code(status).send({ code: result.code });
+      }
+      return reply.code(result.replayed ? 200 : 202).send(result);
+    });
 
   app.get<{ Params: { id: string } }>("/api/papers/:id", async (request, reply) => {
     const workspace = store.getPaperWorkspace(request.params.id);

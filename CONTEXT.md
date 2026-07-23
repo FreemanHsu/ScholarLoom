@@ -26,6 +26,16 @@ _Avoid_: Paper code, code attachment
 An immutable commit of a Code Repository used as evidence or Agent context.
 _Avoid_: Current repository, cloned code
 
+**Repository Association**:
+A Paper-scoped, inspectable link to a Code Repository. Its origin and confirmation
+state are distinct from Repository Snapshot materialization.
+_Avoid_: Repository Snapshot, detected repository
+
+**Repository Candidate**:
+A Repository Association detected from a GitHub root URL written in Paper source
+material but not yet user-confirmed or eligible for Conversation context.
+_Avoid_: Confirmed repository, reliable code context
+
 ## Evidence and derived material
 
 **Artifact**:

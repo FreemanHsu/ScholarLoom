@@ -7,16 +7,16 @@ const execute = promisify(execFile);
 const activeMaterializations = new Map<string, Promise<{ commitSha: string }>>();
 
 export type RepositoryAdapter = {
-  materialize(url: string, destination: string): Promise<{ commitSha: string }>;
+  materialize(url: string, destination: string, expectedCommitSha?: string): Promise<{ commitSha: string }>;
 };
 
 export class GitRepositoryAdapter implements RepositoryAdapter {
   constructor(private readonly fixtureUrls: Record<string, string> = {}) {}
 
-  async materialize(url: string, destination: string): Promise<{ commitSha: string }> {
+  async materialize(url: string, destination: string, expectedCommitSha?: string): Promise<{ commitSha: string }> {
     const active = activeMaterializations.get(destination);
     if (active) return active;
-    const operation = this.#materialize(url, destination);
+    const operation = this.#materialize(url, destination, expectedCommitSha);
     activeMaterializations.set(destination, operation);
     try {
       return await operation;
@@ -25,19 +25,28 @@ export class GitRepositoryAdapter implements RepositoryAdapter {
     }
   }
 
-  async #materialize(url: string, destination: string): Promise<{ commitSha: string }> {
+  async #materialize(url: string, destination: string, expectedCommitSha?: string): Promise<{ commitSha: string }> {
     const source = this.fixtureUrls[url] ?? url;
     const existingCommit = await inspectMaterializedRepository(source, destination);
-    if (existingCommit) return { commitSha: existingCommit };
+    if (existingCommit && (!expectedCommitSha || existingCommit === expectedCommitSha)) return { commitSha: existingCommit };
 
     const nonce = randomUUID();
     const staging = `${destination}.staging-${nonce}`;
     const replaced = `${destination}.replaced-${nonce}`;
     let movedExisting = false;
     try {
-      await execute("git", ["clone", "--no-tags", "--depth", "1", source, staging], { timeout: 120_000 });
+      if (expectedCommitSha) {
+        await execute("git", ["init", staging], { timeout: 10_000 });
+        await execute("git", ["-C", staging, "remote", "add", "origin", source], { timeout: 10_000 });
+        await execute("git", ["-C", staging, "fetch", "--no-tags", "--depth", "1", "origin", expectedCommitSha],
+          { timeout: 120_000 });
+        await execute("git", ["-C", staging, "checkout", "--detach", "FETCH_HEAD"], { timeout: 10_000 });
+      } else {
+        await execute("git", ["clone", "--no-tags", "--depth", "1", source, staging], { timeout: 120_000 });
+      }
       const commitSha = await inspectMaterializedRepository(source, staging);
       if (!commitSha) throw new Error("repository-clone-invalid");
+      if (expectedCommitSha && commitSha !== expectedCommitSha) throw new Error("repository-commit-mismatch");
       try {
         await rename(destination, replaced);
         movedExisting = true;

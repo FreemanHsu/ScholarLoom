@@ -154,9 +154,6 @@ hash, and stored PDF Artifact.
 ### 5.3 Code Repository and Snapshot
 
 Code Repository is shared across Papers. Repository Snapshot is a fixed commit.
-When a previously failed explicit repository link is materialized successfully, its
-pending `repository-retry` Proposal becomes `superseded` in the same transaction; no
-user Review Decision is fabricated for an operational condition that no longer exists.
 PaperCodeLink records:
 
 - relation: `official`, `author`, `third-party-reproduction`, or `unknown`;
@@ -164,10 +161,20 @@ PaperCodeLink records:
 - review state;
 - the Paper's default Repository Snapshot.
 
-A GitHub URL explicitly present in the Paper is cloned automatically. Any repository
-inferred from project pages, search, or third-party sources remains a Proposal until
-accepted. Shared repositories are cloned once; deleting one Paper removes only its
-PaperCodeLink.
+A manual repository root URL creates or reuses a confirmed PaperCodeLink immediately;
+its independent materialization Job then fixes the repository's current default-branch
+commit. A GitHub root URL explicitly present in Paper material creates a detected
+candidate and is neither cloned nor eligible for Conversation context until confirmed.
+Search, ranking, and fuzzy inference are outside this slice.
+
+The existing `status` and `origin` fields express candidate/confirmed state and
+detected/manual origin, so no migration or parallel association table is required.
+A URL establishes repository identity but not authority, so v1 records relation as
+`unknown` rather than claiming `official`. Materialization state and failure detail
+live in durable `job_runs`; successful links point to immutable Repository Snapshots.
+Canonical repository identity makes duplicate adds idempotent. Shared ready snapshots
+are reused across Papers. Archived Papers keep associations readable but reject add,
+confirm, and retry commands. v1 does not remove or deactivate associations.
 
 ## 6. Artifact lineage and evidence
 

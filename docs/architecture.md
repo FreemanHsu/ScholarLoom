@@ -174,6 +174,33 @@ It assembles a coherent read model from SQLite and Markdown: current Paper Versi
 active Summary, code status, conversations, confirmed Takeaways, and processing
 state. It does not expose table-shaped repositories.
 
+#### RepositoryAssociations
+
+Interface:
+
+```ts
+list(paperId: string): RepositoryAssociationView[]
+addManual(input: { paperId: string; url: string; idempotencyKey: string }): RepositoryAssociationView
+confirm(input: { paperId: string; associationId: string; idempotencyKey: string }): RepositoryAssociationView
+retry(input: { paperId: string; associationId: string; idempotencyKey: string }): RepositoryAssociationView
+```
+
+This deep module owns strict GitHub root URL parsing, canonical identity, Paper-scoped
+candidate/confirmed lifecycle, duplicate suppression, durable materialization Job
+attempts, snapshot reuse, and read-model assembly. `ImportStore` remains a compatibility
+facade and delegates association behavior rather than duplicating it.
+
+The Job freezes an expected commit when repairing a missing local cache. Completion
+uses a running-attempt compare-and-set so an old process cannot overwrite a newer
+retry. Restart turns abandoned running attempts into interrupted state; no repository
+operation runs silently. Repository content is indexed as untrusted text and is never
+executed.
+
+This slice persists repository attempts directly in the existing `job_runs` authority
+and dispatches them through the application's current background-task seam. It does not
+introduce the future generic JobEngine, cancellation, or a second queue abstraction;
+that consolidation and the architecture-wide Git concurrency policy remain deferred.
+
 ### 4.3 PaperConversation
 
 Interface:
@@ -399,6 +426,10 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | POST | `/api/jobs/:id/retry` | Retry a failed or interrupted import as a new Job attempt |
 | GET | `/api/papers` | List Paper read models |
 | GET | `/api/papers/:id` | Load Paper workspace read model |
+| GET | `/api/papers/:id/repositories` | List current Repository Associations |
+| POST | `/api/papers/:id/repositories` | Idempotently add and confirm a manual GitHub root URL |
+| POST | `/api/papers/:id/repositories/:associationId/confirm` | Confirm a detected candidate and start materialization |
+| POST | `/api/papers/:id/repositories/:associationId/retry` | Create a new durable materialization attempt |
 | GET | `/api/paper-versions/:id/pdf` | Stream the accepted PDF asset |
 | GET/POST | `/api/papers/:id/conversations` | List or start frozen Conversations |
 | GET | `/api/conversations/:id` | Restore Messages, attempts, citations, and context |
@@ -414,7 +445,7 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 
 Commands accept an `Idempotency-Key`. Errors use stable problem codes such as
 `invalid-arxiv-reference`, `paper-source-unavailable`, `proposal-already-decided`,
-and `codex-output-invalid`.
+`invalid-github-repository-url`, and `codex-output-invalid`.
 
 The generic durable SSE route is transport only: clients refetch the Conversation
 read model after an event or reconnect. Startup recovery completes before the server

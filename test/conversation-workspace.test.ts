@@ -1,6 +1,8 @@
-import { mkdtemp } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import Database from "better-sqlite3";
@@ -9,6 +11,21 @@ import { describe, expect, it } from "vitest";
 
 import { createApp, type CreateAppOptions } from "../src/app.js";
 import { initializeDataRoot } from "../src/storage/layout.js";
+
+const exec = promisify(execFile);
+
+async function repositoryCheckout(root: string, relativePath: string, content: string): Promise<string> {
+  const directory = join(root, relativePath);
+  await mkdir(directory, { recursive: true });
+  await exec("git", ["init", directory]);
+  await exec("git", ["-C", directory, "config", "user.email", "fixture@example.test"]);
+  await exec("git", ["-C", directory, "config", "user.name", "Fixture"]);
+  await writeFile(join(directory, "README.md"), content, "utf8");
+  await exec("git", ["-C", directory, "add", "."]);
+  await exec("git", ["-C", directory, "commit", "-m", "fixture snapshot"]);
+  const { stdout } = await exec("git", ["-C", directory, "rev-parse", "HEAD"]);
+  return stdout.trim();
+}
 
 async function fixturePdf(): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
@@ -367,11 +384,18 @@ describe("recoverable paper conversation workspace", () => {
     for (const repository of ["a", "b", "c", "d"]) {
       insertRepository.run(`repo:${repository}`, `https://fixture.local/${repository}`, repository, timestamp, timestamp);
     }
-    insertSnapshot.run("snapshot:a-old", "repo:a", "a-old", "synthetic/a-old", timestamp);
-    insertSnapshot.run("snapshot:a-new", "repo:a", "a-new", "synthetic/a-new", timestamp);
-    insertSnapshot.run("snapshot:b", "repo:b", "b-same", "synthetic/b", timestamp);
-    insertSnapshot.run("snapshot:c", "repo:c", "c-new", "synthetic/c", timestamp);
-    insertSnapshot.run("snapshot:d", "repo:d", "d-same", "synthetic/d", timestamp);
+    const commits = {
+      aOld: await repositoryCheckout(storageLayout.repositoryRoot, "synthetic/a-old", "a old\n"),
+      aNew: await repositoryCheckout(storageLayout.repositoryRoot, "synthetic/a-new", "a new\n"),
+      b: await repositoryCheckout(storageLayout.repositoryRoot, "synthetic/b", "b\n"),
+      c: await repositoryCheckout(storageLayout.repositoryRoot, "synthetic/c", "c\n"),
+      d: await repositoryCheckout(storageLayout.repositoryRoot, "synthetic/d", "d\n"),
+    };
+    insertSnapshot.run("snapshot:a-old", "repo:a", commits.aOld, "synthetic/a-old", timestamp);
+    insertSnapshot.run("snapshot:a-new", "repo:a", commits.aNew, "synthetic/a-new", timestamp);
+    insertSnapshot.run("snapshot:b", "repo:b", commits.b, "synthetic/b", timestamp);
+    insertSnapshot.run("snapshot:c", "repo:c", commits.c, "synthetic/c", timestamp);
+    insertSnapshot.run("snapshot:d", "repo:d", commits.d, "synthetic/d", timestamp);
     insertLink.run("link:a", paperId, "repo:a", "snapshot:a-old", timestamp);
     insertLink.run("link:b", paperId, "repo:b", "snapshot:b", timestamp);
     insertLink.run("link:d", paperId, "repo:d", "snapshot:d", timestamp);
@@ -395,8 +419,8 @@ describe("recoverable paper conversation workspace", () => {
     expect(repositories.removed.map((item: { repositoryId: string }) => item.repositoryId)).toEqual(["repo:b"]);
     expect(repositories.changed).toEqual([
       expect.objectContaining({ repositoryId: "repo:a",
-        before: expect.objectContaining({ commitSha: "a-old" }),
-        after: expect.objectContaining({ commitSha: "a-new" }) }),
+        before: expect.objectContaining({ commitSha: commits.aOld }),
+        after: expect.objectContaining({ commitSha: commits.aNew }) }),
     ]);
     expect(repositories.unchanged.map((item: { repositoryId: string }) => item.repositoryId)).toEqual(["repo:d"]);
     await app.close();

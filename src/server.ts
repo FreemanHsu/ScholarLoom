@@ -93,7 +93,10 @@ try {
   const fixtureRepository = fixture ? prepareFixtureRepository(layout.tmpRoot) : null;
   const productionCodex = fixture ? null : new CodexCliRunner({ runtimeRoot: layout.tmpRoot, storageLayout: layout });
   const app = await createApp({ paperSource, directPdfSource, storageLayout: layout, ...(fixture ? {
-      repositoryAdapter: new GitRepositoryAdapter({ "https://github.com/example/fixture": fixtureRepository! }),
+      repositoryAdapter: new GitRepositoryAdapter({
+        "https://github.com/example/fixture": fixtureRepository!,
+        "https://github.com/example/manual": fixtureRepository!,
+      }),
       codexRunner: {
         async runSummary() { return fixtureSummary; },
         async runChat(context) {

@@ -16,6 +16,7 @@ describe("browser navigation", () => {
       page: 7,
       anchor: "evidence:claim:1",
       evidenceReceiptId: null,
+      repositoriesOpen: false,
     });
   });
 
@@ -32,6 +33,7 @@ describe("browser navigation", () => {
       page: 3,
       anchor: "evidence:3",
       evidenceReceiptId: null,
+      repositoriesOpen: false,
     });
     expect(readBrowserRoute({ pathname: "/papers/paper%3Afixture", search: "?mode=knowledge" })).toMatchObject({
       mode: "knowledge",
@@ -66,5 +68,18 @@ describe("browser navigation", () => {
     expect(paperHref("paper:fixture", { mode: "discussion", conversationId: "conversation:one",
       pdfOpen: false, page: 1, anchor: null, evidenceReceiptId: "evidence-receipt:one" }))
       .toBe("/papers/paper%3Afixture/conversations/conversation%3Aone?evidence=evidence-receipt%3Aone");
+  });
+
+  it("restores the repository panel from Paper URL state", () => {
+    expect(readBrowserRoute({
+      pathname: "/papers/paper%3Afixture",
+      search: "?repositories=open",
+    })).toMatchObject({ repositoriesOpen: true });
+    expect(paperHref("paper:fixture", {
+      pdfOpen: false,
+      page: 1,
+      anchor: null,
+      repositoriesOpen: true,
+    })).toBe("/papers/paper%3Afixture?repositories=open");
   });
 });

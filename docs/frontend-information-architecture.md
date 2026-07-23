@@ -178,20 +178,26 @@ drawer rather than becoming separate modes.
 Every Paper Workspace exposes repository association status even though v1 has no
 standalone Code mode. The UI must distinguish:
 
-- checking;
-- no explicit link found;
-- inferred candidate awaiting confirmation;
-- linked and indexing;
-- linked and available to Discussion;
-- failed with an available retry when allowed.
+- no association;
+- detected candidate awaiting confirmation;
+- confirmed and materializing;
+- confirmed and available to future Discussion;
+- failed or interrupted with an explicit retry.
 
 “No explicit link found” must not be presented as proof that no open-source code
-exists. Inferred candidates remain future work and cannot be cloned before review.
+exists. Search-derived candidates remain future work and cannot be cloned before review.
 
-A repository detail drawer may display URL, relation (`official`, `author`,
-`third-party-reproduction`, or `unknown`), association evidence, pinned commit SHA,
-and independent clone/index progress. When available, the fixed Repository Snapshot
-is a Paper Conversation source. Code never enters the v1 Entry Agent corpus.
+The persistent Paper header shows `代码仓库 · N` plus `待确认`, `处理中`, or `需处理`
+when relevant. Its URL-restorable drawer (`repositories=open`) contains the manual
+GitHub root URL form and displays owner/repository, canonical URL, manual/detected
+origin, association state, pinned commit SHA, failure detail, and independent
+materialization progress. On narrow screens it becomes a full-width drawer.
+
+Manual association is semantically confirmed before materialization. A detected
+candidate requires the explicit confirm action. When available, the fixed Repository
+Snapshot is a source only for Conversations created afterward; the drawer explicitly
+states that old frozen Conversations do not change. Code never enters the v1 Entry
+Agent corpus.
 
 ## 8. Import and background processing
 

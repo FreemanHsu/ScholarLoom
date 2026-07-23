@@ -89,7 +89,7 @@ Wiki 式主题索引和全局 Agent 问答连接为一个持续演化的闭环�
 - PDF、GitHub 代码、历史对话和个人知识均允许作为 Codex 云端模型上下文。
 - 显式事实自动写入；解释性关系和从讨论提炼的长期知识由用户确认。
 - Paper Summary 遵循仓库内版本化的 `paper-reading` Skill，默认产出中文技术精读。
-- 论文明确给出的 GitHub 链接自动克隆；搜索推断出的仓库必须由用户确认后才能克隆。
+- 论文明确给出的 GitHub root URL 形成待确认 candidate；手动添加或用户确认后才物化固定版本。
 - Agent 主动建议值得沉淀的 Takeaway/Insight，用户通过一键确认写入长期知识。
 - MVP 入口 Agent 只检索 Paper Summary 和已确认知识；向 PDF、完整对话和代码下钻的
   检索流程在数据层级完成设计后另行定义。
@@ -278,12 +278,11 @@ Insight 及其他长期知识，给出带来源和不确定性的回答。PDF �
 
 ### FR-7 代码仓库发现与索引
 
-- 从论文正文、arXiv metadata、Papers with Code 类来源和 GitHub 搜索中发现候选仓库。
-- 根据论文明确链接、作者身份、README 引用、标题和发布时间计算匹配置信度。
+- 首版只从论文内容中识别明确的 GitHub repository root URL，并允许用户手动添加。
+- GitHub 搜索、Papers with Code、模糊匹配、候选排序与置信度计算均延后。
 - 仓库必须标注 `official`、`author`、`third-party-reproduction` 或 `unknown`。
-- 论文自身明确给出的 GitHub 链接直接自动克隆。
-- 通过项目页、GitHub 搜索或其他外部来源推断出的仓库只能形成候选；用户确认前不得克隆或加入
-  Paper-scoped Agent context。
+- 论文自身明确给出的 GitHub 链接形成 detected candidate；用户确认前不得克隆或加入
+  Paper-scoped Agent context。手动 root URL 直接 confirmed，物化状态独立展示。
 - 对已确认匹配的 GitHub 仓库自动克隆到 Mac mini，记录固定 commit SHA，并建立只读索引；
   代码回答引用该版本的文件和行范围。
 - 代码发现、克隆和索引与 Paper Summary 并行执行，不应因 GitHub 不存在或暂时失败而
@@ -382,7 +381,7 @@ archive 生命周期与 lineage 独立，legacy Conversation 保留 lineage 与�
 1. 用户粘贴 arXiv URL。
 2. 系统立即返回已识别的论文身份或重复项。
 3. 用户进入 Paper 页面查看实时处理阶段。
-4. PDF 解析后并行启动 Summary 和 GitHub 仓库发现/下载/索引。
+4. PDF 解析后并行启动 Summary，并把明确 GitHub root URL 记录为待确认 candidate。
 5. Summary Ready 后通知用户并开放 Summary 阅读、可选 PDF 对照和对话。
 6. 代码任务可以晚于 Summary 完成，不阻塞基础阅读；代码就绪后自动加入该 Paper 的
    Agent 可用 context，并显示所固定的仓库版本。
@@ -423,8 +422,9 @@ archive 生命周期与 lineage 独立，legacy Conversation 保留 lineage 与�
 | arXiv 元数据/PDF 获取 | 自动 | 可重复、低解释风险 |
 | PDF 解析与 Summary | 自动并保留版本 | 派生内容可重建和核验 |
 | 显式参考文献 `cites` | 自动确认 | 关系来自原文结构 |
-| 论文明确链接的 GitHub 仓库 | 自动克隆 | 来源明确且可追溯 |
-| 搜索推断的 GitHub 仓库 | 用户确认后克隆 | 错配会污染代码问答 |
+| 手动添加的 GitHub root URL | 立即确认并异步固定 commit | 用户给出了明确 identity |
+| 论文明确链接的 GitHub 仓库 | candidate，用户确认后物化 | 仍需防止误识别污染上下文 |
+| 搜索推断的 GitHub 仓库 | 首版不实现 | 模糊匹配风险与复杂度过高 |
 | `extends`/`contradicts` 等语义边 | 生成候选，默认待确认 | 属于解释性判断 |
 | 会话原文保存与索引 | 自动 | 是用户历史，但需隐私控制 |
 | Agent 建议的 Takeaway/Insight | 一键确认后写入 | 应表达用户认可的长期知识 |
@@ -521,7 +521,8 @@ archive 生命周期与 lineage 独立，legacy Conversation 保留 lineage 与�
 - 按 `paper-reading` Skill 生成带引用的详细中文 Paper Summary，并保存版本信息。
 - 默认 Summary 阅读页、可选 Summary/PDF 分栏和证据跳转。
 - Paper-scoped 对话、历史保存和引用展示。
-- 自动发现并克隆已确认的 GitHub 仓库，固定 commit，建立只读代码索引，使其可用于对话。
+- 手动添加或确认 detected candidate 后物化 GitHub 仓库，固定 commit，建立只读代码索引，
+  使其可用于未来 Conversation。
 - 手动确认 Summary/讨论中的 Takeaway 与 Insight，并写入 Markdown 知识结构。
 - 一个最小入口 Agent，可检索 Paper Summary、已确认 Takeaway/Insight 及其来源。
 - 入口 Agent 不检索 PDF 原文、完整历史对话或代码；这些内容仅在 Paper-scoped Agent 中可用。
@@ -575,10 +576,10 @@ Phase 1 的范围已经确认以单篇论文深读闭环为中心；Phase 2 和 
 
 首选一条产品级 Paper Lifecycle 接缝作为核心验收：
 
-> 给定一个固定 arXiv 链接和一个明确关联官方 GitHub 仓库的测试样本，提交链接后，
+> 给定一个固定 arXiv 链接和一个含明确 GitHub root URL 的测试样本，提交链接后，
 > 系统只产生一个 Paper；自动下载 PDF，并按 `paper-reading` Skill 生成可长期访问、关键
 > 结论可定位原文的中文技术 Summary。用户打开 Paper 时先看到 Summary，可选打开 PDF
-> 对照。系统并行发现并克隆固定 commit 的 GitHub 仓库，完成只读索引。用户从 Summary
+> 对照。系统显示 detected candidate；用户确认后固定 commit 并完成只读索引。用户从 Summary
 > 发起对话时，Agent 能以 Paper、Summary 和该代码版本为 context 给出带证据的回答。
 > 用户确认一个 Takeaway 或 Insight 后，它被写入长期知识，并能从入口 Agent 检索到。
 > 同一服务可由已授权笔记本通过 Tailscale Serve 私有 HTTPS URL 打开，但不能从普通 LAN 地址或公网访问。
@@ -603,7 +604,11 @@ Phase 1 的范围已经确认以单篇论文深读闭环为中心；Phase 2 和 
 - Summary 的章节结构、条件式训练/推理章节和分析深度符合所记录版本的
   `paper-reading` Skill。
 - GitHub 不存在或下载失败时 Summary 仍可 Ready；代码状态和错误可见且可单独重试。
-- 论文明确提供的 GitHub 链接会自动克隆；搜索推断的仓库在确认前不会产生本地 clone。
+- 论文明确提供的 GitHub root URL 形成 candidate；手动或显式确认前不会产生本地 clone。
+- `.git` 与尾部 `/` 归一为稳定 identity；issue、pull、tree、blob、commit URL 被拒绝，
+  重复添加不产生重复 repository、link、snapshot 或 Job。
+- Paper 后续关联变化只影响未来 Conversation；已有 Context Snapshot 与其 Repository
+  Snapshots 永不改变。
 - 已确认 Takeaway/Insight 可以被入口 Agent 检索，未确认候选不得作为用户认可观点回答。
 - MVP 入口 Agent 的检索结果不会来自 PDF 原文、完整历史消息或代码索引。
 - 显式 arXiv `vN` URL 在存在更高版本时仍导入 `vN`；裸 ID 在导入后冻结，打开论文时才

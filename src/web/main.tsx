@@ -14,6 +14,7 @@ import { canContinueConversation, conversationActionRequest, filterConversations
   NewConversationButton, type ConversationLineage }
   from "./conversation-controls.js";
 import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspector.js";
+import { RepositoryPanel, type RepositoryAssociation } from "./repository-panel.js";
 import "./styles.css";
 
 type Paper = {
@@ -41,6 +42,7 @@ type Workspace = {
     claims: Array<{ claim: string; evidence: { id?: string; page: number; verified: boolean } }>;
   };
   processing: null | { jobId: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null };
+  repositories: RepositoryAssociation[];
   repository: null | { url: string; commitSha: string | null; status: "ready" | "failed"; files: Array<{ path: string }> };
 };
 type Proposal = { id: string; claim: string; oneClickEligible: boolean; sourceHandles: string[] };
@@ -121,6 +123,8 @@ function App() {
   const [knowledge, setKnowledge] = useState<KnowledgeModel>({ pendingProposals: [], confirmedTakeaways: [] });
   const [discussionError, setDiscussionError] = useState<string | null>(null);
   const [evidence, setEvidence] = useState<EvidenceInspectorModel | null>(null);
+  const [repositoryBusy, setRepositoryBusy] = useState(false);
+  const [repositoryError, setRepositoryError] = useState<string | null>(null);
 
   function navigate(href: string, replace = false) {
     window.history[replace ? "replaceState" : "pushState"](null, "", href);
@@ -273,10 +277,45 @@ function App() {
   }, [route.name === "paper" ? `${route.paperId}:${route.conversationId ?? "new"}` : null]);
 
   useEffect(() => {
-    if (route.name !== "paper" || !workspace?.processing || isTerminalImportJobState(workspace.processing.state)) return;
-    const timer = window.setInterval(() => void refreshWorkspace(route.paperId), 3_000);
+    if (route.name !== "paper") return;
+    const importRunning = Boolean(workspace?.processing && !isTerminalImportJobState(workspace.processing.state));
+    const repositoryRunning = workspace?.repositories.some((repository) =>
+      ["queued", "running"].includes(repository.materializationStatus)) ?? false;
+    if (!importRunning && !repositoryRunning) return;
+    const timer = window.setInterval(() => void refreshWorkspace(route.paperId), repositoryRunning ? 750 : 3_000);
     return () => window.clearInterval(timer);
-  }, [route.name === "paper" ? route.paperId : null, workspace?.processing?.state]);
+  }, [route.name === "paper" ? route.paperId : null, workspace?.processing?.state,
+    workspace?.repositories.map((repository) => repository.materializationStatus).join("|")]);
+
+  async function repositoryCommand(path: string, method: "POST", body?: object) {
+    if (route.name !== "paper") return;
+    setRepositoryBusy(true);
+    setRepositoryError(null);
+    try {
+      const response = await fetch(path, {
+        method,
+        headers: {
+          "idempotency-key": crypto.randomUUID(),
+          ...(body ? { "content-type": "application/json" } : {}),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      const result = await response.json() as { code?: string };
+      if (!response.ok) {
+        const messages: Record<string, string> = {
+          "invalid-github-repository-url": "请输入明确的 GitHub repository root URL。",
+          "repository-job-not-retryable": "当前状态不能重试，可能已有物化正在进行。",
+          "paper-not-active": "此 Paper 当前为只读状态。",
+        };
+        throw new Error(messages[result.code ?? ""] ?? "代码仓库操作失败。");
+      }
+      await refreshWorkspace(route.paperId);
+    } catch (cause) {
+      setRepositoryError(cause instanceof Error ? cause.message : "代码仓库操作失败。");
+    } finally {
+      setRepositoryBusy(false);
+    }
+  }
 
   async function askPaper(event: React.FormEvent) {
     event.preventDefault();
@@ -284,7 +323,14 @@ function App() {
     let id = route.name === "paper" ? route.conversationId : null;
     const initialDraftKey = route.name === "paper" ? `scholarloom:draft:${route.conversationId ?? `paper:${route.paperId}`}` : null;
     if (!id) {
-      const created = await fetch(`/api/papers/${encodeURIComponent(workspace.paper.id)}/conversations`, { method: "POST" }).then((response) => response.json());
+      const response = await fetch(`/api/papers/${encodeURIComponent(workspace.paper.id)}/conversations`, { method: "POST" });
+      const created = await response.json();
+      if (!response.ok) {
+        setDiscussionError(created.code === "conversation-context-unavailable"
+          ? "当前固定材料尚不可用；请先在代码仓库面板恢复缺失的 Repository Snapshot。"
+          : "无法创建 Conversation。");
+        return;
+      }
       id = created.conversation.id;
       setConversationId(id);
       navigate(paperHref(workspace.paper.id, { mode: "discussion", conversationId: id, pdfOpen: false, page: 1, anchor: null }));
@@ -555,6 +601,13 @@ function App() {
           onEvidenceIntegrityFailure={() => route.evidenceReceiptId && void refreshEvidence(route.evidenceReceiptId)}
           onReviewProposal={reviewProposal}
           onManageConversation={manageConversation} onContinueConversation={continueConversation}
+          repositoryBusy={repositoryBusy} repositoryError={repositoryError}
+          onAddRepository={(repositoryUrl) => repositoryCommand(`/api/papers/${encodeURIComponent(route.paperId)}/repositories`,
+            "POST", { url: repositoryUrl })}
+          onConfirmRepository={(associationId) => repositoryCommand(
+            `/api/papers/${encodeURIComponent(route.paperId)}/repositories/${encodeURIComponent(associationId)}/confirm`, "POST")}
+          onRetryRepository={(associationId) => repositoryCommand(
+            `/api/papers/${encodeURIComponent(route.paperId)}/repositories/${encodeURIComponent(associationId)}/retry`, "POST")}
           onRetry={retryImport} onNavigate={navigate} />)}
   </div>;
 }
@@ -733,12 +786,33 @@ function PaperWorkspace(props: {
   onNavigate(href: string, replace?: boolean): void;
   evidence: EvidenceInspectorModel | null;
   onEvidenceIntegrityFailure(): void;
+  repositoryBusy: boolean;
+  repositoryError: string | null;
+  onAddRepository(url: string): void;
+  onConfirmRepository(associationId: string): void;
+  onRetryRepository(associationId: string): void;
 }) {
   const { workspace, route } = props;
   const [showArchivedConversations, setShowArchivedConversations] = useState(false);
-  const codeStatus = workspace.repository?.status === "ready" ? "代码可用于讨论"
-    : workspace.repository?.status === "failed" ? "代码关联失败"
-      : workspace.processing && !isTerminalImportJobState(workspace.processing.state) ? "正在检查代码关联" : "未发现明确代码链接";
+  const readyRepositories = workspace.repositories.filter((repository) => repository.materializationStatus === "ready").length;
+  const hasRepositoryCandidates = workspace.repositories.some((repository) =>
+    repository.associationStatus === "candidate");
+  const repositoryAttention = workspace.repositories.some((repository) =>
+    ["failed", "interrupted"].includes(repository.materializationStatus));
+  const codeStatus = workspace.repositories.length === 0 ? "代码仓库 · 0"
+    : hasRepositoryCandidates ? `代码仓库 · ${workspace.repositories.length} · 待确认`
+      : repositoryAttention ? `代码仓库 · ${workspace.repositories.length} · 需处理`
+        : readyRepositories === workspace.repositories.length ? `代码仓库 · ${workspace.repositories.length}`
+          : `代码仓库 · ${workspace.repositories.length} · 处理中`;
+  const repositoryHref = (open: boolean) => paperHref(workspace.paper.id, {
+    mode: route.mode,
+    conversationId: route.conversationId,
+    pdfOpen: route.pdfOpen,
+    page: route.page,
+    anchor: route.anchor,
+    evidenceReceiptId: route.evidenceReceiptId,
+    repositoriesOpen: open,
+  });
   const setPdf = (pdfOpen: boolean, page = route.page, anchor = route.anchor) => {
     props.onNavigate(paperHref(workspace.paper.id, { mode: route.mode, conversationId: route.conversationId, pdfOpen, page, anchor }));
   };
@@ -767,8 +841,13 @@ function PaperWorkspace(props: {
         <p className="paper-metadata">{workspace.paper.authors.join(", ")} · {workspace.paper.year}</p></div>
       <div className="workspace-badges"><span className="version">{workspace.paper.sourceType === "arxiv" ? `arXiv v${workspace.paper.version}` : "公开 PDF"}</span>
         <a className="source-link" href={workspace.paper.sourceUrl} target="_blank" rel="noopener noreferrer">打开来源</a>
-        <span className="code-status" title={workspace.repository?.url}>{codeStatus}</span></div>
+        <button type="button" className="code-status repository-summary"
+          aria-expanded={route.repositoriesOpen}
+          onClick={() => props.onNavigate(repositoryHref(!route.repositoriesOpen))}>{codeStatus}</button></div>
     </header>
+    {route.repositoriesOpen && <RepositoryPanel repositories={workspace.repositories} busy={props.repositoryBusy}
+      error={props.repositoryError} onClose={() => props.onNavigate(repositoryHref(false))}
+      onAdd={props.onAddRepository} onConfirm={props.onConfirmRepository} onRetry={props.onRetryRepository} />}
     {props.error && <div className="inline-alert">{props.error}</div>}
     <nav className="workspace-modes" aria-label="Paper workspace mode">
       {(["reading", "discussion", "knowledge"] as const).map((mode) => <a key={mode} href={modeHref(mode)}

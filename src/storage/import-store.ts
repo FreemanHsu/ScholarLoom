@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
-import { execFileSync } from "node:child_process";
 
 import Database from "better-sqlite3";
 
@@ -20,6 +19,8 @@ import { KnowledgeWriter } from "./knowledge-writer.js";
 import { ContextSnapshotBuilder } from "./context-snapshot-builder.js";
 import { ConversationStore } from "./conversation-store.js";
 import { canonicalSectionHash } from "./canonical-section-hash.js";
+import { RepositoryAssociations } from "./repository-associations.js";
+import { findGitHubRepositoryUrls } from "../domain/github-repository-url.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -76,24 +77,24 @@ export class ImportStore {
   readonly #database: Database.Database;
   readonly #artifactRoot: string;
   readonly #knowledgeRoot: string;
-  readonly #repositoryRoot: string;
   readonly #failurePoint: "staged" | "renamed" | "metadata-committed" | null;
   readonly #now: () => Date;
   readonly #contextSnapshots: ContextSnapshotBuilder;
   readonly #conversations: ConversationStore;
   readonly #knowledgeWriter: KnowledgeWriter;
+  readonly #repositoryAssociations: RepositoryAssociations;
 
   static open(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
-    now?: () => Date): ImportStore {
-    return new ImportStore(layout, failurePoint, now);
+    now?: () => Date, repositoryRuntime?: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void }): ImportStore {
+    return new ImportStore(layout, failurePoint, now, repositoryRuntime);
   }
 
   private constructor(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
-    now: () => Date = () => new Date()) {
+    now: () => Date = () => new Date(),
+    repositoryRuntime: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void } = { schedule() {} }) {
     this.#layout = layout;
     this.#artifactRoot = layout.root;
     this.#knowledgeRoot = layout.vaultRoot;
-    this.#repositoryRoot = layout.repositoryRoot;
     this.#failurePoint = failurePoint;
     this.#now = now;
     this.#database = new Database(layout.databasePath);
@@ -101,8 +102,14 @@ export class ImportStore {
     this.#database.pragma("journal_mode = WAL");
     this.#database.pragma("busy_timeout = 5000");
     migrate(this.#database);
-    this.#contextSnapshots = new ContextSnapshotBuilder(this.#database, this.#now);
+    this.#contextSnapshots = new ContextSnapshotBuilder(this.#database, this.#now, layout.repositoryRoot);
     this.#conversations = new ConversationStore(this.#database, this.#now);
+    this.#repositoryAssociations = new RepositoryAssociations(this.#database, {
+      repositoryRoot: layout.repositoryRoot,
+      ...(repositoryRuntime.adapter ? { adapter: repositoryRuntime.adapter } : {}),
+      schedule: repositoryRuntime.schedule,
+      now: this.#now,
+    });
     recoverInterruptedRuns(this.#database, this.#now().toISOString());
     this.#knowledgeWriter = new KnowledgeWriter(this.#database, {
       now: this.#now,
@@ -126,7 +133,6 @@ export class ImportStore {
     pdfBytes: Uint8Array;
     onStage?: (stage: Exclude<ImportStage, "pdf-download">) => void;
     runSummary(context: { paperId: string; title: string; pages: Array<{ handle: string; page: number; text: string }> }): Promise<SummaryResult>;
-    repositoryAdapter?: RepositoryAdapter;
   }): Promise<void> {
     input.onStage?.("pdf-storage");
     const now = new Date().toISOString();
@@ -187,11 +193,9 @@ export class ImportStore {
         .run(document.numPages, now, storedExtractionArtifactId, extractionId);
     }
 
-    const explicitUrl = pages.map((page) => page.text).join("\n").match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/)?.[0]?.replace(/[.,;)]$/, "");
-    const repositoryWork = input.repositoryAdapter && explicitUrl
-      ? this.#materializeRepository(input.paper.id, explicitUrl, input.repositoryAdapter, now).catch((error: unknown) =>
-        this.#recordRepositoryFailure(input.paper.id, explicitUrl, error, now))
-      : Promise.resolve();
+    for (const repository of findGitHubRepositoryUrls(pages.map((page) => page.text).join("\n"))) {
+      this.#repositoryAssociations.detectPaperExplicit(input.paper.id, repository.canonicalUrl);
+    }
     const summaryId = `summary:${versionId}:r1`;
     const existingWrite = this.#database.prepare("SELECT phase,payload_json FROM knowledge_write_requests WHERE id=?")
       .get(`knowledge-write:${summaryId}`) as { phase: string; payload_json: string } | undefined;
@@ -208,7 +212,6 @@ export class ImportStore {
       const resumed = this.#database.prepare("SELECT phase FROM knowledge_write_requests WHERE id=?")
         .get(`knowledge-write:${summaryId}`) as { phase: string };
       if (resumed.phase !== "complete") throw new Error(`knowledge-write-incomplete:${resumed.phase}`);
-      await repositoryWork;
       return;
     }
 
@@ -251,7 +254,6 @@ export class ImportStore {
     this.#database.prepare("UPDATE knowledge_write_requests SET phase='staged',updated_at=? WHERE id=?").run(now, writeId);
     this.#maybeFail("staged");
     this.#advanceSummaryWrite(writeId);
-    await repositoryWork;
   }
 
   #maybeFail(phase: "staged" | "renamed" | "metadata-committed"): void {
@@ -422,68 +424,32 @@ export class ImportStore {
         markdownPath: summary.markdown_path, ...JSON.parse(summary.structured_json) as object } : null,
       processing: latestJob ? { jobId: latestJob.id, state: requireImportJobState(latestJob.state), progress: latestJob.progress,
         attempt: latestJob.attempt, error: parseStoredImportError(latestJob.error_json) } : null,
+      repositories: this.#repositoryAssociations.list(id),
       repository: repository ? { url: repository.canonical_url, commitSha: repository.commit_sha,
         status: repository.status === "confirmed" ? "ready" : "failed", files } : null,
     };
-  }
-
-  async #materializeRepository(paperId: string, url: string, adapter: RepositoryAdapter, now: string): Promise<void> {
-    const existing = this.#database.prepare(`SELECT 1 FROM paper_code_links pcl JOIN code_repositories cr ON cr.id=pcl.code_repository_id
-      WHERE pcl.paper_id=? AND cr.canonical_url=? AND pcl.status='confirmed'`).get(paperId, url);
-    if (existing) return;
-    const digest = createHash("sha256").update(url).digest("hex").slice(0, 16);
-    const repositoryId = `repository:${digest}`;
-    const destination = join(this.#repositoryRoot, digest);
-    mkdirSync(this.#repositoryRoot, { recursive: true });
-    const { commitSha } = await adapter.materialize(url, destination);
-    const snapshotId = `repository-snapshot:${repositoryId}:${commitSha}`;
-    const parsed = new URL(url);
-    const [owner, name] = parsed.pathname.slice(1).split("/");
-    this.#database.transaction(() => {
-      this.#database.prepare(`INSERT INTO code_repositories(id,canonical_url,host,owner_name,repository_name,availability_status,created_at,updated_at)
-        VALUES (?,?,?,?,?,'available',?,?) ON CONFLICT(canonical_url) DO UPDATE SET availability_status='available',updated_at=excluded.updated_at`)
-        .run(repositoryId, url, parsed.host, owner, name, now, now);
-      this.#database.prepare(`INSERT INTO repository_snapshots(id,code_repository_id,commit_sha,local_path,created_at)
-        VALUES (?,?,?,?,?) ON CONFLICT(code_repository_id,commit_sha) DO NOTHING`).run(snapshotId, repositoryId, commitSha, digest, now);
-      this.#database.prepare(`INSERT INTO paper_code_links(id,paper_id,code_repository_id,link_type,origin,status,repository_snapshot_id,created_at)
-        VALUES (?,?,?,'official','paper-explicit','confirmed',?,?) ON CONFLICT(paper_id,code_repository_id) DO UPDATE SET repository_snapshot_id=excluded.repository_snapshot_id,status='confirmed'`)
-        .run(`paper-code-link:${paperId}:${repositoryId}`, paperId, repositoryId, snapshotId, now);
-      for (const file of listTextFiles(destination)) {
-        const text = readFileSync(file.absolute, "utf8");
-        const lineCount = Math.max(1, text.split("\n").length);
-        this.#database.prepare(`INSERT INTO code_elements(id,repository_snapshot_id,relative_path,start_line,end_line,text_content,content_hash)
-          VALUES (?,?,?,?,?,?,?) ON CONFLICT(repository_snapshot_id,relative_path,start_line,end_line) DO NOTHING`)
-          .run(`code-element:${snapshotId}:${file.relative}`, snapshotId, file.relative, 1, lineCount, text,
-          createHash("sha256").update(text).digest("hex"));
-      }
-      this.#database.prepare(`UPDATE proposals SET review_status='superseded',decided_at=?
-        WHERE id=? AND proposal_type='repository-retry' AND review_status='pending'`)
-        .run(now, `proposal:repository-retry:${paperId}:${digest}`);
-    })();
-  }
-
-  #recordRepositoryFailure(paperId: string, url: string, error: unknown, now: string): void {
-    const digest = createHash("sha256").update(url).digest("hex").slice(0, 16);
-    const repositoryId = `repository:${digest}`;
-    const parsed = new URL(url);
-    const [owner, name] = parsed.pathname.slice(1).split("/");
-    this.#database.transaction(() => {
-      this.#database.prepare(`INSERT INTO code_repositories(id,canonical_url,host,owner_name,repository_name,availability_status,created_at,updated_at)
-        VALUES (?,?,?,?,?,'unavailable',?,?) ON CONFLICT(canonical_url) DO UPDATE SET availability_status='unavailable',updated_at=excluded.updated_at`)
-        .run(repositoryId, url, parsed.host, owner, name, now, now);
-      this.#database.prepare(`INSERT INTO paper_code_links(id,paper_id,code_repository_id,link_type,origin,status,created_at)
-        VALUES (?,?,?,'official','paper-explicit','rejected',?) ON CONFLICT(paper_id,code_repository_id) DO UPDATE SET status='rejected'`)
-        .run(`paper-code-link:${paperId}:${repositoryId}`, paperId, repositoryId, now);
-      this.#database.prepare(`INSERT OR IGNORE INTO proposals(id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
-        VALUES (?,'repository-retry',?,?,'pending',0,?)`).run(`proposal:repository-retry:${paperId}:${digest}`, paperId,
-          JSON.stringify({ url, error: error instanceof Error ? error.message : "repository-unavailable" }), now);
-    })();
   }
 
   getPdf(versionId: string): Uint8Array | null {
     const row = this.#database.prepare(`SELECT a.id,a.storage_ref FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id WHERE v.id=?`).get(versionId) as
       { id: string; storage_ref: string } | undefined;
     return row && this.#artifactIsValid(row.id) ? readFileSync(join(this.#artifactRoot, row.storage_ref)) : null;
+  }
+
+  listRepositoryAssociations(paperId: string): unknown[] {
+    return this.#repositoryAssociations.list(paperId);
+  }
+
+  addManualRepositoryAssociation(paperId: string, url: string, idempotencyKey: string): unknown {
+    return this.#repositoryAssociations.addManual(paperId, url, idempotencyKey);
+  }
+
+  confirmRepositoryAssociation(paperId: string, associationId: string, idempotencyKey: string): unknown {
+    return this.#repositoryAssociations.confirm(paperId, associationId, idempotencyKey);
+  }
+
+  retryRepositoryAssociation(paperId: string, associationId: string, idempotencyKey: string): unknown {
+    return this.#repositoryAssociations.retry(paperId, associationId, idempotencyKey);
   }
 
   startConversation(paperId: string, continuedFromConversationId: string | null = null): unknown | null {
@@ -1409,20 +1375,6 @@ export class ImportStore {
   }
 
   close(): void { this.#database.close(); }
-}
-
-function listTextFiles(root: string): Array<{ absolute: string; relative: string }> {
-  const tracked = execFileSync("git", ["-C", root, "ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean);
-  return tracked.flatMap((relative) => {
-    const absolute = join(root, relative);
-    try {
-      const stats = lstatSync(absolute);
-      if (!stats.isFile() || stats.size > 256_000) return [];
-      return readFileSync(absolute).includes(0) ? [] : [{ relative, absolute }];
-    } catch {
-      return [];
-    }
-  });
 }
 
 function renderSummary(input: { summaryId: string; paper: StoredPaper; versionId: string; extractionId: string; agentRunId: string; skillHash: string;

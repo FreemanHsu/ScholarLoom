@@ -58,6 +58,12 @@ Discussion 已使用 Codex-native Agentic Evidence Retrieval。每次 Attempt �
 行号校验后才生成 Evidence Receipt；Activity 只用于进度/audit。默认跨 Conversation
 并发 2，支持 durable queue、cancel、timeout、restart-interrupted 与显式 retry。
 
+Paper header 的“代码仓库”入口显示当前 Repository Associations。用户可输入明确的
+GitHub repository root URL；系统规范化 identity、幂等复用现有关联，并异步固定当时的
+commit。论文中直接出现的 GitHub URL 只形成待确认 candidate，不会在确认前进入
+Conversation context。物化失败可单独 retry，不影响 Paper 阅读；已冻结 Conversation 的
+Repository Snapshots 永不追随 Paper 当前关联变化。
+
 ## 本地运行
 
 要求 Node.js 22+、Git 和已完成登录的 Codex CLI。

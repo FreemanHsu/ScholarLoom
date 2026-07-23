@@ -7,6 +7,7 @@ export type BrowserRoute = { name: "home" | "papers" | "reviews" | "not-found" }
   page: number;
   anchor: string | null;
   evidenceReceiptId: string | null;
+  repositoriesOpen: boolean;
 };
 
 type BrowserLocation = Pick<Location, "pathname" | "search">;
@@ -14,6 +15,7 @@ export type PaperViewState = Pick<Extract<BrowserRoute, { name: "paper" }>, "pdf
   mode?: "reading" | "discussion" | "knowledge";
   conversationId?: string | null;
   evidenceReceiptId?: string | null;
+  repositoriesOpen?: boolean;
 };
 
 export function paperHref(paperId: string, view: PaperViewState = { pdfOpen: false, page: 1, anchor: null }): string {
@@ -23,6 +25,7 @@ export function paperHref(paperId: string, view: PaperViewState = { pdfOpen: fal
   if (view.pdfOpen && view.page > 1) query.set("page", String(view.page));
   if (view.pdfOpen && view.anchor) query.set("anchor", view.anchor);
   if (view.evidenceReceiptId) query.set("evidence", view.evidenceReceiptId);
+  if (view.repositoriesOpen) query.set("repositories", "open");
   const search = query.toString();
   const path = view.conversationId
     ? `/papers/${encodeURIComponent(paperId)}/conversations/${encodeURIComponent(view.conversationId)}`
@@ -48,5 +51,6 @@ export function readBrowserRoute(location: BrowserLocation): BrowserRoute {
     page: Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1,
     anchor: query.get("anchor") || null,
     evidenceReceiptId: query.get("evidence") || null,
+    repositoriesOpen: query.get("repositories") === "open",
   };
 }
