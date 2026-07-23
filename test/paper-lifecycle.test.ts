@@ -100,7 +100,7 @@ describe("paper ingestion lifecycle", () => {
     await app.close();
   });
 
-  it("pins and indexes a confirmed Paper-explicit repository without executing it", async () => {
+  it("ignores a Paper-explicit URL until manual add, then pins and indexes without executing it", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-git-"));
     const storageLayout = initializeDataRoot(join(root, "data"));
     const working = join(root, "working");
@@ -146,14 +146,12 @@ describe("paper ingestion lifecycle", () => {
     const imported = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
     await waitForImport(app, imported.json().importRequest.id);
     const candidates = await app.inject({ method: "GET", url: `/api/papers/${imported.json().paper.id}/repositories` });
-    expect(candidates.json().repositories[0]).toMatchObject({
-      origin: "detected", associationStatus: "candidate", materializationStatus: "not-started",
-    });
-    const associationId = candidates.json().repositories[0].id as string;
+    expect(candidates.json()).toEqual({ repositories: [] });
     const confirmed = await app.inject({
       method: "POST",
-      url: `/api/papers/${imported.json().paper.id}/repositories/${encodeURIComponent(associationId)}/confirm`,
-      headers: { "idempotency-key": "confirm-paper-explicit-repository" },
+      url: `/api/papers/${imported.json().paper.id}/repositories`,
+      headers: { "idempotency-key": "manually-add-paper-explicit-repository" },
+      payload: { url: "https://github.com/example/fixture" },
     });
     expect(confirmed.statusCode).toBe(202);
     let repositoryView: Record<string, unknown> | undefined;

@@ -69,13 +69,15 @@ async function pdfWithRepositoryUrl(): Promise<Uint8Array> {
   return pdf.save();
 }
 
-async function createDetectedPaper(repositoryAdapter: RepositoryAdapter): Promise<{
+async function createPaperWithRepositoryUrl(repositoryAdapter: RepositoryAdapter): Promise<{
   app: FastifyInstance;
   paperId: string;
+  layout: ReturnType<typeof initializeDataRoot>;
 }> {
   const root = await mkdtemp(join(tmpdir(), "scholarloom-detected-repository-"));
+  const layout = initializeDataRoot(join(root, "data"));
   const app = await createApp({
-    storageLayout: initializeDataRoot(join(root, "data")),
+    storageLayout: layout,
     repositoryAdapter,
     paperSource: {
       async resolve() {
@@ -105,10 +107,232 @@ async function createDetectedPaper(repositoryAdapter: RepositoryAdapter): Promis
     if (status.json().jobs.at(-1)?.state === "succeeded") break;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  return { app, paperId: imported.json().paper.id as string };
+  return { app, paperId: imported.json().paper.id as string, layout };
+}
+
+async function createLegacyCandidatePaper(repositoryAdapter: RepositoryAdapter): Promise<{
+  app: FastifyInstance;
+  paperId: string;
+  layout: ReturnType<typeof initializeDataRoot>;
+}> {
+  const fixture = await createPaperWithRepositoryUrl(repositoryAdapter);
+  const canonicalUrl = "https://github.com/owner/repository";
+  const repositoryId = "repository:96f59fe1cf90499e";
+  const timestamp = "2026-07-23T00:00:00.000Z";
+  const database = new Database(fixture.layout.databasePath);
+  database.prepare(`INSERT INTO code_repositories
+    (id,canonical_url,host,owner_name,repository_name,availability_status,created_at,updated_at)
+    VALUES (?,?, 'github.com','owner','repository','unavailable',?,?)`)
+    .run(repositoryId, canonicalUrl, timestamp, timestamp);
+  database.prepare(`INSERT INTO paper_code_links
+    (id,paper_id,code_repository_id,link_type,origin,status,repository_snapshot_id,created_at)
+    VALUES (?,?,?,'unknown','detected','candidate',NULL,?)`)
+    .run(`paper-code-link:${fixture.paperId}:${repositoryId}`, fixture.paperId, repositoryId, timestamp);
+  database.close();
+  return fixture;
 }
 
 describe("repository associations", () => {
+  it("removes a historical candidate and hides it from the current Paper", async () => {
+    const { app, paperId, layout } = await createLegacyCandidatePaper({
+      async materialize() { return { commitSha: "a".repeat(40) }; },
+    });
+    const before = await app.inject({
+      method: "GET",
+      url: `/api/papers/${paperId}/repositories`,
+    });
+    const associationId = before.json().repositories[0].id as string;
+
+    const removed = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/remove`,
+      headers: { "idempotency-key": "remove-historical-candidate" },
+    });
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/papers/${paperId}/repositories`,
+    });
+    const database = new Database(layout.databasePath);
+    const ledger = database.prepare(`SELECT state,output_json FROM job_runs
+      WHERE job_type='repository-association-remove' AND idempotency_key=?`)
+      .get("remove-historical-candidate") as { state: string; output_json: string } | undefined;
+    database.close();
+
+    expect(removed.statusCode).toBe(200);
+    expect(removed.json()).toEqual({ ok: true, replayed: false });
+    expect(listed.json()).toEqual({ repositories: [] });
+    expect(ledger).toEqual({
+      state: "succeeded",
+      output_json: JSON.stringify({
+        previousStatus: "candidate",
+        repositorySnapshotId: null,
+        status: "rejected",
+      }),
+    });
+  });
+
+  it("does not allow the confirm command to reactivate a removed association", async () => {
+    const { app, paperId } = await createLegacyCandidatePaper({
+      async materialize() { return { commitSha: "a".repeat(40) }; },
+    });
+    const before = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+    const associationId = before.json().repositories[0].id as string;
+    await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/remove`,
+      headers: { "idempotency-key": "remove-before-confirm" },
+    });
+
+    const confirmed = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/confirm`,
+      headers: { "idempotency-key": "confirm-after-remove" },
+    });
+
+    expect(confirmed.statusCode).toBe(409);
+    expect(confirmed.json()).toEqual({ code: "repository-association-not-confirmable" });
+  });
+
+  it("reactivates a removed association only through manual add and ignores a delayed remove replay", async () => {
+    let finish!: (value: { commitSha: string }) => void;
+    const materialized = new Promise<{ commitSha: string }>((resolve) => { finish = resolve; });
+    const { app, paperId } = await createLegacyCandidatePaper({ materialize: async () => materialized });
+    const before = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+    const associationId = before.json().repositories[0].id as string;
+    await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/remove`,
+      headers: { "idempotency-key": "remove-before-readd" },
+    });
+
+    const added = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories`,
+      headers: { "idempotency-key": "readd-removed-repository" },
+      payload: { url: "https://github.com/owner/repository.git/" },
+    });
+    const delayedReplay = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/remove`,
+      headers: { "idempotency-key": "remove-before-readd" },
+    });
+    const listed = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+
+    expect(added.statusCode).toBe(202);
+    expect(delayedReplay.json()).toEqual({ ok: true, replayed: true });
+    expect(listed.json().repositories).toEqual([
+      expect.objectContaining({
+        id: associationId,
+        origin: "manual",
+        associationStatus: "confirmed",
+        materializationStatus: "running",
+      }),
+    ]);
+    finish({ commitSha: "a".repeat(40) });
+  });
+
+  it("reuses an in-flight materialization when a removed association is manually re-added", async () => {
+    const repository = await createBareRepository();
+    let finish!: () => void;
+    let calls = 0;
+    const continueMaterialization = new Promise<void>((resolve) => { finish = resolve; });
+    const adapter = new GitRepositoryAdapter({ "https://github.com/owner/repository": repository.bare });
+    const { app, paperId } = await createPaper({
+      async materialize(canonicalUrl, destination, expectedCommitSha) {
+        calls += 1;
+        await continueMaterialization;
+        return adapter.materialize(canonicalUrl, destination, expectedCommitSha);
+      },
+    });
+    const first = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories`,
+      headers: { "idempotency-key": "add-before-running-remove" },
+      payload: { url: "https://github.com/owner/repository" },
+    });
+    const associationId = first.json().association.id as string;
+    await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/remove`,
+      headers: { "idempotency-key": "remove-while-running" },
+    });
+
+    const readded = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories`,
+      headers: { "idempotency-key": "readd-while-running" },
+      payload: { url: "https://github.com/owner/repository" },
+    });
+    const running = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+
+    expect(readded.statusCode).toBe(200);
+    expect(readded.json().replayed).toBe(true);
+    expect(calls).toBe(1);
+    expect(running.json().repositories[0]).toEqual(expect.objectContaining({
+      associationStatus: "confirmed",
+      materializationStatus: "running",
+    }));
+
+    finish();
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const listed = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+      if (listed.json().repositories[0]?.materializationStatus === "ready") break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const ready = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+    expect(ready.json().repositories[0]).toEqual(expect.objectContaining({
+      materializationStatus: "ready",
+      commitSha: repository.commitSha,
+    }));
+  });
+
+  it("keeps an association removed when its in-flight materialization completes late", async () => {
+    const repository = await createBareRepository();
+    let finish!: () => void;
+    const continueMaterialization = new Promise<void>((resolve) => { finish = resolve; });
+    const adapter = new GitRepositoryAdapter({ "https://github.com/owner/repository": repository.bare });
+    const { app, paperId, layout } = await createPaper({
+      async materialize(canonicalUrl, destination, expectedCommitSha) {
+        await continueMaterialization;
+        return adapter.materialize(canonicalUrl, destination, expectedCommitSha);
+      },
+    });
+    const added = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories`,
+      headers: { "idempotency-key": "late-completion-add" },
+      payload: { url: "https://github.com/owner/repository" },
+    });
+    const associationId = added.json().association.id as string;
+    await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/remove`,
+      headers: { "idempotency-key": "late-completion-remove" },
+    });
+
+    finish();
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const database = new Database(layout.databasePath);
+      const state = database.prepare(`SELECT state FROM job_runs WHERE job_type='repository-materialization'
+        AND json_extract(input_json,'$.associationId')=? ORDER BY attempt DESC LIMIT 1`)
+        .get(associationId) as { state: string };
+      database.close();
+      if (state.state === "succeeded") break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const listed = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+    const database = new Database(layout.databasePath);
+    const stored = database.prepare(`SELECT status,repository_snapshot_id FROM paper_code_links WHERE id=?`)
+      .get(associationId) as { status: string; repository_snapshot_id: string | null };
+    const snapshotCount = (database.prepare(`SELECT count(*) count FROM repository_snapshots`)
+      .get() as { count: number }).count;
+    database.close();
+
+    expect(listed.json()).toEqual({ repositories: [] });
+    expect(stored).toEqual({ status: "rejected", repository_snapshot_id: null });
+    expect(snapshotCount).toBe(1);
+  });
+
   it("rejects an invalid manual URL without creating an association", async () => {
     const { app, paperId } = await createPaper();
 
@@ -262,9 +486,9 @@ describe("repository associations", () => {
     expect(rejected.json()).toEqual({ code: "paper-not-active" });
   });
 
-  it("records a Paper-explicit repository URL as an unmaterialized candidate", async () => {
+  it("does not associate a repository URL found in Paper text", async () => {
     let materializations = 0;
-    const { app, paperId } = await createDetectedPaper({
+    const { app, paperId } = await createPaperWithRepositoryUrl({
       async materialize() {
         materializations += 1;
         return { commitSha: "b".repeat(40) };
@@ -275,22 +499,14 @@ describe("repository associations", () => {
       url: `/api/papers/${paperId}/repositories`,
     });
 
-    expect(listed.json().repositories).toEqual([
-      expect.objectContaining({
-        canonicalUrl: "https://github.com/owner/repository",
-        origin: "detected",
-        associationStatus: "candidate",
-        materializationStatus: "not-started",
-        commitSha: null,
-      }),
-    ]);
+    expect(listed.json()).toEqual({ repositories: [] });
     expect(materializations).toBe(0);
   });
 
   it("confirms a detected candidate before materialization starts", async () => {
     let finish!: (value: { commitSha: string }) => void;
     const materialized = new Promise<{ commitSha: string }>((resolve) => { finish = resolve; });
-    const { app, paperId } = await createDetectedPaper({ materialize: async () => materialized });
+    const { app, paperId } = await createLegacyCandidatePaper({ materialize: async () => materialized });
     const before = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
     const associationId = before.json().repositories[0].id as string;
 
@@ -311,10 +527,40 @@ describe("repository associations", () => {
     finish({ commitSha: "c".repeat(40) });
   });
 
+  it("confirms a historical candidate after a prior materialization attempt", async () => {
+    let finish!: (value: { commitSha: string }) => void;
+    const materialized = new Promise<{ commitSha: string }>((resolve) => { finish = resolve; });
+    const { app, paperId, layout } = await createLegacyCandidatePaper({ materialize: async () => materialized });
+    const before = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+    const associationId = before.json().repositories[0].id as string;
+    const timestamp = "2026-07-23T00:00:00.000Z";
+    const database = new Database(layout.databasePath);
+    database.prepare(`INSERT INTO job_runs
+      (id,job_type,paper_id,state,progress,attempt,idempotency_key,input_json,queued_at,started_at,completed_at,heartbeat_at)
+      VALUES (?,'repository-materialization',?,'failed',1,1,?,?,?,?,?,?)`)
+      .run(`job:repository-materialization:${associationId}:1`, paperId, "historical-materialization-attempt",
+        JSON.stringify({ associationId }), timestamp, timestamp, timestamp, timestamp);
+    database.close();
+
+    const confirmed = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/confirm`,
+      headers: { "idempotency-key": "confirm-after-historical-attempt" },
+    });
+    const listed = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+
+    expect(confirmed.statusCode).toBe(202);
+    expect(listed.json().repositories[0]).toMatchObject({
+      associationStatus: "confirmed",
+      materializationStatus: "running",
+    });
+    finish({ commitSha: "c".repeat(40) });
+  });
+
   it("treats manual addition of a detected candidate as confirmation", async () => {
     let finish!: (value: { commitSha: string }) => void;
     const materialized = new Promise<{ commitSha: string }>((resolve) => { finish = resolve; });
-    const { app, paperId } = await createDetectedPaper({ materialize: async () => materialized });
+    const { app, paperId } = await createLegacyCandidatePaper({ materialize: async () => materialized });
 
     const added = await app.inject({
       method: "POST",
@@ -453,7 +699,7 @@ describe("repository associations", () => {
     });
   });
 
-  it("reuses an existing fixed snapshot when another Paper confirms a detected candidate", async () => {
+  it("reuses an existing fixed snapshot when another Paper manually adds the repository", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-shared-repository-"));
     const repository = await createBareRepository();
     const canonicalUrl = "https://github.com/owner/repository";
@@ -507,15 +753,11 @@ describe("repository associations", () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 
-    const secondCandidate = await app.inject({
-      method: "GET",
-      url: `/api/papers/${secondPaperId}/repositories`,
-    });
-    const secondAssociationId = secondCandidate.json().repositories[0].id as string;
     const secondAdd = await app.inject({
       method: "POST",
-      url: `/api/papers/${secondPaperId}/repositories/${encodeURIComponent(secondAssociationId)}/confirm`,
+      url: `/api/papers/${secondPaperId}/repositories`,
       headers: { "idempotency-key": "shared-repository-2" },
+      payload: { url: canonicalUrl },
     });
     const secondList = await app.inject({ method: "GET", url: `/api/papers/${secondPaperId}/repositories` });
 
@@ -542,15 +784,11 @@ describe("repository associations", () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     const thirdPaperId = thirdImport.json().paper.id as string;
-    const thirdCandidate = await app.inject({
-      method: "GET",
-      url: `/api/papers/${thirdPaperId}/repositories`,
-    });
-    const thirdAssociationId = thirdCandidate.json().repositories[0].id as string;
     const thirdConfirm = await app.inject({
       method: "POST",
-      url: `/api/papers/${thirdPaperId}/repositories/${encodeURIComponent(thirdAssociationId)}/confirm`,
+      url: `/api/papers/${thirdPaperId}/repositories`,
       headers: { "idempotency-key": "shared-repository-3" },
+      payload: { url: canonicalUrl },
     });
     let recovered: Record<string, unknown> | undefined;
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -567,10 +805,121 @@ describe("repository associations", () => {
     expect(materializations).toBe(2);
   });
 
+  it("prefers a removed association's own ready snapshot when manually reactivating it", async () => {
+    const repository = await createBareRepository();
+    const canonicalUrl = "https://github.com/owner/repository";
+    const git = new GitRepositoryAdapter({ [canonicalUrl]: repository.bare });
+    let materializations = 0;
+    const { app, paperId, layout } = await createPaper({
+      async materialize(url, destination, expectedCommitSha) {
+        materializations += 1;
+        return git.materialize(url, destination, expectedCommitSha);
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories`,
+      headers: { "idempotency-key": "own-snapshot-initial" },
+      payload: { url: canonicalUrl },
+    });
+    let association: Record<string, unknown> | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const listed = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+      association = listed.json().repositories[0];
+      if (association?.materializationStatus === "ready") break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    await writeFile(join(repository.working, "NEWER.md"), "# Newer own snapshot\n", "utf8");
+    await exec("git", ["-C", repository.working, "add", "."]);
+    await exec("git", ["-C", repository.working, "commit", "-m", "newer own snapshot"]);
+    await exec("git", ["-C", repository.working, "push", repository.bare,
+      `HEAD:refs/heads/${repository.branch}`]);
+    const ownPath = "own-newer";
+    const own = await git.materialize(canonicalUrl, join(layout.repositoryRoot, ownPath));
+    const ownSnapshotId = `repository-snapshot:${String(association!.repositoryId)}:${own.commitSha}`;
+    const database = new Database(layout.databasePath);
+    database.prepare(`INSERT INTO repository_snapshots
+      (id,code_repository_id,commit_sha,local_path,created_at) VALUES (?,?,?,?,?)`)
+      .run(ownSnapshotId, association!.repositoryId, own.commitSha, ownPath, "2026-07-23T01:00:00.000Z");
+    database.prepare("UPDATE paper_code_links SET repository_snapshot_id=? WHERE id=?")
+      .run(ownSnapshotId, association!.id);
+    database.close();
+    await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(String(association!.id))}/remove`,
+      headers: { "idempotency-key": "remove-own-snapshot" },
+    });
+
+    const readded = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories`,
+      headers: { "idempotency-key": "readd-own-snapshot" },
+      payload: { url: canonicalUrl },
+    });
+    const listed = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+
+    expect(readded.statusCode).toBe(200);
+    expect(listed.json().repositories[0]).toMatchObject({
+      origin: "manual",
+      associationStatus: "confirmed",
+      materializationStatus: "ready",
+      commitSha: own.commitSha,
+    });
+    expect(materializations).toBe(1);
+  });
+
+  it("does not reactivate a removed ready association when an old manual-add key is replayed", async () => {
+    const repository = await createBareRepository();
+    const canonicalUrl = "https://github.com/owner/repository";
+    const { app, paperId } = await createPaper(new GitRepositoryAdapter({ [canonicalUrl]: repository.bare }));
+    const added = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories`,
+      headers: { "idempotency-key": "ready-delayed-add-initial" },
+      payload: { url: canonicalUrl },
+    });
+    const associationId = added.json().association.id as string;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const listed = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+      if (listed.json().repositories[0]?.materializationStatus === "ready") break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/remove`,
+      headers: { "idempotency-key": "ready-delayed-add-remove-1" },
+    });
+    const readded = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories`,
+      headers: { "idempotency-key": "ready-delayed-readd" },
+      payload: { url: canonicalUrl },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/remove`,
+      headers: { "idempotency-key": "ready-delayed-add-remove-2" },
+    });
+
+    const delayedReplay = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories`,
+      headers: { "idempotency-key": "ready-delayed-readd" },
+      payload: { url: canonicalUrl },
+    });
+    const listed = await app.inject({ method: "GET", url: `/api/papers/${paperId}/repositories` });
+
+    expect(readded.statusCode).toBe(200);
+    expect(delayedReplay.statusCode).toBe(200);
+    expect(delayedReplay.json()).toMatchObject({ ok: true, replayed: true, association: null });
+    expect(listed.json()).toEqual({ repositories: [] });
+  });
+
   it("includes a ready association only in future frozen Conversation context", async () => {
     const repository = await createBareRepository();
     const canonicalUrl = "https://github.com/owner/repository";
-    const { app, paperId } = await createDetectedPaper(
+    const { app, paperId } = await createLegacyCandidatePaper(
       new GitRepositoryAdapter({ [canonicalUrl]: repository.bare }),
     );
     const before = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
@@ -587,16 +936,41 @@ describe("repository associations", () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     const after = await app.inject({ method: "POST", url: `/api/papers/${paperId}/conversations` });
+    await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/repositories/${encodeURIComponent(associationId)}/remove`,
+      headers: { "idempotency-key": "remove-after-freeze" },
+    });
+    const removed = await app.inject({
+      method: "POST",
+      url: `/api/papers/${paperId}/conversations`,
+      payload: { continuedFromConversationId: after.json().conversation.id },
+    });
+    const removedLineage = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${removed.json().conversation.id}/lineage`,
+    });
     const rereadBefore = await app.inject({
       method: "GET",
       url: `/api/conversations/${before.json().conversation.id}`,
+    });
+    const rereadAfter = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${after.json().conversation.id}`,
     });
 
     expect(before.json().contextSnapshot.repositorySnapshots).toEqual([]);
     expect(after.json().contextSnapshot.repositorySnapshots).toEqual([
       expect.objectContaining({ commitSha: repository.commitSha }),
     ]);
+    expect(removed.json().contextSnapshot.repositorySnapshots).toEqual([]);
     expect(rereadBefore.json().contextSnapshot.repositorySnapshots).toEqual([]);
+    expect(rereadAfter.json().contextSnapshot.repositorySnapshots).toEqual([
+      expect.objectContaining({ commitSha: repository.commitSha }),
+    ]);
+    expect(removedLineage.json().contextComparison.diff.repositories.removed).toEqual([
+      expect.objectContaining({ commitSha: repository.commitSha }),
+    ]);
   });
 
   it("fails closed when cached materialization is missing and recovers the same commit", async () => {

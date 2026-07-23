@@ -163,9 +163,10 @@ PaperCodeLink records:
 
 A manual repository root URL creates or reuses a confirmed PaperCodeLink immediately;
 its independent materialization Job then fixes the repository's current default-branch
-commit. A GitHub root URL explicitly present in Paper material creates a detected
-candidate and is neither cloned nor eligible for Conversation context until confirmed.
-Search, ranking, and fuzzy inference are outside this slice.
+commit. Paper ingestion does not detect or create repository associations. Historical
+detected candidates remain representable for compatibility, but only explicit user
+commands may confirm, remove, or replace their trust state. Search, ranking, and fuzzy
+inference are outside this slice.
 
 The existing `status` and `origin` fields express candidate/confirmed state and
 detected/manual origin, so no migration or parallel association table is required.
@@ -174,7 +175,10 @@ A URL establishes repository identity but not authority, so v1 records relation 
 live in durable `job_runs`; successful links point to immutable Repository Snapshots.
 Canonical repository identity makes duplicate adds idempotent. Shared ready snapshots
 are reused across Papers. Archived Papers keep associations readable but reject add,
-confirm, and retry commands. v1 does not remove or deactivate associations.
+confirm, retry, and remove commands. Remove sets the PaperCodeLink to `rejected` while
+preserving repository identity and its snapshot pointer; a durable synchronous
+`job_runs` record makes the command replay-safe. Re-adding the same canonical URL
+reactivates the link as `manual`. Rejected links do not enter future Context Snapshots.
 
 ## 6. Artifact lineage and evidence
 

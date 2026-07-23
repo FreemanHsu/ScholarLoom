@@ -257,7 +257,9 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     const result = store.addManualRepositoryAssociation(request.params.id, request.body.url, key) as
       { ok: false; code: string } | { ok: true; replayed: boolean; association: unknown };
     if (!result.ok) {
-      const status = result.code === "paper-not-found" ? 404 : result.code === "paper-not-active" ? 409 : 422;
+      const status = result.code === "paper-not-found" ? 404
+        : result.code === "paper-not-active" || result.code === "idempotency-key-conflict" ? 409
+          : result.code === "repository-runner-unavailable" ? 503 : 422;
       return reply.code(status).send({ code: result.code });
     }
     return reply.code(result.replayed ? 200 : 202).send(result);
@@ -272,7 +274,8 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
         { ok: false; code: string } | { ok: true; replayed: boolean; association: unknown };
       if (!result.ok) {
         const status = result.code === "paper-not-found" || result.code === "repository-association-not-found" ? 404
-          : result.code === "paper-not-active" ? 409 : 503;
+          : result.code === "paper-not-active" || result.code === "repository-association-not-confirmable" ||
+              result.code === "idempotency-key-conflict" ? 409 : 503;
         return reply.code(status).send({ code: result.code });
       }
       return reply.code(result.replayed ? 200 : 202).send(result);
@@ -291,6 +294,20 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
         return reply.code(status).send({ code: result.code });
       }
       return reply.code(result.replayed ? 200 : 202).send(result);
+    });
+
+  app.post<{ Params: { id: string; associationId: string } }>(
+    "/api/papers/:id/repositories/:associationId/remove",
+    async (request, reply) => {
+      const key = request.headers["idempotency-key"];
+      if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+      const result = store.removeRepositoryAssociation(request.params.id, request.params.associationId, key) as
+        { ok: false; code: string } | { ok: true; replayed: boolean };
+      if (!result.ok) {
+        const status = result.code === "paper-not-found" || result.code === "repository-association-not-found" ? 404 : 409;
+        return reply.code(status).send({ code: result.code });
+      }
+      return reply.code(200).send(result);
     });
 
   app.get<{ Params: { id: string } }>("/api/papers/:id", async (request, reply) => {

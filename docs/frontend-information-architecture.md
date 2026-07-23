@@ -179,13 +179,13 @@ Every Paper Workspace exposes repository association status even though v1 has n
 standalone Code mode. The UI must distinguish:
 
 - no association;
-- detected candidate awaiting confirmation;
+- historical detected candidate awaiting confirmation;
 - confirmed and materializing;
 - confirmed and available to future Discussion;
 - failed or interrupted with an explicit retry.
 
 “No explicit link found” must not be presented as proof that no open-source code
-exists. Search-derived candidates remain future work and cannot be cloned before review.
+exists. Ingestion-time detection and search-derived candidates are disabled.
 
 The persistent Paper header shows `代码仓库 · N` plus `待确认`, `处理中`, or `需处理`
 when relevant. Its URL-restorable drawer (`repositories=open`) contains the manual
@@ -193,11 +193,13 @@ GitHub root URL form and displays owner/repository, canonical URL, manual/detect
 origin, association state, pinned commit SHA, failure detail, and independent
 materialization progress. On narrow screens it becomes a full-width drawer.
 
-Manual association is semantically confirmed before materialization. A detected
-candidate requires the explicit confirm action. When available, the fixed Repository
-Snapshot is a source only for Conversations created afterward; the drawer explicitly
-states that old frozen Conversations do not change. Code never enters the v1 Entry
-Agent corpus.
+Manual association is semantically confirmed before materialization. Each visible
+association can be removed; candidate removal is direct, while confirmed or operational
+states require browser confirmation. Removed links disappear from the current list,
+retain historical identity and snapshot data, and may be restored only by manually
+adding the canonical URL again. When available, the fixed Repository Snapshot is a
+source only for Conversations created afterward; the drawer explicitly states that old
+frozen Conversations do not change. Code never enters the v1 Entry Agent corpus.
 
 ## 8. Import and background processing
 

@@ -29,12 +29,3 @@ export function parseGitHubRepositoryUrl(input: string): GitHubRepositoryIdentit
     return null;
   }
 }
-
-export function findGitHubRepositoryUrls(text: string): GitHubRepositoryIdentity[] {
-  const identities = new Map<string, GitHubRepositoryIdentity>();
-  for (const match of text.matchAll(/https:\/\/github\.com\/[^\s<>()\[\]{}"']+/gi)) {
-    const identity = parseGitHubRepositoryUrl(match[0].replace(/[.,;:!?]+$/, ""));
-    if (identity) identities.set(identity.canonicalUrl, identity);
-  }
-  return [...identities.values()];
-}

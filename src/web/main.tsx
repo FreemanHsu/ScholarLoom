@@ -43,7 +43,6 @@ type Workspace = {
   };
   processing: null | { jobId: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null };
   repositories: RepositoryAssociation[];
-  repository: null | { url: string; commitSha: string | null; status: "ready" | "failed"; files: Array<{ path: string }> };
 };
 type Proposal = { id: string; claim: string; oneClickEligible: boolean; sourceHandles: string[] };
 type ReviewProposal = {
@@ -608,6 +607,8 @@ function App() {
             `/api/papers/${encodeURIComponent(route.paperId)}/repositories/${encodeURIComponent(associationId)}/confirm`, "POST")}
           onRetryRepository={(associationId) => repositoryCommand(
             `/api/papers/${encodeURIComponent(route.paperId)}/repositories/${encodeURIComponent(associationId)}/retry`, "POST")}
+          onRemoveRepository={(associationId) => repositoryCommand(
+            `/api/papers/${encodeURIComponent(route.paperId)}/repositories/${encodeURIComponent(associationId)}/remove`, "POST")}
           onRetry={retryImport} onNavigate={navigate} />)}
   </div>;
 }
@@ -791,6 +792,7 @@ function PaperWorkspace(props: {
   onAddRepository(url: string): void;
   onConfirmRepository(associationId: string): void;
   onRetryRepository(associationId: string): void;
+  onRemoveRepository(associationId: string): void;
 }) {
   const { workspace, route } = props;
   const [showArchivedConversations, setShowArchivedConversations] = useState(false);
@@ -847,7 +849,8 @@ function PaperWorkspace(props: {
     </header>
     {route.repositoriesOpen && <RepositoryPanel repositories={workspace.repositories} busy={props.repositoryBusy}
       error={props.repositoryError} onClose={() => props.onNavigate(repositoryHref(false))}
-      onAdd={props.onAddRepository} onConfirm={props.onConfirmRepository} onRetry={props.onRetryRepository} />}
+      onAdd={props.onAddRepository} onConfirm={props.onConfirmRepository} onRetry={props.onRetryRepository}
+      onRemove={props.onRemoveRepository} />}
     {props.error && <div className="inline-alert">{props.error}</div>}
     <nav className="workspace-modes" aria-label="Paper workspace mode">
       {(["reading", "discussion", "knowledge"] as const).map((mode) => <a key={mode} href={modeHref(mode)}

@@ -21,6 +21,7 @@ export function RepositoryPanel(props: {
   onAdd(url: string): void;
   onConfirm(associationId: string): void;
   onRetry(associationId: string): void;
+  onRemove(associationId: string): void;
 }) {
   const [url, setUrl] = useState("");
   return <div className="repository-panel-backdrop" role="presentation" onMouseDown={(event) => {
@@ -58,6 +59,12 @@ export function RepositoryPanel(props: {
               <button type="button" disabled={props.busy} onClick={() => props.onConfirm(association.id)}>确认并固定</button>}
             {["failed", "interrupted", "materialization-missing"].includes(association.materializationStatus) &&
               <button type="button" disabled={props.busy} onClick={() => props.onRetry(association.id)}>重试物化</button>}
+            <button type="button" className="repository-remove" disabled={props.busy} onClick={() => {
+              if (association.associationStatus === "candidate" ||
+                window.confirm("移除这个 Paper 当前的 repository association？已冻结 Conversation 不会改变。")) {
+                props.onRemove(association.id);
+              }
+            }}>移除关联</button>
           </article>)}</div>}
     </section>
   </div>;

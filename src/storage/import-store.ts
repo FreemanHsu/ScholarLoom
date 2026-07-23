@@ -20,7 +20,6 @@ import { ContextSnapshotBuilder } from "./context-snapshot-builder.js";
 import { ConversationStore } from "./conversation-store.js";
 import { canonicalSectionHash } from "./canonical-section-hash.js";
 import { RepositoryAssociations } from "./repository-associations.js";
-import { findGitHubRepositoryUrls } from "../domain/github-repository-url.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -193,9 +192,6 @@ export class ImportStore {
         .run(document.numPages, now, storedExtractionArtifactId, extractionId);
     }
 
-    for (const repository of findGitHubRepositoryUrls(pages.map((page) => page.text).join("\n"))) {
-      this.#repositoryAssociations.detectPaperExplicit(input.paper.id, repository.canonicalUrl);
-    }
     const summaryId = `summary:${versionId}:r1`;
     const existingWrite = this.#database.prepare("SELECT phase,payload_json FROM knowledge_write_requests WHERE id=?")
       .get(`knowledge-write:${summaryId}`) as { phase: string; payload_json: string } | undefined;
@@ -409,14 +405,6 @@ export class ImportStore {
     const latestJob = this.#database.prepare(`SELECT id,state,progress,attempt,error_json FROM job_runs
       WHERE paper_id=? AND job_type='paper-import' ORDER BY attempt DESC,queued_at DESC,id DESC LIMIT 1`).get(id) as
       { id: string; state: string; progress: number; attempt: number; error_json: string | null } | undefined;
-    const repository = this.#database.prepare(`SELECT cr.canonical_url,rs.commit_sha,rs.id snapshot_id,pcl.status
-      FROM paper_code_links pcl JOIN code_repositories cr ON cr.id=pcl.code_repository_id
-      LEFT JOIN repository_snapshots rs ON rs.id=pcl.repository_snapshot_id WHERE pcl.paper_id=? ORDER BY pcl.created_at DESC LIMIT 1`).get(id) as
-      { canonical_url: string; commit_sha: string | null; snapshot_id: string | null; status: string } | undefined;
-    const files = repository?.snapshot_id ? (this.#database.prepare(`SELECT relative_path,start_line,end_line FROM code_elements
-      WHERE repository_snapshot_id=? ORDER BY relative_path`).all(repository.snapshot_id) as
-      Array<{ relative_path: string; start_line: number; end_line: number }>).map((file) =>
-        ({ path: file.relative_path, startLine: file.start_line, endLine: file.end_line })) : [];
     return {
       paper: { ...paper, versionId },
       pdf: extraction ? { pageCount: extraction.page_count } : null,
@@ -425,8 +413,6 @@ export class ImportStore {
       processing: latestJob ? { jobId: latestJob.id, state: requireImportJobState(latestJob.state), progress: latestJob.progress,
         attempt: latestJob.attempt, error: parseStoredImportError(latestJob.error_json) } : null,
       repositories: this.#repositoryAssociations.list(id),
-      repository: repository ? { url: repository.canonical_url, commitSha: repository.commit_sha,
-        status: repository.status === "confirmed" ? "ready" : "failed", files } : null,
     };
   }
 
@@ -450,6 +436,10 @@ export class ImportStore {
 
   retryRepositoryAssociation(paperId: string, associationId: string, idempotencyKey: string): unknown {
     return this.#repositoryAssociations.retry(paperId, associationId, idempotencyKey);
+  }
+
+  removeRepositoryAssociation(paperId: string, associationId: string, idempotencyKey: string): unknown {
+    return this.#repositoryAssociations.remove(paperId, associationId, idempotencyKey);
   }
 
   startConversation(paperId: string, continuedFromConversationId: string | null = null): unknown | null {

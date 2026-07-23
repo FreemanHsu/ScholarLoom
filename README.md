@@ -60,9 +60,10 @@ Discussion 已使用 Codex-native Agentic Evidence Retrieval。每次 Attempt �
 
 Paper header 的“代码仓库”入口显示当前 Repository Associations。用户可输入明确的
 GitHub repository root URL；系统规范化 identity、幂等复用现有关联，并异步固定当时的
-commit。论文中直接出现的 GitHub URL 只形成待确认 candidate，不会在确认前进入
-Conversation context。物化失败可单独 retry，不影响 Paper 阅读；已冻结 Conversation 的
-Repository Snapshots 永不追随 Paper 当前关联变化。
+commit。系统不从论文内容自动建立或建议 repository association。用户可移除当前关联，
+其历史 identity、snapshot 和审计记录仍保留；再次手动添加同一 URL 会恢复关联。
+物化失败可单独 retry，不影响 Paper 阅读；已冻结 Conversation 的 Repository Snapshots
+永不追随 Paper 当前关联变化。
 
 ## 本地运行
 

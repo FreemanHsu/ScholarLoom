@@ -141,8 +141,8 @@ getImport(importRequestId: string): ImportStatus
 retry(jobRunId: string, idempotencyKey: string): Promise<ImportReceipt>
 ```
 
-It hides Paper-reference classification, URL normalization, idempotency, Paper upsert, job graph creation, PDF and
-repository acquisition, extraction, Summary generation, activation rules, and error
+It hides Paper-reference classification, URL normalization, idempotency, Paper upsert, job graph creation, PDF
+acquisition, extraction, Summary generation, activation rules, and error
 recovery. Callers never invoke individual pipeline steps.
 
 Each failed or interrupted retry creates a new Job Run attempt and preserves the prior
@@ -183,12 +183,16 @@ list(paperId: string): RepositoryAssociationView[]
 addManual(input: { paperId: string; url: string; idempotencyKey: string }): RepositoryAssociationView
 confirm(input: { paperId: string; associationId: string; idempotencyKey: string }): RepositoryAssociationView
 retry(input: { paperId: string; associationId: string; idempotencyKey: string }): RepositoryAssociationView
+remove(input: { paperId: string; associationId: string; idempotencyKey: string }): void
 ```
 
 This deep module owns strict GitHub root URL parsing, canonical identity, Paper-scoped
-candidate/confirmed lifecycle, duplicate suppression, durable materialization Job
-attempts, snapshot reuse, and read-model assembly. `ImportStore` remains a compatibility
-facade and delegates association behavior rather than duplicating it.
+candidate/confirmed/rejected lifecycle, duplicate suppression, durable materialization
+Job attempts, replay-safe synchronous add/confirm/remove ledgers, snapshot reuse, and read-model
+assembly. Import does not detect or create repository associations. Historical
+candidates remain compatible; only a manual add can reactivate a rejected link.
+`ImportStore` remains a compatibility facade and delegates association behavior rather
+than duplicating it.
 
 The Job freezes an expected commit when repairing a missing local cache. Completion
 uses a running-attempt compare-and-set so an old process cannot overwrite a newer
@@ -430,6 +434,7 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | POST | `/api/papers/:id/repositories` | Idempotently add and confirm a manual GitHub root URL |
 | POST | `/api/papers/:id/repositories/:associationId/confirm` | Confirm a detected candidate and start materialization |
 | POST | `/api/papers/:id/repositories/:associationId/retry` | Create a new durable materialization attempt |
+| POST | `/api/papers/:id/repositories/:associationId/remove` | Reject and hide the current association while preserving history |
 | GET | `/api/paper-versions/:id/pdf` | Stream the accepted PDF asset |
 | GET/POST | `/api/papers/:id/conversations` | List or start frozen Conversations |
 | GET | `/api/conversations/:id` | Restore Messages, attempts, citations, and context |

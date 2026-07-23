@@ -31,7 +31,7 @@ describe("RepositoryPanel", () => {
         failureReason: "fixture unavailable",
       },
     ]} busy={false} error={null} onClose={() => undefined} onAdd={() => undefined}
-      onConfirm={() => undefined} onRetry={() => undefined} />);
+      onConfirm={() => undefined} onRetry={() => undefined} onRemove={() => undefined} />);
 
     expect(html).toContain("owner/ready");
     expect(html).toContain("https://github.com/owner/ready");
@@ -41,5 +41,6 @@ describe("RepositoryPanel", () => {
     expect(html).toContain("论文检测");
     expect(html).toContain("fixture unavailable");
     expect(html).toContain("重试物化");
+    expect(html.match(/移除关联/g)).toHaveLength(2);
   });
 });

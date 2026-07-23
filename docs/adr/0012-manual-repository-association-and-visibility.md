@@ -19,17 +19,26 @@ repository root URL command. URLs are accepted only for exact
 normalize to a lowercase canonical identity. Nested routes, alternate hosts,
 credentials, ports, query strings, and fragments are rejected.
 
-Manual add immediately creates or reuses a confirmed association. A root URL detected
-in Paper material creates only a candidate and requires explicit confirmation.
-Confirmation starts a durable repository-materialization Job. The association remains
-readable while that independent Job is running or failed, and retry creates a new
-auditable attempt. Existing fixed snapshots are reused across Papers; missing restored
-cache fails closed and can only be recovered at the recorded commit.
+Manual add immediately creates or reuses a confirmed association. Automatic repository
+detection is disabled: importing Paper text does not create a candidate, association,
+or materialization Job. Historical candidates remain readable and may still be
+confirmed or removed, but no new ingestion path creates them. Confirmation or manual
+add starts a durable repository-materialization Job. The association remains readable
+while that independent Job is running or failed, and retry creates a new auditable
+attempt. Existing fixed snapshots are reused across Papers; missing restored cache
+fails closed and can only be recovered at the recorded commit.
 
 The existing `code_repositories`, `paper_code_links`, `repository_snapshots`, and
-`job_runs` tables express this lifecycle, so no migration is added. v1 does not support
-removing or deactivating an association and does not add GitHub search, ranking,
-multi-host support, branch selection, or code execution.
+`job_runs` tables express this lifecycle, so no migration is added. Remove changes the
+PaperCodeLink status to `rejected`, preserves its Repository Snapshot pointer, and
+writes a synchronous succeeded `repository-association-remove` ledger entry in the
+same transaction. Replaying that idempotency key never re-evaluates current state, so
+a delayed replay cannot remove a later manual re-add. Only manual add can reactivate a
+rejected link, changing its origin to `manual`; no removed-items UI is provided.
+Ready-snapshot add, re-add, and confirm commands also write synchronous succeeded
+ledgers, so their delayed replays cannot revive an association removed afterward.
+GitHub search, ranking, multi-host support, branch selection, and code execution remain
+out of scope.
 
 Repository attempts use the application's existing background-task dispatch seam while
 `job_runs` remains their durable authority. This slice does not create a generic task
@@ -43,8 +52,9 @@ Archived Papers expose their association read model but reject association comma
 ## Consequences
 
 - Repository identity and trust become explicit user-inspectable state.
-- A detected URL cannot silently enter reliable Agent context.
+- Paper content cannot silently create repository state or enter reliable Agent context.
 - Materialization failure does not damage Paper reading or existing associations.
 - Snapshot restore remains truthful even though repository cache is excluded: missing
   materialization is visible and exact-commit recovery is explicit.
-- Removing associations and retaining a lifecycle tombstone require a future design.
+- Removal is recoverable through the same canonical manual add without mutating frozen
+  Conversation snapshots.
