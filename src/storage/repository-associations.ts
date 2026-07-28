@@ -19,6 +19,7 @@ export type RepositoryAssociationView = {
   associationStatus: string;
   materializationStatus: string;
   commitSha: string | null;
+  materializedPath: string | null;
   failureReason: string | null;
 };
 
@@ -86,6 +87,7 @@ export class RepositoryAssociations {
         materializationStatus: materializationPresent ? "ready"
           : activeOrFailedJob ?? (row.commit_sha ? "materialization-missing" : "not-started"),
         commitSha: row.commit_sha,
+        materializedPath: row.local_path ? `cache/repositories/${row.local_path}` : null,
         failureReason: failureReason ?? (row.commit_sha && !materializationPresent
           ? "固定 Repository Snapshot 的本地物化缺失。" : null),
       };

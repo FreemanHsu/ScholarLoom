@@ -104,7 +104,7 @@ function App() {
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  const [url, setUrl] = useState("https://arxiv.org/abs/2401.12345v2");
+  const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<ImportJobState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -114,7 +114,7 @@ function App() {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<string | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
-  const [entryQuestion, setEntryQuestion] = useState("fixture 可追溯证据");
+  const [entryQuestion, setEntryQuestion] = useState("");
   const [entryAnswer, setEntryAnswer] = useState<EntryAnswer | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);

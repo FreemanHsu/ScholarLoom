@@ -10,6 +10,7 @@ export type RepositoryAssociation = {
   associationStatus: string;
   materializationStatus: string;
   commitSha: string | null;
+  materializedPath: string | null;
   failureReason: string | null;
 };
 
@@ -52,6 +53,7 @@ export function RepositoryPanel(props: {
             <dl>
               <dt>关联</dt><dd>{association.associationStatus === "candidate" ? "待确认" : "已确认"}</dd>
               <dt>物化</dt><dd>{materializationLabel(association.materializationStatus)}</dd>
+              <dt>本地路径</dt><dd><code>{association.materializedPath ?? "物化完成后生成"}</code></dd>
               <dt>固定版本</dt><dd><code>{association.commitSha?.slice(0, 12) ?? "尚未固定"}</code></dd>
             </dl>
             {association.failureReason && <p className="repository-failure">失败原因：{association.failureReason}</p>}

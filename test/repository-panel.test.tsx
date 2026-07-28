@@ -16,6 +16,7 @@ describe("RepositoryPanel", () => {
         associationStatus: "confirmed",
         materializationStatus: "ready",
         commitSha: "a".repeat(40),
+        materializedPath: "cache/repositories/0123456789abcdef",
         failureReason: null,
       },
       {
@@ -28,6 +29,7 @@ describe("RepositoryPanel", () => {
         associationStatus: "confirmed",
         materializationStatus: "failed",
         commitSha: null,
+        materializedPath: null,
         failureReason: "fixture unavailable",
       },
     ]} busy={false} error={null} onClose={() => undefined} onAdd={() => undefined}
@@ -38,6 +40,9 @@ describe("RepositoryPanel", () => {
     expect(html).toContain("手动添加");
     expect(html).toContain("固定版本");
     expect(html).toContain("aaaaaaaaaaaa");
+    expect(html).toContain("本地路径");
+    expect(html).toContain("cache/repositories/0123456789abcdef");
+    expect(html).toContain("物化完成后生成");
     expect(html).toContain("论文检测");
     expect(html).toContain("fixture unavailable");
     expect(html).toContain("重试物化");

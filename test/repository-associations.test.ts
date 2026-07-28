@@ -407,6 +407,7 @@ describe("repository associations", () => {
       canonicalUrl,
       materializationStatus: "ready",
       commitSha: repository.commitSha,
+      materializedPath: expect.stringMatching(/^cache\/repositories\/[a-f0-9]{16}$/),
       failureReason: null,
     });
   });
