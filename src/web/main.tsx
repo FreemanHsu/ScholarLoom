@@ -839,8 +839,10 @@ function PaperWorkspace(props: {
     : false;
   return <main className="app workspace">
     <header className="topbar"><a className="ghost" href="/papers" onClick={(event) => { event.preventDefault(); props.onNavigate("/papers"); }}>← 论文库</a>
-      <div><span className="eyebrow">PAPER WORKSPACE</span><h1>{workspace.paper.title}</h1>
-        <p className="paper-metadata">{workspace.paper.authors.join(", ")} · {workspace.paper.year}</p></div>
+      <div className="workspace-paper-identity"><span className="eyebrow">PAPER WORKSPACE</span>
+        <h1 title={workspace.paper.title}>{workspace.paper.title}</h1>
+        <p className="paper-metadata" title={`${workspace.paper.authors.join(", ")} · ${workspace.paper.year}`}>
+          {workspace.paper.authors.join(", ")} · {workspace.paper.year}</p></div>
       <div className="workspace-badges"><span className="version">{workspace.paper.sourceType === "arxiv" ? `arXiv v${workspace.paper.version}` : "公开 PDF"}</span>
         <a className="source-link" href={workspace.paper.sourceUrl} target="_blank" rel="noopener noreferrer">打开来源</a>
         <button type="button" className="code-status repository-summary"
