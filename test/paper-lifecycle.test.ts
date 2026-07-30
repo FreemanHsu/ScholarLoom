@@ -135,7 +135,9 @@ describe("paper ingestion lifecycle", () => {
         async runEntry(context) {
           expect(context.sources).toHaveLength(1);
           expect(context.sources.map((source) => source.body).join(" ")).not.toContain("WORKING_ONLY_SENTINEL");
-          return { answer: "已确认结论与 active Summary 都支持可追溯阅读。", sourceHandles: context.sources.map((source) => source.handle), uncertainty: null };
+          return { answerStatus: "answered" as const,
+            answer: "已确认结论与 active Summary 都支持可追溯阅读。",
+            sourceHandles: context.sources.map((source) => source.handle), uncertainty: null };
         },
       },
     });

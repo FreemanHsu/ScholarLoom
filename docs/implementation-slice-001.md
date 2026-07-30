@@ -166,9 +166,9 @@ restart, retry safely, and complete the same single Paper without duplicate enti
 
 The slice defines separate JSON Schemas for:
 
-- `paper-summary`: structured sections, Key Claims, Evidence references;
-- `paper-chat`: answer blocks, citations, proposed Takeaways/Insights;
-- `entry-answer`: answer, curated source references, uncertainty.
+- `paper-summary`: canonical structured sections, evidence-only Key Claims, Evidence references;
+- `paper-chat`: answer blocks and runtime-allowlisted citations; Takeaway Selection is independent;
+- `entry-answer`: answer status, answer, curated source references, uncertainty.
 
 Codex output never contains database IDs it invented. Context manifests provide
 opaque allowed source handles; the application resolves and validates those handles

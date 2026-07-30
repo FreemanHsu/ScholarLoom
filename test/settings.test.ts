@@ -45,7 +45,7 @@ describe("read-only Settings", () => {
       loadedAt: "2026-07-30T08:05:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v1",
+        configurationVersion: "agent-configuration.v2",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: layout.root,
         codex: {
@@ -225,7 +225,7 @@ describe("read-only Settings", () => {
         model: "sol",
         reasoningEffort: "high",
         codexVersion: "0.145.0",
-        configurationVersion: "agent-configuration.v1",
+        configurationVersion: "agent-configuration.v2",
       });
     await app.close();
   });

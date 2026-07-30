@@ -441,11 +441,17 @@ export function validateSelection(selection: DistillationSelection, manifest: Fr
   if (candidate.evidenceRationale.trim().length < 10 || candidate.evidenceRationale.length > 2000 ||
       candidate.selectionRationale.trim().length < 10 || candidate.selectionRationale.length > 1200 ||
       (candidate.caveat !== null && candidate.caveat.length > 1000)) throw new Error("takeaway-lint-field-bounds");
+  if (candidate.epistemicStatus === "hypothesis" && !candidate.caveat?.trim()) {
+    throw new Error("takeaway-lint-hypothesis-caveat-required");
+  }
   const allowedReceipts = new Set(manifest.receipts.map((receipt) => receipt.id));
   if (candidate.receiptIds.length === 0 || new Set(candidate.receiptIds).size !== candidate.receiptIds.length ||
       candidate.receiptIds.some((id) => !allowedReceipts.has(id))) throw new Error("takeaway-lint-receipt-ownership");
   const allowedDuplicates = new Set(manifest.confirmedTakeaways.map((item) => item.revisionId));
-  if (candidate.duplicateHints.some((id) => !allowedDuplicates.has(id))) throw new Error("takeaway-lint-duplicate-ownership");
+  if (new Set(candidate.duplicateHints).size !== candidate.duplicateHints.length ||
+      candidate.duplicateHints.some((id) => !allowedDuplicates.has(id))) {
+    throw new Error("takeaway-lint-duplicate-ownership");
+  }
   return { decision: "candidate", candidate: { ...candidate, claim,
     evidenceRationale: candidate.evidenceRationale.trim(),
     caveat: candidate.caveat?.trim() || null,

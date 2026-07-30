@@ -26,6 +26,11 @@ import type {
   AgentExecutionMetadataProvider,
   AgentTaskKind,
 } from "../agent/agent-configuration.js";
+import {
+  validateChatOutput,
+  validateEntryOutput,
+  type EntryAnswerStatus,
+} from "../agent/output-contracts.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -63,7 +68,12 @@ export type ChatSource = {
   text: string;
   locator: string;
 };
-export type EntryResult = { answer: string; sourceHandles: string[]; uncertainty: string | null };
+export type EntryResult = {
+  answerStatus: EntryAnswerStatus;
+  answer: string;
+  sourceHandles: string[];
+  uncertainty: string | null;
+};
 export type TakeawayReviewInput = {
   edited?: Partial<{ title: string; claim: string; evidenceRationale: string; caveat: string | null;
     receiptIds: string[]; epistemicStatus: EpistemicStatus }>;
@@ -585,9 +595,8 @@ export class ImportStore {
     let output: ChatResult;
     try {
       output = await runChat(chatContext);
-      if (!output.answer || output.citations.some((citation) => !sources.some((source) => source.handle === citation.sourceHandle))) {
-        throw new Error("codex-output-invalid");
-      }
+      try { validateChatOutput(output, sources); }
+      catch { throw new Error("codex-output-invalid"); }
     } catch (error) {
       const failedAt = new Date().toISOString();
       this.#database.transaction(() => {
@@ -909,7 +918,8 @@ export class ImportStore {
     }));
     const entryContext = { question, sources };
     const output = await runEntry(entryContext);
-    if (!output.answer || output.sourceHandles.some((handle) => !sources.some((source) => source.handle === handle))) throw new Error("codex-output-invalid");
+    try { validateEntryOutput(output, sources.map((source) => source.handle)); }
+    catch { throw new Error("codex-output-invalid"); }
     this.#recordAgentRun("entry-answer", null, null, entryContext, output, null);
     const selected = output.sourceHandles.map((handle) => sources.find((source) => source.handle === handle)!).map(({ body: _body, handle, ...source }) => {
       const paperId = source.sourceType === "summary"
@@ -920,7 +930,7 @@ export class ImportStore {
     const state = this.#database.prepare("SELECT last_successful_at FROM projection_state WHERE projection='global-curated'").get() as
       { last_successful_at: string | null };
     const pending = (this.#database.prepare("SELECT count(*) count FROM index_outbox WHERE projection='global-curated' AND state='pending'").get() as { count: number }).count;
-    return { answer: output.answer, uncertainty: output.uncertainty, sources: selected,
+    return { answerStatus: output.answerStatus, answer: output.answer, uncertainty: output.uncertainty, sources: selected,
       projection: { stale: pending > 0, lastSuccessfulAt: state.last_successful_at,
         ...(pending > 0 ? { notice: "知识索引更新中" } : {}) } };
   }

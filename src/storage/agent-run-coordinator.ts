@@ -7,7 +7,7 @@ import {
   getAgentConfiguration,
   type AgentExecutionMetadataProvider,
 } from "../agent/agent-configuration.js";
-import { AnswerGroundingGate } from "./answer-grounding-gate.js";
+import { AnswerGroundingGate, type GroundedReceipt } from "./answer-grounding-gate.js";
 import { EvidenceWorkspaceBuilder } from "./evidence-workspace-builder.js";
 import { FrozenPdfSourceResolver } from "./frozen-pdf-source-resolver.js";
 import type { StorageLayout } from "./layout.js";
@@ -249,13 +249,15 @@ export class AgentRunCoordinator {
         workspaceRoot: workspace.root, question: input.content, signal: controller.signal,
         onActivity: (activity) => this.#activity(attempt.id, attempt.run_epoch, activity) });
       this.#assertVisualInfraHealthy(attempt.id, attempt.run_epoch);
-      if (!result.answer) throw new Error("codex-output-invalid");
+      if (!result.answer.trim() || result.answer.length > 12_000 || result.citations.length > 20) {
+        throw new Error("codex-output-invalid");
+      }
       const gate = AnswerGroundingGate.open(workspace.root, this.#database, input.contextSnapshotId,
         { attemptId: attempt.id, runEpoch: attempt.run_epoch, layout: this.layout });
       let receipts: ReturnType<AnswerGroundingGate["verify"]>;
       try { receipts = gate.verify(result.citations); }
       catch { receipts = gate.repair(result.citations); }
-      if (result.groundingStatus === "answered" && receipts.length === 0) throw new Error("grounding-required");
+      validateGroundingReceiptContract(result.groundingStatus, receipts);
       this.#commitSuccess(attempt, result.answer, result.groundingStatus, receipts, result.usage,
         this.#now().getTime() - started);
     } catch (error) {
@@ -372,4 +374,23 @@ export class AgentRunCoordinator {
       }
     })();
   }
+}
+
+export function validateGroundingReceiptContract(status: string, receipts: GroundedReceipt[]): void {
+  if (status === "answered" || status === "partially_answered") {
+    if (receipts.length === 0) throw new Error("grounding-required");
+    return;
+  }
+  if (status === "insufficient_evidence") {
+    if (receipts.length !== 0) throw new Error("grounding-status-inconsistent");
+    return;
+  }
+  if (status === "conflicting_evidence") {
+    const locations = new Set(receipts.map((receipt) => receipt.evidenceKind === "visual"
+      ? JSON.stringify(["visual", receipt.sourceId, receipt.page, receipt.imageHash])
+      : JSON.stringify(["text", receipt.workspacePath, receipt.locator.lineStart, receipt.locator.lineEnd])));
+    if (receipts.length < 2 || locations.size < 2) throw new Error("grounding-conflict-required");
+    return;
+  }
+  throw new Error("grounding-status-invalid");
 }

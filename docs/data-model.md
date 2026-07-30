@@ -246,7 +246,10 @@ Paper Summary is based only on a Paper Version and follows the versioned
 - derived Summary Sections matching the Skill structure;
 - selected Summary Claims with claim voice and Evidence Anchors.
 
-Claim voice is one of `authors-claim`, `paper-evidence`, or `agent-assessment`.
+Newly generated Claim voice is `authors-claim` or `paper-evidence`. Agent assessments
+remain explicitly labeled prose in the Summary body. The persisted
+`agent-assessment` value remains readable for backward compatibility and is not
+migrated.
 Sections and Claims are rebuildable from canonical Markdown and cannot become a
 second drifting copy of the Summary.
 

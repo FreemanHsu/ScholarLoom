@@ -12,7 +12,7 @@ describe("SettingsPage", () => {
       loadedAt: "2026-07-30T08:00:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v1",
+        configurationVersion: "agent-configuration.v2",
         startedAt: "2026-07-30T08:00:00.000Z",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: "$HOME/ScholarLoomData",
@@ -88,7 +88,7 @@ describe("SettingsPage", () => {
     expect(html).toContain("0.1.0");
     expect(html).toContain("Takeaway Quality V2");
     expect(html).toContain("vault-markdown-yaml");
-    expect(html).toContain("agent-configuration.v1");
+    expect(html).toContain("agent-configuration.v2");
     expect(html).toContain("job:summary");
     expect(html).toContain("环境变量最小化");
   });

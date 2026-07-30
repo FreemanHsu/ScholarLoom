@@ -53,6 +53,11 @@ application-owned Prompt、Skill、JSON Schema 与有界系统参数，不展示
 论文/Vault 内容、secret 或环境变量。Codex CLI `0.144.6` 是最低支持版本；更高版本在
 全部 capability canary 通过后自动接收，否则 fail closed。
 
+当前 `agent-configuration.v2` 已按五条独立 Fable 评审轨道收紧 Prompt 与输出契约：
+Summary 使用 canonical sections，Agentic Evidence 在 verified Receipts 后复核状态，
+Entry Agent 返回机器可读 evidence status，Takeaway v2 强化 hypothesis/atomicity
+纪律，legacy Paper Chat 使用 runtime handle/locator allowlist。
+
 Paper Workspace 现包含可恢复的 Reading、Discussion 与 Knowledge 模式。
 Conversation 使用稳定 URL 和不可变 Context Snapshot；Message、Agent attempt、
 引用与 Takeaway Proposal 可在刷新或重启后恢复。失败和中断只允许显式 retry，

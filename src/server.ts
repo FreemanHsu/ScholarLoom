@@ -151,7 +151,8 @@ try {
             { sourceHandle: summary.handle, locator: summary.locator }],
           };
         },
-        async runEntry(context) { return { answer: "已确认结论与 active Summary 支持可追溯阅读。",
+        async runEntry(context) { return { answerStatus: "answered" as const,
+          answer: "已确认结论与 active Summary 支持可追溯阅读。",
           sourceHandles: context.sources.map((source) => source.handle), uncertainty: null }; },
       },
       agenticEvidenceRunner: fixtureAgenticRunner(layout), takeawaySelectionRunner: fixtureSelectionRunner,

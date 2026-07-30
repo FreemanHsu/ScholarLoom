@@ -66,9 +66,15 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { prompt += chunk; });
 process.stdin.on("end", () => {
   if (!prompt.includes("claims[].sourceHandle 必须逐字等于一个 Allowed context manifest handle")) process.exit(42);
-  if (!prompt.includes("没有直接页码证据的 Agent 评价不要放入 claims")) process.exit(43);
+  if (!prompt.includes("所有 Agent 评价都不要放入 claims")) process.exit(43);
   fs.writeFileSync(outputPath, JSON.stringify({
-    sections: [{ key: "overview", title: "概述", body: "正文 [pdf-page:1] [pdf-page:2]" }],
+    sections: [
+      { key: "overview", title: "概述", body: "正文 [pdf-page:1]" },
+      { key: "core-ideas", title: "核心想法", body: "动机 [pdf-page:1]" },
+      { key: "technical-implementation", title: "方法", body: "实现 [pdf-page:1]" },
+      { key: "experiments-analysis", title: "实验", body: "结果 [pdf-page:2]" },
+      { key: "summary-thoughts", title: "总结", body: "总结 [pdf-page:2]" }
+    ],
     claims: [{ voice: "paper-evidence", claim: "有证据的结论", sourceHandle: "pdf-page:1" }],
     readStatus: "read"
   }));

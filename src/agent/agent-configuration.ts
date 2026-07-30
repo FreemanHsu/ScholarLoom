@@ -1,4 +1,4 @@
-export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v1";
+export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v2";
 export const MINIMUM_CODEX_VERSION = "0.144.6";
 
 export type AgentTaskKind =

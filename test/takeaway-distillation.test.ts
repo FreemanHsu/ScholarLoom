@@ -412,5 +412,11 @@ describe("Takeaway Quality V2 distillation", () => {
       caveat: null, receiptIds: ["receipt:invented"], selectionRationale: "该候选用于验证 provenance fail closed。",
       duplicateHints: [],
     } }, manifest)).toThrow(/takeaway-lint-receipt-ownership/);
+    expect(() => validateSelection({ decision: "candidate", candidate: {
+      kind: "reuse-implication", claim: "Fixture Paper 的 source-freezing pattern 可能适用于其他异步知识系统，但仍需要新的系统实验验证。",
+      epistemicStatus: "hypothesis", evidenceRationale: "Receipt 只说明该假设的 provenance 与设计动机。",
+      caveat: null, receiptIds: ["receipt:1"], selectionRationale: "该候选是一条需要未来数据验证的单一假设。",
+      duplicateHints: [],
+    } }, manifest)).toThrow(/takeaway-lint-hypothesis-caveat-required/);
   });
 });

@@ -106,7 +106,7 @@ export const takeawaySelectionSchema = {
                 claim: { type: "string", minLength: 40, maxLength: 2000 },
                 epistemicStatus: { enum: EPISTEMIC_STATUSES },
                 evidenceRationale: { type: "string", minLength: 10, maxLength: 2000 },
-                caveat: { type: ["string", "null"], maxLength: 1000 },
+                caveat: { type: ["string", "null"], minLength: 1, maxLength: 1000 },
                 receiptIds: { type: "array", minItems: 1, maxItems: 20, uniqueItems: true,
                   items: { type: "string", minLength: 1 } },
                 selectionRationale: { type: "string", minLength: 10, maxLength: 1200 },

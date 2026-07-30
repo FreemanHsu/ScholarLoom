@@ -18,7 +18,14 @@ import {
   type CodexRuntimeStatus,
 } from "../agent/agent-configuration.js";
 import { renderAgentPrompt } from "../agent/agent-prompts.js";
-import { agenticEvidenceSchema, chatSchema, createSummarySchema, entrySchema } from "../agent/output-contracts.js";
+import {
+  agenticEvidenceSchema,
+  createChatSchema,
+  createEntrySchema,
+  createSummarySchema,
+  validateEntryOutput,
+  validateSummaryOutput,
+} from "../agent/output-contracts.js";
 import { takeawaySelectionSchema, type TakeawaySelectionRunner } from "../agent/takeaway-distillation.js";
 import type { StorageLayout } from "../storage/layout.js";
 
@@ -62,16 +69,23 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
     };
   }
 
-  runSummary(context: Parameters<CodexRunner["runSummary"]>[0]): Promise<SummaryResult> {
+  async runSummary(context: Parameters<CodexRunner["runSummary"]>[0]): Promise<SummaryResult> {
     const allowedHandles = context.pages.map((page) => page.handle);
-    return this.#run("paper-summary", createSummarySchema(allowedHandles),
+    const result = await this.#run<SummaryResult>("paper-summary", createSummarySchema(allowedHandles),
       renderAgentPrompt("paper-summary", { context, skillContent: this.#skill }));
+    validateSummaryOutput(result, allowedHandles);
+    return result;
   }
   runChat(context: Parameters<NonNullable<CodexRunner["runChat"]>>[0]): Promise<ChatResult> {
-    return this.#run("paper-chat", chatSchema, renderAgentPrompt("paper-chat", { context }));
+    return this.#run("paper-chat", createChatSchema(context.sources.map((source) => source.handle)),
+      renderAgentPrompt("paper-chat", { context }));
   }
-  runEntry(context: Parameters<NonNullable<CodexRunner["runEntry"]>>[0]): Promise<EntryResult> {
-    return this.#run("entry-answer", entrySchema, renderAgentPrompt("entry-answer", { context }));
+  async runEntry(context: Parameters<NonNullable<CodexRunner["runEntry"]>>[0]): Promise<EntryResult> {
+    const allowedHandles = context.sources.map((source) => source.handle);
+    const result = await this.#run<EntryResult>("entry-answer", createEntrySchema(allowedHandles),
+      renderAgentPrompt("entry-answer", { context }));
+    validateEntryOutput(result, allowedHandles);
+    return result;
   }
 
   select(input: Parameters<TakeawaySelectionRunner["select"]>[0]): ReturnType<TakeawaySelectionRunner["select"]> {
