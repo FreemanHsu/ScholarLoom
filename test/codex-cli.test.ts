@@ -28,17 +28,36 @@ exit 1
     } finally { process.env.PATH = originalPath; }
   });
 
-  it("constrains every Key Claim to one exact handle from the context manifest", async () => {
+  it("accepts a newer CLI for Paper Summary only after its structured launch canary passes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-codex-"));
     const executable = join(directory, "codex");
     await writeFile(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
+if (args[0] === "--version") { process.stdout.write("codex-cli 0.145.0\\n"); process.exit(0); }
+if (args[0] === "exec" && args.includes("--help")) {
+  process.stdout.write("--strict-config --ephemeral --skip-git-repo-check --ignore-user-config --ignore-rules --json --cd --model --output-schema --output-last-message");
+  process.exit(0);
+}
+if (args[0] === "sandbox") {
+  const configs = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
+  if (!args.includes("-P") || !args.includes("scholarloom-structured")) process.exit(38);
+  if (!configs.includes('default_permissions="scholarloom-structured"')) process.exit(37);
+  if (!configs.some((value) => value.includes("permissions.scholarloom-structured=") &&
+    value.includes('":root"="deny"') && value.includes('network={enabled=false}'))) process.exit(36);
+  process.exit(0);
+}
 	const schemaPath = args[args.indexOf("--output-schema") + 1];
 	const outputPath = args[args.indexOf("--output-last-message") + 1];
+	if (!args.includes("--strict-config") || args.includes("--sandbox")) process.exit(35);
+	if (!fs.existsSync(args[args.indexOf("--cd") + 1] + "/CANARY")) process.exit(33);
 	if (args[args.indexOf("--model") + 1] !== "sol") process.exit(39);
 	const configValues = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
 	if (!configValues.includes('model_reasoning_effort="high"')) process.exit(40);
+	if (!configValues.includes('default_permissions="scholarloom-structured"')) process.exit(34);
+	if (!configValues.includes('shell_environment_policy.inherit="core"')) process.exit(32);
+	if (!configValues.some((value) => value.includes("shell_environment_policy.exclude=") &&
+	  value.includes("*PROXY*") && value.includes("*TOKEN*"))) process.exit(31);
 	const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
 const allowed = schema.properties.claims.items.properties.sourceHandle.enum;
 if (JSON.stringify(allowed) !== JSON.stringify(["pdf-page:1", "pdf-page:2"])) process.exit(41);
@@ -59,7 +78,8 @@ process.stdin.on("end", () => {
     const originalPath = process.env.PATH;
     process.env.PATH = `${directory}:${originalPath ?? ""}`;
     try {
-      const result = await new CodexCliRunner().runSummary({
+      const runner = new CodexCliRunner();
+      const result = await runner.runSummary({
         paperId: "paper:fixture",
         title: "Fixture",
         pages: [
@@ -70,6 +90,15 @@ process.stdin.on("end", () => {
       expect(result.claims).toEqual([
         { voice: "paper-evidence", claim: "有证据的结论", sourceHandle: "pdf-page:1" },
       ]);
+      expect(runner.runtimeStatus()).toMatchObject({
+        installedVersion: "0.145.0",
+        versionStatus: "compatible",
+        capabilityStatus: "partial",
+        capabilityChecks: {
+          structured: { status: "passed" },
+          agenticEvidence: { status: "not-run" },
+        },
+      });
     } finally {
       process.env.PATH = originalPath;
     }
@@ -95,7 +124,7 @@ process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
     const originalPath = process.env.PATH;
     process.env.PATH = `${directory}:${originalPath ?? ""}`;
     try {
-      await expect(new CodexCliRunner().runChat!({
+      await expect(new CodexCliRunner({ canaries: false }).runChat!({
         paperId: "paper:fixture",
         conversationId: "conversation:fixture",
         content: "question",
@@ -104,6 +133,37 @@ process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
     } finally {
       process.env.PATH = originalPath;
     }
+  });
+
+  it("fails closed before a structured launch when Codex CLI is below the minimum", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-old-codex-"));
+    const executable = join(directory, "codex");
+    const launchMarker = join(directory, "launched");
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--version") { process.stdout.write("codex-cli 0.144.5\\n"); process.exit(0); }
+if (args[0] === "exec" && args.includes("--help")) process.exit(0);
+fs.writeFileSync(${JSON.stringify(launchMarker)}, "launched");
+process.exit(0);
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      const runner = new CodexCliRunner();
+      await expect(runner.runSummary({
+        paperId: "paper:old-cli",
+        title: "Old CLI",
+        pages: [{ handle: "pdf-page:1", page: 1, text: "evidence" }],
+      })).rejects.toThrow("structured-capability-version-uncertified:0.144.5");
+      await expect(readFile(launchMarker, "utf8")).rejects.toThrow();
+      expect(runner.runtimeStatus()).toMatchObject({
+        installedVersion: "0.144.5",
+        versionStatus: "below-minimum",
+        capabilityStatus: "failed",
+      });
+    } finally { process.env.PATH = originalPath; }
   });
 
   it("launches one strict workspace-scoped Agentic Evidence exec and normalizes JSONL activity", async () => {

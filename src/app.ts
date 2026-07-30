@@ -91,6 +91,10 @@ function classifyDirectPdfError(error: unknown): { code: string; detail: string;
 }
 
 export async function createApp(options: CreateAppOptions): Promise<FastifyInstance> {
+  if (options.agentMessageTimeoutMs !== undefined &&
+      (!Number.isFinite(options.agentMessageTimeoutMs) || options.agentMessageTimeoutMs <= 0)) {
+    throw new Error("agent-message-timeout-invalid");
+  }
   const app = Fastify({ logger: false, routerOptions: { maxParamLength: 1024 } });
   const now = options.clock ? () => options.clock!.now() : undefined;
   const backgroundTasks = new Set<Promise<void>>();
@@ -103,16 +107,17 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}),
   });
   const distillationCoordinator = options.takeawaySelectionRunner ? new TakeawayDistillationCoordinator(options.storageLayout,
-    options.takeawaySelectionRunner, { ...(options.agentMessageTimeoutMs ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
+    options.takeawaySelectionRunner, { ...(options.agentMessageTimeoutMs !== undefined ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
       ...(options.clock ? { now: () => options.clock!.now() } : {}),
       ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}) }) : null;
   const agentCoordinator = options.agenticEvidenceRunner ? new AgentRunCoordinator(options.storageLayout,
-    options.agenticEvidenceRunner, { ...(options.agentMessageTimeoutMs ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
+    options.agenticEvidenceRunner, { ...(options.agentMessageTimeoutMs !== undefined ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
       ...(options.clock ? { now: () => options.clock!.now() } : {}),
       automaticDistillation: Boolean(distillationCoordinator),
       ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}) }) : null;
   const chatControllers = new Set<AbortController>();
-  const settingsRuntime: SettingsRuntime = options.settingsRuntime ?? {
+  const settingsRuntime: SettingsRuntime = {
+    ...(options.settingsRuntime ?? {
     host: "127.0.0.1",
     port: 3000,
     startedAt: new Date().toISOString(),
@@ -123,8 +128,14 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       minimumVersion: "0.144.6",
       versionStatus: "unavailable",
       capabilityStatus: "not-run",
+      capabilityChecks: {
+        structured: { status: "not-run", checkedAt: null },
+        agenticEvidence: { status: "not-run", checkedAt: null },
+      },
       checkedAt: new Date().toISOString(),
     }),
+    }),
+    ...(options.agentMessageTimeoutMs !== undefined ? { agentMessageTimeoutMs: options.agentMessageTimeoutMs } : {}),
   };
   app.addHook("onClose", async () => {
     for (const controller of chatControllers) controller.abort(new Error("application-closing"));

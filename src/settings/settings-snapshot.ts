@@ -23,15 +23,34 @@ export type SettingsRuntime = {
   startedAt: string;
   fixture: boolean;
   takeawayQualityReleased: boolean;
+  agentMessageTimeoutMs?: number;
+  now?: () => Date;
   codexRuntimeStatus(): CodexRuntimeStatus;
 };
 
+const applicationVersion = (JSON.parse(
+  readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+) as { version: string }).version;
+
 export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRuntime) {
   const observed = latestAgentExecutions(layout);
+  const latestAgentActivity = [...observed.entries()]
+    .sort((left, right) => right[1].completedAt.localeCompare(left[1].completedAt))[0] ?? null;
+  const configurations = listAgentConfigurations();
+  const effectiveExecutions = configurations.map((configuration) => ({
+    taskKind: configuration.taskKind,
+    execution: {
+      ...configuration.execution,
+      timeoutMs: runtime.agentMessageTimeoutMs !== undefined &&
+        ["agentic-evidence", "takeaway-distillation", "paper-chat"].includes(configuration.taskKind)
+        ? runtime.agentMessageTimeoutMs : configuration.execution.timeoutMs,
+    },
+  }));
   return {
     schemaVersion: "settings-snapshot.v1",
-    loadedAt: runtime.startedAt,
+    loadedAt: (runtime.now?.() ?? new Date()).toISOString(),
     overview: {
+      applicationVersion,
       configurationVersion: AGENT_CONFIGURATION_VERSION,
       startedAt: runtime.startedAt,
       listener: { host: runtime.host, port: runtime.port, loopbackOnly: true },
@@ -39,9 +58,15 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
       fixture: runtime.fixture,
       featureFlags: { takeawayQualityV2: runtime.takeawayQualityReleased },
       codex: runtime.codexRuntimeStatus(),
+      latestAgentActivity: latestAgentActivity ? {
+        taskKind: latestAgentActivity[0],
+        runId: latestAgentActivity[1].runId,
+        completedAt: latestAgentActivity[1].completedAt,
+      } : null,
     },
-    agents: listAgentConfigurations().map((configuration) => ({
+    agents: configurations.map((configuration) => ({
       ...configuration,
+      execution: effectiveExecutions.find((entry) => entry.taskKind === configuration.taskKind)!.execution,
       status: configuration.taskKind === "paper-chat" ? "legacy"
         : configuration.taskKind === "takeaway-distillation" && !runtime.takeawayQualityReleased
           ? "feature-disabled" : "enabled",
@@ -65,7 +90,22 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
       },
     })),
     system: {
+      storage: {
+        knowledgeAuthority: "vault-markdown-yaml",
+        operationalAuthority: "sqlite",
+        originals: "immutable-content-addressed",
+        rebuildable: ["derived", "cache"],
+        missingRoot: "fail-closed",
+      },
       ingestion: { pdf: SAFE_PDF_DOWNLOADER_DEFAULTS },
+      execution: {
+        maximumConcurrency: Math.max(...effectiveExecutions.map((entry) => entry.execution.concurrency ?? 1)),
+        maximumTimeoutMs: Math.max(...effectiveExecutions.map((entry) => entry.execution.timeoutMs)),
+        network: "denied",
+        environment: "core-scrubbed",
+        ignoresUserConfig: true,
+        ignoresUserRules: true,
+      },
       visualEvidence: VISUAL_EVIDENCE_LIMITS,
       renderer: {
         dpi: PDF_RENDER_SETTINGS.dpi,

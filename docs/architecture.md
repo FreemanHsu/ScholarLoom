@@ -369,6 +369,9 @@ The command surface and native permission profiles were verified against
 `codex-cli 0.144.6`. This is a minimum tested version, not an exact allowlist:
 newer versions are accepted automatically only after the application-owned capability
 canaries pass. An older or unparseable version, or any canary failure, fails closed.
+Structured one-shot and Agentic Evidence capability checks are recorded separately;
+the aggregate status is `partial` until both profiles have passed in the current
+process. A successful check for one profile must not imply that the other passed.
 
 An application-owned Agent Configuration Registry is the single source for both
 execution and the read-only `/settings` snapshot. Every launch explicitly passes its
@@ -407,6 +410,15 @@ codex exec
   --output-last-message <result.json>
   <prompt>
 ```
+
+Structured one-shot tasks use the same native-profile contract with a separate empty
+read-only ephemeral workspace and private writable run directory for schema/result
+files. The `scholarloom-structured` profile extends Codex `:read-only`, denies
+network, grants read access to the workspace, and grants write access only to that
+private run directory. Shell commands inherit only the core environment and exclude
+proxy/key/secret/token names. Its launch canary verifies the required CLI flags, workspace
+read/no-write, private-run write, sibling/parent denial, and loopback/public-network
+denial plus environment scrubbing before the model process starts.
 
 Rules:
 

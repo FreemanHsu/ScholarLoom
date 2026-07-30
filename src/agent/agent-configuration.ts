@@ -14,7 +14,11 @@ export type CodexRuntimeStatus = {
   installedVersion: string | null;
   minimumVersion: typeof MINIMUM_CODEX_VERSION;
   versionStatus: "compatible" | "below-minimum" | "unavailable";
-  capabilityStatus: "passed" | "failed" | "not-run";
+  capabilityStatus: "passed" | "failed" | "partial" | "not-run";
+  capabilityChecks: {
+    structured: { status: "passed" | "failed" | "not-run"; checkedAt: string | null };
+    agenticEvidence: { status: "passed" | "failed" | "not-run"; checkedAt: string | null };
+  };
   checkedAt: string;
 };
 
@@ -39,6 +43,7 @@ export type AgentConfiguration = {
     network: "denied";
     workspace: "ephemeral-read-only" | "frozen-evidence";
     tools: readonly string[];
+    environment: "core-scrubbed";
     ignoresUserConfig: true;
     ignoresUserRules: true;
   };
@@ -63,6 +68,7 @@ function configuration(taskKind: AgentTaskKind, displayName: string, reasoningEf
       network: "denied",
       workspace: agentic ? "frozen-evidence" : "ephemeral-read-only",
       tools: agentic ? ["shell", "rg", "file-read", "inspect_pdf_page", "budget_status"] : [],
+      environment: "core-scrubbed",
       ignoresUserConfig: true,
       ignoresUserRules: true,
     },

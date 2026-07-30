@@ -24,15 +24,26 @@ export function SettingsPage({ snapshot, error }: { snapshot: SettingsSnapshot |
       <div className="settings-section-heading"><div><span>OVERVIEW</span><h2 id="settings-overview">运行概览</h2></div>
         <small>配置载入于 {formatDate(snapshot.loadedAt)}</small></div>
       <div className="settings-overview-grid">
+        <OverviewCard label="ScholarLoom 版本" value={overview.applicationVersion}
+          detail="Application package version" />
         <OverviewCard label="Agent 配置版本" value={overview.configurationVersion}
           detail={`服务启动于 ${formatDate(overview.startedAt)}`} />
         <OverviewCard label="Codex CLI" value={overview.codex.installedVersion ?? "未检测到"}
-          detail={`最低兼容 ${overview.codex.minimumVersion}`}
-          status={codexStatusLabel(overview.codex.versionStatus, overview.codex.capabilityStatus)} />
+          detail={`最低兼容 ${overview.codex.minimumVersion} · 检查于 ${formatDate(overview.codex.checkedAt)}`}
+          status={`${codexStatusLabel(overview.codex.versionStatus, overview.codex.capabilityStatus)} · ` +
+            `Structured ${capabilityCheckLabel(overview.codex.capabilityChecks.structured.status)} · ` +
+            `Agentic ${capabilityCheckLabel(overview.codex.capabilityChecks.agenticEvidence.status)}`} />
         <OverviewCard label="服务监听" value={`${overview.listener.host}:${overview.listener.port}`}
           detail="仅允许 loopback，由 Tailscale Serve 提供远程入口" />
         <OverviewCard label="数据根目录" value={overview.dataRoot}
           detail={overview.fixture ? "Fixture runtime" : "Production runtime"} mono />
+        <OverviewCard label="Feature flags" value="Takeaway Quality V2"
+          detail={overview.featureFlags.takeawayQualityV2 ? "已启用" : "未启用"} />
+        <OverviewCard label="最近 Agent 活动"
+          value={overview.latestAgentActivity?.taskKind ?? "暂无记录"}
+          detail={overview.latestAgentActivity
+            ? `${formatDate(overview.latestAgentActivity.completedAt)} · ${overview.latestAgentActivity.runId}`
+            : "历史未知值不会推断"} />
       </div>
     </section>
 
@@ -52,6 +63,21 @@ export function SettingsPage({ snapshot, error }: { snapshot: SettingsSnapshot |
           <ConfigRow label="最大重定向" value={`${system.ingestion.pdf.maxRedirects} 次`} />
           <ConfigRow label="连接超时" value={formatDuration(system.ingestion.pdf.connectTimeoutMs)} />
           <ConfigRow label="总超时" value={formatDuration(system.ingestion.pdf.totalTimeoutMs)} />
+        </SystemCard>
+        <SystemCard title="Storage">
+          <ConfigRow label="知识事实源" value={system.storage.knowledgeAuthority} />
+          <ConfigRow label="运行事实源" value={system.storage.operationalAuthority} />
+          <ConfigRow label="原始文件" value={system.storage.originals} />
+          <ConfigRow label="可重建目录" value={system.storage.rebuildable.join(" / ")} />
+          <ConfigRow label="缺失数据根" value={system.storage.missingRoot} />
+        </SystemCard>
+        <SystemCard title="Agent execution">
+          <ConfigRow label="最大并发" value={String(system.execution.maximumConcurrency)} />
+          <ConfigRow label="最长超时" value={formatDuration(system.execution.maximumTimeoutMs)} />
+          <ConfigRow label="网络" value={system.execution.network} />
+          <ConfigRow label="Shell 环境" value={system.execution.environment} />
+          <ConfigRow label="用户配置" value={system.execution.ignoresUserConfig ? "忽略" : "继承"} />
+          <ConfigRow label="用户规则" value={system.execution.ignoresUserRules ? "忽略" : "继承"} />
         </SystemCard>
         <SystemCard title="Visual Evidence">
           <ConfigRow label="每次运行页面预算" value={`${system.visualEvidence.pageLimit} 页`} />
@@ -84,12 +110,14 @@ function AgentConfigurationCard({ agent }: { agent: SettingsSnapshot["agents"][n
     </div>
     <div className="agent-policy-row">
       <span>网络禁用</span><span>{agent.execution.workspace === "frozen-evidence" ? "冻结 Evidence Workspace" : "临时只读 Workspace"}</span>
-      <span>忽略用户 Codex 配置</span>{agent.execution.tools.map((tool) => <span key={tool}>{tool}</span>)}
+      <span>环境变量最小化</span><span>忽略用户 Codex 配置</span>
+      {agent.execution.tools.map((tool) => <span key={tool}>{tool}</span>)}
     </div>
     <div className="agent-observed">
       <span>最近运行</span>{agent.observed
         ? <p><strong>{agent.observed.model ?? "模型未记录"} · {agent.observed.reasoningEffort ?? "thinking 未记录"}</strong>
-          <small>{formatDate(agent.observed.completedAt)} · {agent.observed.codexVersion} · {agent.observed.runId}</small></p>
+          <small>{formatDate(agent.observed.completedAt)} · {agent.observed.codexVersion} ·
+            {agent.observed.configurationVersion ?? "配置版本未记录"} · {agent.observed.runId}</small></p>
         : <p><strong>运行时未记录</strong><small>历史数据不会被推断或回填</small></p>}
     </div>
     <details className="agent-contract"><summary>Prompt 与输出契约</summary>
@@ -135,7 +163,14 @@ function codexStatusLabel(versionStatus: string, capabilityStatus: string): stri
   if (versionStatus === "unavailable") return "运行时未检测";
   if (capabilityStatus === "passed") return "能力检查通过";
   if (capabilityStatus === "failed") return "能力检查失败";
+  if (capabilityStatus === "partial") return "能力检查部分通过";
   return "版本兼容 · 能力检查待运行";
+}
+
+function capabilityCheckLabel(status: string): string {
+  if (status === "passed") return "通过";
+  if (status === "failed") return "失败";
+  return "待运行";
 }
 
 function formatDate(value: string): string {

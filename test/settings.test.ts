@@ -20,6 +20,7 @@ describe("read-only Settings", () => {
         host: "127.0.0.1",
         port: 3000,
         startedAt: "2026-07-30T08:00:00.000Z",
+        now: () => new Date("2026-07-30T08:05:00.000Z"),
         fixture: false,
         takeawayQualityReleased: false,
         codexRuntimeStatus: () => ({
@@ -27,6 +28,10 @@ describe("read-only Settings", () => {
           minimumVersion: "0.144.6",
           versionStatus: "compatible",
           capabilityStatus: "not-run",
+          capabilityChecks: {
+            structured: { status: "not-run", checkedAt: null },
+            agenticEvidence: { status: "not-run", checkedAt: null },
+          },
           checkedAt: "2026-07-30T08:00:00.000Z",
         }),
       },
@@ -37,8 +42,9 @@ describe("read-only Settings", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       schemaVersion: "settings-snapshot.v1",
-      loadedAt: "2026-07-30T08:00:00.000Z",
+      loadedAt: "2026-07-30T08:05:00.000Z",
       overview: {
+        applicationVersion: "0.1.0",
         configurationVersion: "agent-configuration.v1",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: layout.root,
@@ -47,7 +53,14 @@ describe("read-only Settings", () => {
           minimumVersion: "0.144.6",
           versionStatus: "compatible",
           capabilityStatus: "not-run",
+          capabilityChecks: {
+            structured: { status: "not-run", checkedAt: null },
+            agenticEvidence: { status: "not-run", checkedAt: null },
+          },
+          checkedAt: "2026-07-30T08:00:00.000Z",
         },
+        featureFlags: { takeawayQualityV2: false },
+        latestAgentActivity: null,
       },
       agents: [
         { taskKind: "paper-summary", status: "enabled",
@@ -100,20 +113,36 @@ describe("read-only Settings", () => {
     const app = await createApp({
       storageLayout: layout,
       paperSource: { async resolve() { throw new Error("unused"); } },
+      agentMessageTimeoutMs: 75_000,
     });
 
     const snapshot = (await app.inject({ method: "GET", url: "/api/settings" })).json();
     expect(snapshot.agents.find((agent: { taskKind: string }) => agent.taskKind === "agentic-evidence").execution)
       .toMatchObject({
-        timeoutMs: 180_000,
+        timeoutMs: 75_000,
         concurrency: 2,
         network: "denied",
         workspace: "frozen-evidence",
         tools: ["shell", "rg", "file-read", "inspect_pdf_page", "budget_status"],
       });
     expect(snapshot.system).toMatchObject({
+      storage: {
+        knowledgeAuthority: "vault-markdown-yaml",
+        operationalAuthority: "sqlite",
+        originals: "immutable-content-addressed",
+        rebuildable: ["derived", "cache"],
+        missingRoot: "fail-closed",
+      },
       ingestion: { pdf: { maxBytes: 100 * 1024 * 1024, maxRedirects: 5, connectTimeoutMs: 10_000,
         totalTimeoutMs: 60_000 } },
+      execution: {
+        maximumConcurrency: 2,
+        maximumTimeoutMs: 600_000,
+        network: "denied",
+        environment: "core-scrubbed",
+        ignoresUserConfig: true,
+        ignoresUserRules: true,
+      },
       visualEvidence: { pageLimit: 4, infrastructureFailureLimit: 3 },
       renderer: { dpi: 144, timeoutMs: 20_000, memoryLimitMiB: 512 },
       diagnostics: { command: "npm run diagnostics", browserDetailAvailable: false },
@@ -150,6 +179,11 @@ describe("read-only Settings", () => {
       reasoningEffort: "high",
       codexVersion: "0.145.0",
       configurationVersion: "agent-configuration.v1",
+    });
+    expect(response.json().overview.latestAgentActivity).toEqual({
+      taskKind: "paper-summary",
+      runId: "job:settings-observed",
+      completedAt: "2026-07-30T08:00:02.000Z",
     });
     expect(response.body).not.toContain("runtime-sensitive-question");
     expect(response.body).not.toContain("never expose");
@@ -194,5 +228,14 @@ describe("read-only Settings", () => {
         configurationVersion: "agent-configuration.v1",
       });
     await app.close();
+  });
+
+  it("rejects a non-positive Agent timeout instead of displaying a value execution would ignore", async () => {
+    const layout = initializeDataRoot(join(await mkdtemp(join(tmpdir(), "scholarloom-settings-timeout-")), "data"));
+    await expect(createApp({
+      storageLayout: layout,
+      paperSource: { async resolve() { throw new Error("unused"); } },
+      agentMessageTimeoutMs: 0,
+    })).rejects.toThrow("agent-message-timeout-invalid");
   });
 });

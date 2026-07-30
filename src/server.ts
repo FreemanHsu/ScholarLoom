@@ -122,7 +122,12 @@ try {
       host, port, startedAt, fixture, takeawayQualityReleased,
       codexRuntimeStatus: () => productionCodex?.runtimeStatus() ?? {
         installedVersion: null, minimumVersion: MINIMUM_CODEX_VERSION, versionStatus: "unavailable",
-        capabilityStatus: "not-run", checkedAt: startedAt,
+        capabilityStatus: "not-run",
+        capabilityChecks: {
+          structured: { status: "not-run", checkedAt: null },
+          agenticEvidence: { status: "not-run", checkedAt: null },
+        },
+        checkedAt: startedAt,
       },
     },
     agentExecutionMetadata: (taskKind) => productionCodex?.executionMetadata(taskKind) ?? null,

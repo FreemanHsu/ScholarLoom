@@ -25,6 +25,9 @@ import type { StorageLayout } from "../storage/layout.js";
 const Ajv = createRequire(import.meta.url)("ajv") as new (options: { allErrors: boolean }) => {
   compile(schema: object): ((value: unknown) => boolean) & { errors?: unknown };
 };
+const SHELL_ENVIRONMENT_INHERIT = 'shell_environment_policy.inherit="core"';
+const SHELL_ENVIRONMENT_EXCLUDE =
+  'shell_environment_policy.exclude=["*PROXY*","*proxy*","*KEY*","*key*","*SECRET*","*secret*","*TOKEN*","*token*","*SCHOLARLOOM_VISUAL*"]';
 
 function agentExecutionArgs(taskKind: AgentTaskKind): string[] {
   const configuration = getAgentConfiguration(taskKind);
@@ -91,10 +94,9 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
         try {
           const installedVersion = await DiscussionCapability.assert({ workspaceRoot: input.workspaceRoot, runDirectory: directory,
             codexExecutable });
-          this.#runtimeStatus = { installedVersion, minimumVersion: MINIMUM_CODEX_VERSION, versionStatus: "compatible",
-            capabilityStatus: "passed", checkedAt: new Date().toISOString() };
+          this.#runtimeStatus = recordCapabilityCheck(this.#runtimeStatus, "agenticEvidence", "passed", installedVersion);
         } catch (error) {
-          this.#runtimeStatus = { ...this.#runtimeStatus, capabilityStatus: "failed", checkedAt: new Date().toISOString() };
+          this.#runtimeStatus = recordCapabilityCheck(this.#runtimeStatus, "agenticEvidence", "failed");
           throw error;
         }
       }
@@ -104,8 +106,8 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
         ...agentExecutionArgs("agentic-evidence"),
         "-c", 'default_permissions="scholarloom-evidence"',
         "-c", permissionProfileConfig(directory),
-        "-c", 'shell_environment_policy.inherit="core"',
-        "-c", 'shell_environment_policy.exclude=["*PROXY*","*proxy*","*KEY*","*key*","*SECRET*","*secret*","*TOKEN*","*token*","*SCHOLARLOOM_VISUAL*"]',
+        "-c", SHELL_ENVIRONMENT_INHERIT,
+        "-c", SHELL_ENVIRONMENT_EXCLUDE,
         "--output-schema", schemaPath, "--output-last-message", outputPath, "--color", "never"];
       let processEnvironment = codexProcessEnvironment(process.env, directory);
       if (this.#storageLayout) {
@@ -168,15 +170,35 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
 
   async #run<T>(task: AgentTaskKind, schema: object, prompt: string): Promise<T> {
     const configuration = getAgentConfiguration(task);
-    const directory = mkdtempSync(join(tmpdir(), "scholarloom-codex-"));
+    const executionRoot = this.#runtimeRoot ?? tmpdir();
+    if (this.#canaries && this.#runtimeRoot) assertPrivateRuntimeRoot(this.#runtimeRoot);
+    const directory = mkdtempSync(join(executionRoot, "structured-codex-"));
+    const workspace = mkdtempSync(join(executionRoot, "structured-workspace-"));
     const schemaPath = join(directory, "schema.json");
     const outputPath = join(directory, "output.json");
     writeFileSync(schemaPath, JSON.stringify(schema), "utf8");
+    writeFileSync(join(workspace, "CANARY"), "readable", "utf8");
     try {
+      const codexExecutable = resolveExecutable("codex");
+      if (this.#canaries) {
+        try {
+          const installedVersion = await StructuredCapability.assert({
+            codexExecutable, runDirectory: directory, workspaceRoot: workspace,
+          });
+          this.#runtimeStatus = recordCapabilityCheck(this.#runtimeStatus, "structured", "passed", installedVersion);
+        } catch (error) {
+          this.#runtimeStatus = recordCapabilityCheck(this.#runtimeStatus, "structured", "failed");
+          throw error;
+        }
+      }
       await new Promise<void>((resolve, reject) => {
-        const child = spawn("codex", ["exec", "-", "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
-          "--ignore-user-config", "--ignore-rules", "--json", "--cd", directory,
+        const child = spawn(codexExecutable, ["exec", "-", "--strict-config", "--ephemeral", "--skip-git-repo-check",
+          "--ignore-user-config", "--ignore-rules", "--json", "--cd", workspace,
           ...agentExecutionArgs(task),
+          "-c", 'default_permissions="scholarloom-structured"',
+          "-c", structuredPermissionProfileConfig(directory),
+          "-c", SHELL_ENVIRONMENT_INHERIT,
+          "-c", SHELL_ENVIRONMENT_EXCLUDE,
           "--output-schema", schemaPath, "--output-last-message", outputPath, "--color", "never"], { stdio: ["pipe", "pipe", "pipe"] });
         let error = "";
         let events = "";
@@ -191,19 +213,59 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
       const validate = new Ajv({ allErrors: true }).compile(schema);
       if (!validate(result)) throw new Error(`codex-output-invalid:${JSON.stringify(validate.errors)}`);
       return result;
-    } finally { rmSync(directory, { recursive: true, force: true }); }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+}
+
+class StructuredCapability {
+  static async assert(input: { codexExecutable: string; runDirectory: string; workspaceRoot: string }): Promise<string> {
+    const version = readCompatibleVersion(input.codexExecutable, input.runDirectory, "structured-capability");
+    const help = execFileSync(input.codexExecutable, ["exec", "--help"], { encoding: "utf8",
+      env: codexProcessEnvironment(process.env, input.runDirectory) });
+    const requiredFlags = ["--strict-config", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+      "--ignore-rules", "--json", "--cd", "--model", "--output-schema", "--output-last-message"];
+    const missing = requiredFlags.find((flag) => !help.includes(flag));
+    if (missing) throw new Error(`structured-capability-launch-contract:${missing}`);
+    const siblingDirectory = mkdtempSync(join(dirname(input.runDirectory), "structured-capability-sibling-"));
+    const siblingCanary = join(siblingDirectory, "protected");
+    const parentWriteCanary = join(dirname(input.runDirectory), "structured-parent-write-canary");
+    writeFileSync(siblingCanary, "protected", { encoding: "utf8", mode: 0o600 });
+    let loopback: Awaited<ReturnType<typeof startLoopbackCanary>> | undefined;
+    try {
+      loopback = await startLoopbackCanary();
+      const script = 'test -r "$1/CANARY" || exit 61; touch "$1/workspace-write-canary" >/dev/null 2>&1 && exit 62; touch "$2/run-write-canary" || exit 63; cat "$3" >/dev/null 2>&1 && exit 64; touch "$4/structured-parent-write-canary" >/dev/null 2>&1 && exit 65; /usr/bin/curl -fsS --max-time 2 "$5" >/dev/null 2>&1 && exit 66; /usr/bin/curl -fsS --max-time 2 https://example.com >/dev/null 2>&1 && exit 67; env | cut -d= -f1 | grep -iE "(proxy|key|secret|token)" >/dev/null && exit 68; exit 0';
+      const canary = spawnSync(input.codexExecutable, ["sandbox",
+        "-c", 'default_permissions="scholarloom-structured"',
+        "-c", structuredPermissionProfileConfig(input.runDirectory),
+        "-c", SHELL_ENVIRONMENT_INHERIT,
+        "-c", SHELL_ENVIRONMENT_EXCLUDE,
+        "-P", "scholarloom-structured",
+        "-C", input.workspaceRoot, "--", "/bin/sh", "-c", script,
+        "canary", input.workspaceRoot, input.runDirectory, siblingCanary, dirname(input.runDirectory),
+        `http://127.0.0.1:${loopback.port}`],
+      { cwd: input.runDirectory, env: codexProcessEnvironment(process.env, input.runDirectory),
+        encoding: "utf8", timeout: 30_000 });
+      if (canary.status !== 0) {
+        throw new Error(`structured-capability-sandbox:${canary.status}:${canary.signal ?? ""}:` +
+          `${canary.error?.message ?? ""}:${canary.stderr.slice(-500)}`);
+      }
+    } finally {
+      loopback?.close();
+      rmSync(join(input.workspaceRoot, "workspace-write-canary"), { force: true });
+      rmSync(join(input.runDirectory, "run-write-canary"), { force: true });
+      rmSync(parentWriteCanary, { force: true });
+      rmSync(siblingDirectory, { recursive: true, force: true });
+    }
+    return version;
   }
 }
 
 class DiscussionCapability {
   static async assert(input: { workspaceRoot: string; runDirectory: string; codexExecutable: string }): Promise<string> {
-    const versionOutput = execFileSync(input.codexExecutable, ["--version"], { encoding: "utf8", env: codexProcessEnvironment(process.env, input.runDirectory) });
-    const match = /codex-cli (\d+)\.(\d+)\.(\d+)/.exec(versionOutput);
-    if (!match) throw new Error("discussion-capability-version-unreadable");
-    const version = match.slice(1).map(Number);
-    if (!versionAtLeast(version, MINIMUM_CODEX_VERSION.split(".").map(Number))) {
-      throw new Error(`discussion-capability-version-uncertified:${version.join(".")}`);
-    }
+    const version = readCompatibleVersion(input.codexExecutable, input.runDirectory, "discussion-capability");
     const help = execFileSync(input.codexExecutable, ["exec", "--strict-config", "--help"], { encoding: "utf8",
       env: codexProcessEnvironment(process.env, input.runDirectory) });
     if (!help.includes("--strict-config") || !help.includes("--json") || !help.includes("--output-schema")) {
@@ -223,23 +285,28 @@ class DiscussionCapability {
       const canary = spawnSync(input.codexExecutable, ["sandbox",
         "-c", 'default_permissions="scholarloom-evidence"',
         "-c", permissionProfileConfig(input.runDirectory),
-        "-c", 'shell_environment_policy.inherit="core"',
-        "-c", 'shell_environment_policy.exclude=["*PROXY*","*proxy*","*KEY*","*key*","*SECRET*","*secret*","*TOKEN*","*token*"]',
+        "-c", SHELL_ENVIRONMENT_INHERIT,
+        "-c", SHELL_ENVIRONMENT_EXCLUDE,
         "-P", "scholarloom-evidence", "-C", input.workspaceRoot, "--", "/bin/sh", "-c", script,
         "canary", input.workspaceRoot, input.runDirectory, siblingCanary, dirname(input.runDirectory), `http://127.0.0.1:${loopback.port}`],
       { cwd: input.runDirectory, env: codexProcessEnvironment(process.env, input.runDirectory), encoding: "utf8", timeout: 30_000 });
       if (canary.status !== 0) throw new Error(`discussion-capability-sandbox:${canary.status}:${canary.signal ?? ""}:${canary.error?.message ?? ""}:${canary.stderr.slice(-500)}`);
     } finally {
       loopback?.close();
+      rmSync(join(input.runDirectory, "write-canary"), { force: true });
       rmSync(parentWriteCanary, { force: true });
       rmSync(siblingDirectory, { recursive: true, force: true });
     }
-    return version.join(".");
+    return version;
   }
 }
 
 export async function assertDiscussionCapability(input: { workspaceRoot: string; runDirectory: string }): Promise<void> {
   await DiscussionCapability.assert({ ...input, codexExecutable: resolveExecutable("codex") });
+}
+
+export async function assertStructuredCapability(input: { runDirectory: string; workspaceRoot: string }): Promise<void> {
+  await StructuredCapability.assert({ ...input, codexExecutable: resolveExecutable("codex") });
 }
 
 function versionAtLeast(version: number[], minimum: number[]): boolean {
@@ -249,6 +316,18 @@ function versionAtLeast(version: number[], minimum: number[]): boolean {
     if (actual !== required) return actual > required;
   }
   return true;
+}
+
+function readCompatibleVersion(executable: string, runDirectory: string, capability: string): string {
+  const versionOutput = execFileSync(executable, ["--version"], { encoding: "utf8",
+    env: codexProcessEnvironment(process.env, runDirectory) });
+  const match = /codex-cli (\d+)\.(\d+)\.(\d+)/.exec(versionOutput);
+  if (!match) throw new Error(`${capability}-version-unreadable`);
+  const version = match.slice(1).map(Number);
+  if (!versionAtLeast(version, MINIMUM_CODEX_VERSION.split(".").map(Number))) {
+    throw new Error(`${capability}-version-uncertified:${version.join(".")}`);
+  }
+  return version.join(".");
 }
 
 function inspectCodexRuntimeStatus(): CodexRuntimeStatus {
@@ -267,6 +346,7 @@ function inspectCodexRuntimeStatus(): CodexRuntimeStatus {
       minimumVersion: MINIMUM_CODEX_VERSION,
       versionStatus: versionAtLeast(version, MINIMUM_CODEX_VERSION.split(".").map(Number)) ? "compatible" : "below-minimum",
       capabilityStatus: "not-run",
+      capabilityChecks: emptyCapabilityChecks(),
       checkedAt,
     };
   } catch {
@@ -275,9 +355,35 @@ function inspectCodexRuntimeStatus(): CodexRuntimeStatus {
       minimumVersion: MINIMUM_CODEX_VERSION,
       versionStatus: "unavailable",
       capabilityStatus: "not-run",
+      capabilityChecks: emptyCapabilityChecks(),
       checkedAt,
     };
   }
+}
+
+function emptyCapabilityChecks(): CodexRuntimeStatus["capabilityChecks"] {
+  return {
+    structured: { status: "not-run", checkedAt: null },
+    agenticEvidence: { status: "not-run", checkedAt: null },
+  };
+}
+
+function recordCapabilityCheck(status: CodexRuntimeStatus,
+  kind: keyof CodexRuntimeStatus["capabilityChecks"], result: "passed" | "failed",
+  installedVersion?: string): CodexRuntimeStatus {
+  const checkedAt = new Date().toISOString();
+  const capabilityChecks = { ...status.capabilityChecks, [kind]: { status: result, checkedAt } };
+  const results = Object.values(capabilityChecks).map((check) => check.status);
+  const capabilityStatus = results.includes("failed") ? "failed"
+    : results.every((check) => check === "passed") ? "passed"
+      : results.includes("passed") ? "partial" : "not-run";
+  return {
+    ...status,
+    ...(installedVersion ? { installedVersion, versionStatus: "compatible" as const } : {}),
+    capabilityStatus,
+    capabilityChecks,
+    checkedAt,
+  };
 }
 
 function normalizeCodexEvent(line: string): AgentActivity | null {
@@ -329,7 +435,11 @@ function visualMcpConfig(serverPath: string): string {
 
 function permissionProfileConfig(runDirectory: string): string {
   const quotedRunDirectory = JSON.stringify(runDirectory);
-  return `permissions.scholarloom-evidence={filesystem={":root"="deny",":minimal"="read",${quotedRunDirectory}="write",":workspace_roots"={"."="read"}},network={enabled=false}}`;
+  return `permissions.scholarloom-evidence={extends=":read-only",filesystem={":root"="deny",":minimal"="read",${quotedRunDirectory}="write",":workspace_roots"={"."="read"}},network={enabled=false}}`;
+}
+
+function structuredPermissionProfileConfig(runDirectory: string): string {
+  return `permissions.scholarloom-structured={extends=":read-only",filesystem={":root"="deny",":minimal"="read",${JSON.stringify(runDirectory)}="write",":workspace_roots"={"."="read"}},network={enabled=false}}`;
 }
 
 function assertNativePermissionLaunch(args: string[]): void {
