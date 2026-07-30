@@ -10,7 +10,9 @@ export class ArxivPaperSource implements PaperSource {
     const entry = xml.match(/<entry>([\s\S]*?)<\/entry>/)?.[1];
     const title = entry?.match(/<title>([\s\S]*?)<\/title>/)?.[1]?.replace(/\s+/g, " ").trim();
     const resolvedId = entry?.match(/<id>[^<]*\/abs\/([^<]+)<\/id>/)?.[1];
-    const authors = [...(entry?.matchAll(/<author>\s*<name>([^<]+)<\/name>\s*<\/author>/g) ?? [])].map((match) => match[1]!.trim());
+    const authors = [...(entry?.matchAll(/<author>([\s\S]*?)<\/author>/g) ?? [])]
+      .map((match) => match[1]?.match(/<name>([\s\S]*?)<\/name>/)?.[1]?.replace(/\s+/g, " ").trim())
+      .filter((author): author is string => Boolean(author));
     const year = Number.parseInt(entry?.match(/<published>(\d{4})-/)?.[1] ?? "", 10);
     if (!entry || !title || !resolvedId || !authors.length || !Number.isInteger(year)) throw new Error("paper-source-unavailable:not-found");
     const versionMatch = resolvedId.match(/v(\d+)$/);
