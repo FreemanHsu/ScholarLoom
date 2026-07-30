@@ -19,6 +19,7 @@ import type { StorageLayout } from "./storage/layout.js";
 import { PdfPageRenderer } from "./storage/pdf-page-renderer.js";
 import { VisualEvidenceShim } from "./storage/visual-evidence-shim.js";
 import { VisualEvidenceStore } from "./storage/visual-evidence-store.js";
+import { MINIMUM_CODEX_VERSION } from "./agent/agent-configuration.js";
 
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
 const takeawayQualityReleased = process.env.SCHOLARLOOM_TAKEAWAY_V2_RELEASED === "1";
@@ -106,6 +107,7 @@ const directPdfSource = fixture ? {
 
 const host = requireLoopbackHost(process.env.SCHOLARLOOM_HOST ?? "127.0.0.1");
 const port = parsePort(process.env.SCHOLARLOOM_PORT ?? "3000");
+const startedAt = new Date().toISOString();
 
 const dataRoot = process.env.SCHOLARLOOM_DATA_ROOT ?? defaultDataRoot();
 if (fixture && !existsSync(join(dataRoot, DATA_MANIFEST_NAME))) initializeDataRoot(dataRoot);
@@ -115,7 +117,16 @@ const releaseRuntimeLock = acquireRuntimeLock(layout);
 try {
   const fixtureRepository = fixture ? prepareFixtureRepository(layout.tmpRoot) : null;
   const productionCodex = fixture ? null : new CodexCliRunner({ runtimeRoot: layout.tmpRoot, storageLayout: layout });
-  const app = await createApp({ paperSource, directPdfSource, storageLayout: layout, ...(fixture ? {
+  const app = await createApp({ paperSource, directPdfSource, storageLayout: layout,
+    settingsRuntime: {
+      host, port, startedAt, fixture, takeawayQualityReleased,
+      codexRuntimeStatus: () => productionCodex?.runtimeStatus() ?? {
+        installedVersion: null, minimumVersion: MINIMUM_CODEX_VERSION, versionStatus: "unavailable",
+        capabilityStatus: "not-run", checkedAt: startedAt,
+      },
+    },
+    agentExecutionMetadata: (taskKind) => productionCodex?.executionMetadata(taskKind) ?? null,
+    ...(fixture ? {
       repositoryAdapter: new GitRepositoryAdapter({
         "https://github.com/example/fixture": fixtureRepository!,
         "https://github.com/example/manual": fixtureRepository!,

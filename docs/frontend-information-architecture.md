@@ -32,9 +32,10 @@ The v1 top-level destinations are:
 | Paper Library | `/papers` | Search, filter, sort, and open all Papers |
 | Review Center | `/reviews` | Review Proposals across Papers and Proposal types |
 
-Settings and Diagnostics belong in secondary navigation. Knowledge/Wiki is not shown
-as an empty top-level destination before its product flow exists. Import is a global
-command available from any top-level destination; it is not a separate page.
+Settings belongs in secondary navigation at `/settings`; detailed Diagnostics remains
+an operator/API concern. Knowledge/Wiki is not shown as an empty top-level destination
+before its product flow exists. Import is a global command available from any top-level
+destination; it is not a separate page.
 
 Top-level navigation may show counts for processing work and pending reviews. These
 counts are navigation aids, not substitutes for durable Job Run or Proposal state.
@@ -48,6 +49,7 @@ URLs combine stable domain-object paths with recoverable view state:
 | Paper Workspace | `/papers/:paperId` |
 | Paper Conversation | `/papers/:paperId/conversations/:conversationId` |
 | Proposal detail | `/reviews/:proposalId` |
+| Read-only Settings | `/settings` |
 
 Reading is the default Paper mode. View-only state such as the selected Paper mode,
 whether PDF is open, selected page, and Evidence Anchor is represented with query
@@ -66,6 +68,23 @@ The exact parameter encoding may evolve, but these behaviors are required:
   pollute the URL;
 - a stale or invalid object reference produces an explicit not-found or unavailable
   state rather than silently returning Home.
+
+### 3.1 Read-only Settings
+
+Settings explains the configuration ScholarLoom actually executes; it is not a second,
+display-only configuration store. Its three sections are:
+
+1. Overview: application/configuration version, startup time, Codex compatibility,
+   data root, listener, feature flags, and latest Agent activity.
+2. Agents: the configured model and thinking budget, execution/security policy,
+   application-owned prompt template, Skill, JSON Schema, and latest recorded run.
+3. System: bounded storage, ingestion, execution, Visual Evidence, and rendering
+   limits, with a pointer to detailed diagnostics.
+
+The page is read-only in v1 and has no save, reset, or mutation action. It may show
+application-owned templates and contracts, but never a materialized user question,
+Paper text, Context Manifest, Vault content, secret, credential, or environment
+enumeration. Historical run values that were not recorded remain explicitly unknown.
 
 ## 4. Research Home
 

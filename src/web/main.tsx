@@ -16,6 +16,8 @@ import { canContinueConversation, conversationActionRequest, filterConversations
   from "./conversation-controls.js";
 import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspector.js";
 import { RepositoryPanel, type RepositoryAssociation } from "./repository-panel.js";
+import { SettingsPage } from "./settings-page.js";
+import type { SettingsSnapshot } from "../settings/settings-snapshot.js";
 import "./styles.css";
 
 type Paper = {
@@ -136,6 +138,8 @@ function App() {
   const [evidence, setEvidence] = useState<EvidenceInspectorModel | null>(null);
   const [repositoryBusy, setRepositoryBusy] = useState(false);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
+  const [settings, setSettings] = useState<SettingsSnapshot | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
 
   function navigate(href: string, replace = false) {
     window.history[replace ? "replaceState" : "pushState"](null, "", href);
@@ -297,6 +301,17 @@ function App() {
     return () => window.clearInterval(timer);
   }, [route.name === "paper" ? route.paperId : null, workspace?.processing?.state,
     workspace?.repositories.map((repository) => repository.materializationStatus).join("|")]);
+
+  useEffect(() => {
+    if (route.name !== "settings") return;
+    setSettingsError(null);
+    void fetch("/api/settings").then(async (response) => {
+      if (!response.ok) throw new Error("系统配置暂时不可用");
+      setSettings(await response.json() as SettingsSnapshot);
+    }).catch((cause: unknown) => {
+      setSettingsError(cause instanceof Error ? cause.message : "系统配置暂时不可用");
+    });
+  }, [route.name]);
 
   async function repositoryCommand(path: string, method: "POST", body?: object) {
     if (route.name !== "paper") return;
@@ -578,6 +593,8 @@ function App() {
       </nav>
       <div className="nav-actions">
         {(processingPapers.length > 0 || progress) && <span className="nav-status">处理中 · {Math.max(processingPapers.length, 1)}</span>}
+        <a className="secondary-nav-link" href="/settings" aria-current={route.name === "settings" ? "page" : undefined}
+          onClick={(event) => routeClick(event, "/settings")}>设置</a>
         <button onClick={() => setImportOpen((value) => !value)}>导入论文</button>
       </div>
     </header>
@@ -597,6 +614,7 @@ function App() {
     {route.name === "papers" && <PaperLibrary papers={papers} error={papersError} onNavigate={navigate} onImport={() => setImportOpen(true)} />}
     {route.name === "reviews" && <ReviewCenter proposals={reviewProposals} error={reviewsError} onNavigate={navigate}
       onRefresh={refreshReviews} />}
+    {route.name === "settings" && <SettingsPage snapshot={settings} error={settingsError} />}
     {route.name === "not-found" && <main className="page-state"><span className="eyebrow">NOT FOUND</span><h1>找不到这个页面</h1>
       <button onClick={() => navigate("/", true)}>返回研究首页</button></main>}
     {route.name === "paper" && (workspaceLoading && !workspace

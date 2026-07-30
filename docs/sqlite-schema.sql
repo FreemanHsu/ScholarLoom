@@ -159,23 +159,20 @@ CREATE INDEX idx_job_runs_import ON job_runs(import_request_id, queued_at);
 CREATE INDEX idx_job_runs_paper ON job_runs(paper_id, queued_at);
 
 CREATE TABLE agent_runs (
-    job_run_id TEXT PRIMARY KEY REFERENCES job_runs(id) ON DELETE CASCADE,
-    task_kind TEXT NOT NULL CHECK (
-        task_kind IN ('paper-summary', 'paper-chat', 'knowledge-proposal', 'entry-answer')
-    ),
+    job_run_id TEXT PRIMARY KEY REFERENCES job_runs(id),
+    task_kind TEXT NOT NULL,
     model TEXT,
+    reasoning_effort TEXT CHECK (
+        reasoning_effort IS NULL OR reasoning_effort IN ('medium', 'high')
+    ),
     codex_version TEXT NOT NULL,
+    configuration_version TEXT,
     skill_path TEXT,
     skill_content_hash TEXT,
-    context_snapshot_id TEXT REFERENCES context_snapshots(id) ON DELETE SET NULL
-        DEFERRABLE INITIALLY DEFERRED,
+    context_snapshot_id TEXT REFERENCES context_snapshots(id),
     output_schema_hash TEXT NOT NULL,
     prompt_hash TEXT NOT NULL,
-    input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
-    output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
-    cost_micros INTEGER CHECK (cost_micros IS NULL OR cost_micros >= 0),
-    events_artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
-    final_output_artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL
+    output_json TEXT NOT NULL CHECK (json_valid(output_json))
 ) STRICT;
 
 CREATE TABLE code_repositories (

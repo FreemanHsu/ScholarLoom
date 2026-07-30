@@ -3,6 +3,10 @@ import { createHash, randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 
 import type { AgentActivity, AgenticEvidenceRunner, AgentUsage } from "../agent/agentic-evidence-runner.js";
+import {
+  getAgentConfiguration,
+  type AgentExecutionMetadataProvider,
+} from "../agent/agent-configuration.js";
 import { AnswerGroundingGate } from "./answer-grounding-gate.js";
 import { EvidenceWorkspaceBuilder } from "./evidence-workspace-builder.js";
 import { FrozenPdfSourceResolver } from "./frozen-pdf-source-resolver.js";
@@ -11,7 +15,8 @@ import { PDF_RENDERER_FINGERPRINT, PdfPageRenderer } from "./pdf-page-renderer.j
 import { VisualEvidenceStore } from "./visual-evidence-store.js";
 import { enqueueAutomaticDistillation } from "./takeaway-distillation.js";
 
-type CoordinatorOptions = { concurrency?: number; hardTimeoutMs?: number; now?: () => Date; automaticDistillation?: boolean };
+type CoordinatorOptions = { concurrency?: number; hardTimeoutMs?: number; now?: () => Date;
+  automaticDistillation?: boolean; agentExecutionMetadata?: AgentExecutionMetadataProvider };
 
 export class AgentRunCoordinator {
   readonly #database: Database.Database;
@@ -21,17 +26,20 @@ export class AgentRunCoordinator {
   readonly #hardTimeoutMs: number;
   readonly #now: () => Date;
   readonly #automaticDistillation: boolean;
+  readonly #agentExecutionMetadata: AgentExecutionMetadataProvider | undefined;
   #closed = false;
 
   constructor(private readonly layout: StorageLayout, private readonly runner: AgenticEvidenceRunner, options: CoordinatorOptions = {}) {
+    const configuration = getAgentConfiguration("agentic-evidence");
     this.#database = new Database(layout.databasePath);
     this.#database.pragma("foreign_keys = ON");
     this.#database.pragma("busy_timeout = 5000");
     this.#workspaceBuilder = EvidenceWorkspaceBuilder.open(layout);
-    this.#concurrency = options.concurrency ?? 2;
-    this.#hardTimeoutMs = options.hardTimeoutMs ?? 180_000;
+    this.#concurrency = options.concurrency ?? configuration.execution.concurrency!;
+    this.#hardTimeoutMs = options.hardTimeoutMs ?? configuration.execution.timeoutMs;
     this.#now = options.now ?? (() => new Date());
     this.#automaticDistillation = options.automaticDistillation ?? false;
+    this.#agentExecutionMetadata = options.agentExecutionMetadata;
     queueMicrotask(() => this.#pump());
   }
 
@@ -319,9 +327,13 @@ export class AgentRunCoordinator {
         }
       });
       if (this.#automaticDistillation) enqueueAutomaticDistillation(this.#database, assistantId, this.#now());
-      this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,codex_version,context_snapshot_id,
-        output_schema_hash,prompt_hash,output_json) VALUES (?,'paper-chat',NULL,'unknown',?,?,?,?)`)
-        .run(attempt.id, snapshotId, createHash("sha256").update("agentic-evidence-result:v1").digest("hex"),
+      const execution = this.#agentExecutionMetadata?.("agentic-evidence") ?? null;
+      this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,reasoning_effort,codex_version,
+        configuration_version,context_snapshot_id,output_schema_hash,prompt_hash,output_json)
+        VALUES (?,'paper-chat',?,?,?,?,?,?,?,?)`)
+        .run(attempt.id, execution?.model ?? null, execution?.reasoningEffort ?? null,
+          execution?.codexVersion ?? "unknown", execution?.configurationVersion ?? null, snapshotId,
+          createHash("sha256").update("agentic-evidence-result:v1").digest("hex"),
           createHash("sha256").update(attempt.user_message_id).digest("hex"), JSON.stringify({ answer, groundingStatus }));
       this.#insertUsage(attempt.id, attempt.run_epoch, usage, elapsedMs, now);
       const changed = this.#database.prepare(`UPDATE job_runs SET state='succeeded',progress=1,output_json=?,completed_at=?,heartbeat_at=?,

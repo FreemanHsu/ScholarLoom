@@ -6,8 +6,10 @@ import type { StorageLayout } from "./layout.js";
 import { FrozenPdfSourceResolver } from "./frozen-pdf-source-resolver.js";
 import type { StoredVisualRender, VisualEvidenceStore } from "./visual-evidence-store.js";
 
-const PAGE_LIMIT = 4;
-const INFRA_FAILURE_LIMIT = 3;
+export const VISUAL_EVIDENCE_LIMITS = {
+  pageLimit: 4,
+  infrastructureFailureLimit: 3,
+} as const;
 
 type AttemptAuthority = {
   state: string;
@@ -30,9 +32,11 @@ export class VisualEvidenceShim {
     const authority = this.#authority(request.sourceId, request.page);
     const existing = this.#inspection(authority.artifact_id, request.page);
     const budget = this.budgetStatus();
-    if (!existing && budget.used >= PAGE_LIMIT) throw new Error("visual-page-budget-exhausted");
+    if (!existing && budget.used >= VISUAL_EVIDENCE_LIMITS.pageLimit) throw new Error("visual-page-budget-exhausted");
     if (!existing || existing.inspection_status !== "ready") {
-      if (this.#failureCount() >= INFRA_FAILURE_LIMIT) throw new Error("visual-render-failure-budget-exhausted");
+      if (this.#failureCount() >= VISUAL_EVIDENCE_LIMITS.infrastructureFailureLimit) {
+        throw new Error("visual-render-failure-budget-exhausted");
+      }
     }
     const source = new FrozenPdfSourceResolver(this.input.layout).open({ artifactId: authority.artifact_id,
       contentHash: authority.content_hash, storageRef: authority.storage_ref, byteSize: authority.byte_size });
@@ -52,7 +56,8 @@ export class VisualEvidenceShim {
     const used = this.input.database.prepare(`SELECT count(*) FROM visual_page_inspections
       WHERE job_run_id=? AND run_epoch=?`).pluck()
       .get(this.input.attemptId, this.input.runEpoch) as number;
-    return { used, remaining: Math.max(0, PAGE_LIMIT - used), limit: PAGE_LIMIT };
+    return { used, remaining: Math.max(0, VISUAL_EVIDENCE_LIMITS.pageLimit - used),
+      limit: VISUAL_EVIDENCE_LIMITS.pageLimit };
   }
 
   #activeAttempt(): void {
@@ -100,7 +105,7 @@ export class VisualEvidenceShim {
       const used = this.input.database.prepare(`SELECT count(*) FROM visual_page_inspections
         WHERE job_run_id=? AND run_epoch=?`).pluck()
         .get(this.input.attemptId, this.input.runEpoch) as number;
-      if (!existing && used >= PAGE_LIMIT) throw new Error("visual-page-budget-exhausted");
+      if (!existing && used >= VISUAL_EVIDENCE_LIMITS.pageLimit) throw new Error("visual-page-budget-exhausted");
       this.input.database.prepare(`INSERT INTO visual_page_inspections
         (id,job_run_id,run_epoch,source_artifact_id,source_content_hash,page_number,render_artifact_id,
          inspection_status,failure_count,first_inspected_at,last_inspected_at)

@@ -22,6 +22,12 @@ export const PDF_RENDER_SETTINGS = {
   format: "image/png",
 } as const;
 
+export const PDF_RENDERER_LIMITS = {
+  timeoutMs: 20_000,
+  memoryLimitMiB: 512,
+  outputLimitBytes: 28 * 1024 * 1024,
+} as const;
+
 const rendererIdentity = {
   name: "pdfjs-napi-canvas",
   version: "6.1.200+1.0.2",
@@ -87,12 +93,13 @@ function runRendererChild(childPath: string, bytes: Buffer, page: number): Promi
       stdio: ["pipe", "pipe", "pipe"],
     });
     let forcedFailure: string | null = null;
-    const timeout = setTimeout(() => { forcedFailure = "renderer-timeout"; child.kill("SIGKILL"); }, 20_000);
+    const timeout = setTimeout(() => { forcedFailure = "renderer-timeout"; child.kill("SIGKILL"); },
+      PDF_RENDERER_LIMITS.timeoutMs);
     const rssWatchdog = setInterval(() => {
       if (!child.pid) return;
       const result = spawnSync("/bin/ps", ["-o", "rss=", "-p", String(child.pid)], { encoding: "utf8", timeout: 500 });
       const rssKib = Number.parseInt(result.stdout.trim(), 10);
-      if (Number.isFinite(rssKib) && rssKib > 512 * 1024) {
+      if (Number.isFinite(rssKib) && rssKib > PDF_RENDERER_LIMITS.memoryLimitMiB * 1024) {
         forcedFailure = "renderer-memory-limit";
         child.kill("SIGKILL");
       }
@@ -101,7 +108,7 @@ function runRendererChild(childPath: string, bytes: Buffer, page: number): Promi
     let stdoutBytes = 0;
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.length;
-      if (stdoutBytes > 28 * 1024 * 1024) {
+      if (stdoutBytes > PDF_RENDERER_LIMITS.outputLimitBytes) {
         forcedFailure = "renderer-output-limit";
         child.kill("SIGKILL");
       }

@@ -22,6 +22,10 @@ import { canonicalSectionHash } from "./canonical-section-hash.js";
 import { RepositoryAssociations } from "./repository-associations.js";
 import { liveDuplicateRevisionIds } from "./takeaway-distillation.js";
 import { EPISTEMIC_STATUSES, TAKEAWAY_KINDS, type EpistemicStatus, type TakeawayKind } from "../agent/takeaway-distillation.js";
+import type {
+  AgentExecutionMetadataProvider,
+  AgentTaskKind,
+} from "../agent/agent-configuration.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -91,20 +95,24 @@ export class ImportStore {
   readonly #conversations: ConversationStore;
   readonly #knowledgeWriter: KnowledgeWriter;
   readonly #repositoryAssociations: RepositoryAssociations;
+  readonly #agentExecutionMetadata: AgentExecutionMetadataProvider | undefined;
 
   static open(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
-    now?: () => Date, repositoryRuntime?: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void }): ImportStore {
+    now?: () => Date, repositoryRuntime?: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void;
+      agentExecutionMetadata?: AgentExecutionMetadataProvider }): ImportStore {
     return new ImportStore(layout, failurePoint, now, repositoryRuntime);
   }
 
   private constructor(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
     now: () => Date = () => new Date(),
-    repositoryRuntime: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void } = { schedule() {} }) {
+    repositoryRuntime: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void;
+      agentExecutionMetadata?: AgentExecutionMetadataProvider } = { schedule() {} }) {
     this.#layout = layout;
     this.#artifactRoot = layout.root;
     this.#knowledgeRoot = layout.vaultRoot;
     this.#failurePoint = failurePoint;
     this.#now = now;
+    this.#agentExecutionMetadata = repositoryRuntime.agentExecutionMetadata;
     this.#database = new Database(layout.databasePath);
     this.#database.pragma("foreign_keys = ON");
     this.#database.pragma("journal_mode = WAL");
@@ -608,11 +616,14 @@ export class ImportStore {
       const changed = this.#database.prepare(`UPDATE job_runs SET state='succeeded',progress=1,output_json=?,completed_at=?,heartbeat_at=?
         WHERE id=? AND state='running'`).run(JSON.stringify(output), completedAt, completedAt, jobRunId).changes;
       if (!changed) return;
+      const execution = this.#agentExecutionMetadata?.("paper-chat") ?? null;
       const assistantOrdinal = (this.#database.prepare("SELECT COALESCE(MAX(ordinal),0)+1 next FROM messages WHERE conversation_id=?")
         .get(conversationId) as { next: number }).next;
-      this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,codex_version,skill_path,skill_content_hash,
-        context_snapshot_id,output_schema_hash,prompt_hash,output_json) VALUES (?,'paper-chat',NULL,'unknown',NULL,NULL,?,?,?,?)`)
-        .run(jobRunId, conversation.active_context_snapshot_id,
+      this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,reasoning_effort,codex_version,
+        configuration_version,skill_path,skill_content_hash,context_snapshot_id,output_schema_hash,prompt_hash,output_json)
+        VALUES (?,'paper-chat',?,?,?,?,NULL,NULL,?,?,?,?)`)
+        .run(jobRunId, execution?.model ?? null, execution?.reasoningEffort ?? null, execution?.codexVersion ?? "unknown",
+          execution?.configurationVersion ?? null, conversation.active_context_snapshot_id,
           createHash("sha256").update("paper-chat:schema:v1").digest("hex"),
           createHash("sha256").update(JSON.stringify(chatContext)).digest("hex"), JSON.stringify(output));
       this.#database.prepare(`INSERT INTO messages
@@ -1016,18 +1027,23 @@ export class ImportStore {
       healthy: access.writable && integrity.every((value) => value === "ok") && foreignKeys.length === 0 && missingArtifacts.length === 0 && missingMarkdown.length === 0 };
   }
 
-  #recordAgentRun(taskKind: string, paperId: string | null, contextSnapshotId: string | null, context: unknown, output: unknown, skillPath: string | null): string {
+  #recordAgentRun(taskKind: AgentTaskKind, paperId: string | null, contextSnapshotId: string | null,
+    context: unknown, output: unknown, skillPath: string | null): string {
     const now = new Date().toISOString();
     const jobId = `job:${randomUUID()}`;
     const outputJson = JSON.stringify(output);
     const promptHash = createHash("sha256").update(JSON.stringify(context)).digest("hex");
     const schemaHash = createHash("sha256").update(`${taskKind}:schema:v1`).digest("hex");
     const skillHash = skillPath ? createHash("sha256").update(readFileSync(join(process.cwd(), skillPath))).digest("hex") : null;
+    const execution = this.#agentExecutionMetadata?.(taskKind) ?? null;
     this.#database.transaction(() => {
       this.#database.prepare(`INSERT INTO job_runs(id,job_type,paper_id,state,progress,idempotency_key,input_json,output_json,queued_at,started_at,completed_at,heartbeat_at)
         VALUES (?,?,?,'succeeded',1,?,'{}',?,?,?,?,?)`).run(jobId, taskKind, paperId, `${taskKind}:${jobId}`, outputJson, now, now, now, now);
-      this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,codex_version,skill_path,skill_content_hash,context_snapshot_id,output_schema_hash,prompt_hash,output_json)
-        VALUES (?,?,NULL,'unknown',?,?,?,?,?,?)`).run(jobId, taskKind, skillPath, skillHash, contextSnapshotId, schemaHash, promptHash, outputJson);
+      this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,reasoning_effort,codex_version,
+        configuration_version,skill_path,skill_content_hash,context_snapshot_id,output_schema_hash,prompt_hash,output_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(jobId, taskKind, execution?.model ?? null,
+          execution?.reasoningEffort ?? null, execution?.codexVersion ?? "unknown", execution?.configurationVersion ?? null,
+          skillPath, skillHash, contextSnapshotId, schemaHash, promptHash, outputJson);
     })();
     return jobId;
   }

@@ -25,6 +25,13 @@ export type DownloadedPdf = {
   mediaType: string;
 };
 
+export const SAFE_PDF_DOWNLOADER_DEFAULTS = {
+  maxRedirects: 5,
+  maxBytes: 100 * 1024 * 1024,
+  connectTimeoutMs: 10_000,
+  totalTimeoutMs: 60_000,
+} as const;
+
 type SafePdfDownloaderOptions = {
   resolve?: (hostname: string) => Promise<string[]>;
   transport?: PdfTransport;
@@ -45,10 +52,10 @@ export class SafePdfDownloader {
   constructor(options: SafePdfDownloaderOptions = {}) {
     this.#resolve = options.resolve ?? resolvePublicAddresses;
     this.#transport = options.transport ?? new HttpsPdfTransport();
-    this.#maxRedirects = options.maxRedirects ?? 5;
-    this.#maxBytes = options.maxBytes ?? 100 * 1024 * 1024;
-    this.#connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
-    this.#totalTimeoutMs = options.totalTimeoutMs ?? 60_000;
+    this.#maxRedirects = options.maxRedirects ?? SAFE_PDF_DOWNLOADER_DEFAULTS.maxRedirects;
+    this.#maxBytes = options.maxBytes ?? SAFE_PDF_DOWNLOADER_DEFAULTS.maxBytes;
+    this.#connectTimeoutMs = options.connectTimeoutMs ?? SAFE_PDF_DOWNLOADER_DEFAULTS.connectTimeoutMs;
+    this.#totalTimeoutMs = options.totalTimeoutMs ?? SAFE_PDF_DOWNLOADER_DEFAULTS.totalTimeoutMs;
   }
 
   async download(input: string): Promise<DownloadedPdf> {

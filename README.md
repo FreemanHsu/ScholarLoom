@@ -46,6 +46,13 @@ Skill 驱动的 Codex Summary → 固定 Git commit → Paper Conversation → �
 Takeaway → curated-only Entry Agent。系统使用 React/Vite、Fastify、SQLite FTS5 与
 Codex CLI，不引入向量数据库。
 
+二级导航的 `/settings` 提供只读配置总览。页面与执行链路共享同一份应用内 Agent
+配置注册表：Paper Summary 使用 `sol` / `high`，Agentic Evidence、Entry Agent、
+Takeaway Selection 和 legacy Paper Chat 使用 `sol` / `medium`。页面还展示
+application-owned Prompt、Skill、JSON Schema 与有界系统参数，不展示运行时问题、
+论文/Vault 内容、secret 或环境变量。Codex CLI `0.144.6` 是最低支持版本；更高版本在
+全部 capability canary 通过后自动接收，否则 fail closed。
+
 Paper Workspace 现包含可恢复的 Reading、Discussion 与 Knowledge 模式。
 Conversation 使用稳定 URL 和不可变 Context Snapshot；Message、Agent attempt、
 引用与 Takeaway Proposal 可在刷新或重启后恢复。失败和中断只允许显式 retry，
@@ -164,8 +171,9 @@ permission profile，把 shell 读取限制到 Evidence Workspace 与 minimal ru
 当前 Attempt 的私有 run directory，并关闭外网与 loopback。Visual Evidence 在同一个 exec
 中通过仅含 `inspect_pdf_page`/`budget_status` 的 stdio MCP 按需渲染冻结 PDF 页面；Agent
 不会获得原始数据根或任意路径。每次启动都执行同一 profile 的 capability canary；Visual
-Evidence 只接受精确认证的 CLI allowlist（当前 `0.144.6`），升级前必须重新认证。任何
-canary 失败都会 fail closed，不回退 legacy one-shot。运行 `npm start` 后导入一篇允许下载
+Evidence 要求 CLI 不低于 `0.144.6`，并在每次启动执行 capability canary；更高版本通过
+全部 canary 后自动接收。任何 canary 失败都会 fail closed，不回退 legacy one-shot。运行
+`npm start` 后导入一篇允许下载
 的 arXiv 论文或公开 PDF 直链即可做 opt-in
 smoke；这会使用网络和 Codex 配额。公开 PDF 仅接受 URL 直接返回的 PDF，不解析 landing
 page、DOI、OpenReview 或登录态链接。仓库不会自动安装依赖或执行论文代码，也不会提交

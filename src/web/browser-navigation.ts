@@ -1,4 +1,4 @@
-export type BrowserRoute = { name: "home" | "papers" | "reviews" | "not-found" } | {
+export type BrowserRoute = { name: "home" | "papers" | "reviews" | "settings" | "not-found" } | {
   name: "paper";
   paperId: string;
   mode: "reading" | "discussion" | "knowledge";
@@ -37,6 +37,7 @@ export function readBrowserRoute(location: BrowserLocation): BrowserRoute {
   if (location.pathname === "/") return { name: "home" };
   if (location.pathname === "/papers") return { name: "papers" };
   if (location.pathname === "/reviews") return { name: "reviews" };
+  if (location.pathname === "/settings") return { name: "settings" };
   const match = /^\/papers\/([^/]+)(?:\/conversations\/([^/]+))?$/.exec(location.pathname);
   if (!match) return { name: "not-found" };
   const query = new URLSearchParams(location.search);

@@ -16,6 +16,8 @@ import type { AgenticEvidenceRunner } from "./agent/agentic-evidence-runner.js";
 import { AgentRunCoordinator } from "./storage/agent-run-coordinator.js";
 import type { TakeawaySelectionRunner } from "./agent/takeaway-distillation.js";
 import { TakeawayDistillationCoordinator } from "./storage/takeaway-distillation.js";
+import { buildSettingsSnapshot, type SettingsRuntime } from "./settings/settings-snapshot.js";
+import type { AgentExecutionMetadataProvider } from "./agent/agent-configuration.js";
 
 export type ResolvedPaper = {
   arxivId: string;
@@ -49,6 +51,8 @@ export type CreateAppOptions = {
   agentMessageTimeoutMs?: number;
   agenticEvidenceRunner?: AgenticEvidenceRunner;
   takeawaySelectionRunner?: TakeawaySelectionRunner;
+  settingsRuntime?: SettingsRuntime;
+  agentExecutionMetadata?: AgentExecutionMetadataProvider;
 };
 
 function classifyPaperResolutionError(error: unknown): { status: 404 | 503; code: string; detail: string } {
@@ -96,15 +100,32 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       backgroundTasks.add(task);
       void task.finally(() => backgroundTasks.delete(task));
     },
+    ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}),
   });
   const distillationCoordinator = options.takeawaySelectionRunner ? new TakeawayDistillationCoordinator(options.storageLayout,
     options.takeawaySelectionRunner, { ...(options.agentMessageTimeoutMs ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
-      ...(options.clock ? { now: () => options.clock!.now() } : {}) }) : null;
+      ...(options.clock ? { now: () => options.clock!.now() } : {}),
+      ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}) }) : null;
   const agentCoordinator = options.agenticEvidenceRunner ? new AgentRunCoordinator(options.storageLayout,
     options.agenticEvidenceRunner, { ...(options.agentMessageTimeoutMs ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
       ...(options.clock ? { now: () => options.clock!.now() } : {}),
-      automaticDistillation: Boolean(distillationCoordinator) }) : null;
+      automaticDistillation: Boolean(distillationCoordinator),
+      ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}) }) : null;
   const chatControllers = new Set<AbortController>();
+  const settingsRuntime: SettingsRuntime = options.settingsRuntime ?? {
+    host: "127.0.0.1",
+    port: 3000,
+    startedAt: new Date().toISOString(),
+    fixture: false,
+    takeawayQualityReleased: Boolean(options.takeawaySelectionRunner),
+    codexRuntimeStatus: () => ({
+      installedVersion: null,
+      minimumVersion: "0.144.6",
+      versionStatus: "unavailable",
+      capabilityStatus: "not-run",
+      checkedAt: new Date().toISOString(),
+    }),
+  };
   app.addHook("onClose", async () => {
     for (const controller of chatControllers) controller.abort(new Error("application-closing"));
     await Promise.allSettled(backgroundTasks);
@@ -124,6 +145,8 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     return Promise.race([options.codexRunner!.runChat!({ ...context, signal: controller.signal }), interrupted])
       .finally(() => { clearTimeout(timer); chatControllers.delete(controller); });
   };
+
+  app.get("/api/settings", async () => buildSettingsSnapshot(options.storageLayout, settingsRuntime));
 
   const startImport = (execution: { paper: import("./storage/import-store.js").StoredPaper; arxivId?: string; version: number;
     importRequest: { id: string }; job: { id: string }; pdfBytes?: Uint8Array }) => {

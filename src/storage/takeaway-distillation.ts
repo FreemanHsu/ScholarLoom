@@ -13,10 +13,15 @@ import {
   type TakeawayCandidateV2,
   type TakeawaySelectionRunner,
 } from "../agent/takeaway-distillation.js";
+import {
+  getAgentConfiguration,
+  type AgentExecutionMetadataProvider,
+} from "../agent/agent-configuration.js";
 import type { StorageLayout } from "./layout.js";
 
 type Trigger = "automatic" | "explicit-save";
-type DistillationOptions = { concurrency?: number; hardTimeoutMs?: number; now?: () => Date };
+type DistillationOptions = { concurrency?: number; hardTimeoutMs?: number; now?: () => Date;
+  agentExecutionMetadata?: AgentExecutionMetadataProvider };
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const stableJson = (value: unknown) => JSON.stringify(value);
@@ -109,15 +114,18 @@ export class TakeawayDistillationCoordinator {
   readonly #hardTimeoutMs: number;
   readonly #now: () => Date;
   readonly #poll: ReturnType<typeof setInterval>;
+  readonly #agentExecutionMetadata: AgentExecutionMetadataProvider | undefined;
   #closed = false;
 
   constructor(layout: StorageLayout, private readonly runner: TakeawaySelectionRunner, options: DistillationOptions = {}) {
+    const configuration = getAgentConfiguration("takeaway-distillation");
     this.#database = new Database(layout.databasePath);
     this.#database.pragma("foreign_keys = ON");
     this.#database.pragma("busy_timeout = 5000");
-    this.#concurrency = options.concurrency ?? 1;
-    this.#hardTimeoutMs = options.hardTimeoutMs ?? 180_000;
+    this.#concurrency = options.concurrency ?? configuration.execution.concurrency!;
+    this.#hardTimeoutMs = options.hardTimeoutMs ?? configuration.execution.timeoutMs;
     this.#now = options.now ?? (() => new Date());
+    this.#agentExecutionMetadata = options.agentExecutionMetadata;
     this.#poll = setInterval(() => this.#pump(), 100);
     this.#poll.unref();
     queueMicrotask(() => this.#pump());
@@ -377,6 +385,13 @@ export class TakeawayDistillationCoordinator {
       this.#database.prepare(`UPDATE takeaway_distillation_runs SET outcome_kind=?,reason_code=?,proposal_id=?
         WHERE job_run_id=?`).run(selection.decision === "candidate" ? "candidate" : "no-proposal",
           selection.decision === "no-proposal" ? selection.reasonCode : null, proposalId, run.id);
+      const execution = this.#agentExecutionMetadata?.("takeaway-distillation") ?? null;
+      this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,reasoning_effort,codex_version,
+        configuration_version,context_snapshot_id,output_schema_hash,prompt_hash,output_json)
+        VALUES (?,'takeaway-distillation',?,?,?,?,NULL,?,?,?)`)
+        .run(run.id, execution?.model ?? null, execution?.reasoningEffort ?? null,
+          execution?.codexVersion ?? "unknown", execution?.configurationVersion ?? null,
+          manifest.contractHash, manifest.promptHash, stableJson(selection));
       this.#database.prepare(`INSERT INTO agent_run_usage(job_run_id,run_epoch,status,input_tokens,cached_input_tokens,
         output_tokens,total_tokens,elapsed_ms,recorded_at) VALUES (?,?,?,?,?,?,?,?,?)`).run(run.id, run.run_epoch,
           usage.status, usage.inputTokens ?? null, usage.cachedInputTokens ?? null, usage.outputTokens ?? null,

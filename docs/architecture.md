@@ -367,8 +367,15 @@ gain extra pass-through interfaces.
 
 The command surface and native permission profiles were verified against
 `codex-cli 0.144.6`. This is a minimum tested version, not an exact allowlist:
-every launch runs capability canaries, and a major CLI upgrade requires manual
-recertification.
+newer versions are accepted automatically only after the application-owned capability
+canaries pass. An older or unparseable version, or any canary failure, fails closed.
+
+An application-owned Agent Configuration Registry is the single source for both
+execution and the read-only `/settings` snapshot. Every launch explicitly passes its
+model and `model_reasoning_effort`: Paper Summary uses `sol`/`high`; Agentic Evidence,
+Entry Agent, Takeaway Selection, and legacy Paper Chat use `sol`/`medium`. Agent Run
+lineage records these values, the observed Codex version, and the configuration
+version when available; historical unknowns are not inferred.
 
 CodexRunner accepts a typed task rather than an arbitrary shell command:
 
@@ -408,6 +415,10 @@ Rules:
   mutates SQLite, or accepts Proposals.
 - `--json` stdout is captured as sanitized Agent Run events; stderr and exit status
   are stored separately.
+- Settings may expose only the application-owned registry, prompt templates, Skills,
+  JSON Schemas, bounded system limits, and sanitized run lineage. Runtime-materialized
+  prompts, user/Paper/Vault content, credentials, and environment enumeration remain
+  outside that read model.
 - The final message must validate against the supplied JSON Schema before it can
   produce a domain Artifact or Proposal.
 - Paper Summary schemas derive `claims[].sourceHandle` as an enum from the immutable

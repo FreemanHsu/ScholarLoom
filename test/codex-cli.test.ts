@@ -8,15 +8,38 @@ import { assertDiscussionCapability, CodexCliRunner } from "../src/adapters/code
 import { initializeDataRoot } from "../src/storage/layout.js";
 
 describe("CodexCliRunner Paper Summary contract", () => {
+  it("reports a newer installed Codex CLI as version-compatible before the capability canary runs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-codex-version-"));
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.145.0"; exit 0; fi
+exit 1
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      expect(new CodexCliRunner().runtimeStatus()).toMatchObject({
+        installedVersion: "0.145.0",
+        minimumVersion: "0.144.6",
+        versionStatus: "compatible",
+        capabilityStatus: "not-run",
+      });
+    } finally { process.env.PATH = originalPath; }
+  });
+
   it("constrains every Key Claim to one exact handle from the context manifest", async () => {
     const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-codex-"));
     const executable = join(directory, "codex");
     await writeFile(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-const schemaPath = args[args.indexOf("--output-schema") + 1];
-const outputPath = args[args.indexOf("--output-last-message") + 1];
-const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+	const schemaPath = args[args.indexOf("--output-schema") + 1];
+	const outputPath = args[args.indexOf("--output-last-message") + 1];
+	if (args[args.indexOf("--model") + 1] !== "sol") process.exit(39);
+	const configValues = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
+	if (!configValues.includes('model_reasoning_effort="high"')) process.exit(40);
+	const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
 const allowed = schema.properties.claims.items.properties.sourceHandle.enum;
 if (JSON.stringify(allowed) !== JSON.stringify(["pdf-page:1", "pdf-page:2"])) process.exit(41);
 let prompt = "";
@@ -93,9 +116,11 @@ process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
     await writeFile(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-if (args[0] !== "exec" || !args.includes("--strict-config") || args.includes("--sandbox")) process.exit(51);
-const configValues = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
-if (!configValues.includes('default_permissions="scholarloom-evidence"')) process.exit(54);
+	if (args[0] !== "exec" || !args.includes("--strict-config") || args.includes("--sandbox")) process.exit(51);
+	const configValues = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
+	if (args[args.indexOf("--model") + 1] !== "sol") process.exit(58);
+	if (!configValues.includes('model_reasoning_effort="medium"')) process.exit(59);
+	if (!configValues.includes('default_permissions="scholarloom-evidence"')) process.exit(54);
 if (!configValues.some((value) => value.includes('permissions.scholarloom-evidence=') &&
   value.includes('":root"="deny"') && value.includes('":minimal"="read"') &&
   value.includes('":workspace_roots"={"."="read"}') && value.includes('network={enabled=false}'))) process.exit(55);
@@ -237,7 +262,7 @@ process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({ answer: 
     } finally { process.env.PATH = originalPath; }
   });
 
-  it("runs the launch capability canary through the same native permission profile", async () => {
+  it("accepts a newer Codex CLI after running the launch canary through the same native permission profile", async () => {
     const directory = await mkdtemp(join(tmpdir(), "scholarloom-sandbox-codex-path-"));
     const workspace = join(directory, "workspace");
     await import("node:fs/promises").then(({ mkdir }) => mkdir(workspace));
@@ -245,7 +270,7 @@ process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({ answer: 
     const codex = join(directory, "codex");
     const canaryLog = join(directory, "canary.log");
     await writeFile(codex, `#!/bin/sh
-if [ "$1" = "--version" ]; then echo "codex-cli 0.144.6"; exit 0; fi
+	if [ "$1" = "--version" ]; then echo "codex-cli 0.145.0"; exit 0; fi
 if [ "$1" = "exec" ]; then echo --strict-config --json --output-schema; exit 0; fi
 if [ "$1" = "sandbox" ]; then
   printf '%s\\n' "$@" > ${JSON.stringify(canaryLog)}

@@ -47,6 +47,7 @@ describe("browser navigation", () => {
     expect(readBrowserRoute({ pathname: "/", search: "" })).toEqual({ name: "home" });
     expect(readBrowserRoute({ pathname: "/papers", search: "" })).toEqual({ name: "papers" });
     expect(readBrowserRoute({ pathname: "/reviews", search: "" })).toEqual({ name: "reviews" });
+    expect(readBrowserRoute({ pathname: "/settings", search: "" })).toEqual({ name: "settings" });
     expect(readBrowserRoute({ pathname: "/missing", search: "" })).toEqual({ name: "not-found" });
   });
 
