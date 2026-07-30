@@ -50,7 +50,6 @@ describe("Agentic Evidence conversation", () => {
         return { answer: "图 1 包含一根明显的竖直柱。", groundingStatus: "answered",
           citations: [{ kind: "visual" as const, sourceId, page: 1, imageHash: inspected.imageHash,
             observation: "Figure 1 shows one prominent vertical bar." }],
-          proposedTakeaways: [{ claim: "图 1 的主要视觉元素是一根竖直柱。", receiptOrdinals: [1] }],
           usage: { status: "unavailable" } };
       } finally { database.close(); }
     } };
@@ -76,7 +75,7 @@ describe("Agentic Evidence conversation", () => {
     const database = new Database(layout.databasePath);
     expect(database.prepare("SELECT count(*) FROM visual_evidence_receipts").pluck().get()).toBe(1);
     expect(database.prepare("SELECT count(*) FROM proposals WHERE source_message_id=?").pluck()
-      .get(restored.messages[1].id)).toBe(1);
+      .get(restored.messages[1].id)).toBe(0);
     const receiptId = restored.messages[1].citations[0].id;
     const receipt = await app.inject({ method: "GET", url: `/api/evidence/${encodeURIComponent(receiptId)}` });
     expect(receipt.json()).toMatchObject({ evidenceKind: "visual", page: 1,
@@ -111,7 +110,6 @@ describe("Agentic Evidence conversation", () => {
         answer: "证据支持这个回答。",
         groundingStatus: "answered",
         citations: [{ kind: "text" as const, path: "paper/pages/page-0001.md", lineStart: line, lineEnd: line, quote: "Grounded agentic answer." }],
-        proposedTakeaways: [],
         usage: { status: "reported", inputTokens: 1200, cachedInputTokens: 200, outputTokens: 80, totalTokens: 1280 },
       };
     } };
@@ -171,7 +169,7 @@ describe("Agentic Evidence conversation", () => {
          first_inspected_at,last_inspected_at) VALUES (?,?,?,?,?,1,'failed_infra',1,?,?)`)
         .run(`inspection:${input.attemptId}`, input.attemptId, input.runEpoch, source.artifact_id, source.content_hash, now, now);
       database.close();
-      return { answer: "无法检查图像。", groundingStatus: "insufficient_evidence", citations: [], proposedTakeaways: [],
+      return { answer: "无法检查图像。", groundingStatus: "insufficient_evidence", citations: [],
         usage: { status: "unavailable" } };
     } };
     const app = await createApp({ storageLayout: layout,
@@ -214,7 +212,7 @@ describe("Agentic Evidence conversation", () => {
       const line = page.split("\n").findIndex((value) => value.includes("Retry uses frozen evidence.")) + 1;
       return { answer: "retry complete", groundingStatus: "answered",
         citations: [{ kind: "text" as const, path: "paper/pages/page-0001.md", lineStart: line, lineEnd: line, quote: "Retry uses frozen evidence." }],
-        proposedTakeaways: [], usage: { status: "unavailable" } };
+        usage: { status: "unavailable" } };
     } };
     const app = await createApp({ storageLayout: layout,
       paperSource: { async resolve(arxivId) { return { arxivId, latestVersion: 1, title: "Cancel Fixture", authors: ["Ada Fixture"], year: 2026 }; },

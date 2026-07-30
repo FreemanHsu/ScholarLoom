@@ -116,6 +116,9 @@ flowchart TD
     PC --> CR["CodexRunner"]
     PC --> PL
     PC --> PR["ProposalRegistry"]
+    PC --> TD["TakeawayDistillation"]
+    TD --> JE
+    TD --> PR
     KR --> PR
     KR --> KW["KnowledgeWriter"]
     EA --> SI["SearchIndex"]
@@ -251,6 +254,19 @@ It validates the decision against Proposal type, records an immutable
 ReviewDecision, and asks KnowledgeWriter to materialize the accepted revision.
 There is no generic “update any entity” interface.
 
+#### TakeawayDistillation
+
+`TakeawayDistillation.request()` is the only path that constructs Selection prompts,
+freezes Distillation Context, invokes the Selection adapter, validates candidate
+provenance, or creates a V2 Takeaway Proposal. PaperConversation creates the automatic
+Job in the assistant Message/Receipt commit transaction. Explicit save uses the same
+module with a separate trigger/focus identity. It reuses `job_runs`; it does not
+introduce another operational state machine. See ADR 0013.
+
+The production adapter is Codex CLI and the deterministic adapter powers fixtures.
+The user-facing capability remains disabled until the committed quality evaluation
+report records a passing blind grade.
+
 ### 4.5 EntryAgent
 
 Interface:
@@ -358,7 +374,7 @@ CodexRunner accepts a typed task rather than an arbitrary shell command:
 
 ```ts
 type CodexTask<T> = {
-  kind: "paper-summary" | "paper-chat" | "knowledge-proposal" | "entry-answer";
+  kind: "paper-summary" | "paper-chat" | "takeaway-distillation" | "knowledge-proposal" | "entry-answer";
   contextManifest: ContextManifest;
   instructions: string;
   outputSchema: JsonSchema<T>;
@@ -440,6 +456,8 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | GET | `/api/conversations/:id` | Restore Messages, attempts, citations, and context |
 | POST | `/api/conversations/:id/messages` | Persist a Message/attempt and return `202` |
 | POST | `/api/messages/:id/retry` | Retry the original Message with frozen context |
+| POST | `/api/messages/:id/distill` | Explicitly request replay-safe Takeaway Selection |
+| POST | `/api/distillations/:id/retry` | Retry a failed/interrupted Selection from its frozen manifest |
 | POST | `/api/conversations/:id/rename` | Rename a Conversation |
 | POST | `/api/conversations/:id/archive` | Archive without destructive delete |
 | POST | `/api/conversations/:id/restore` | Restore an archived Conversation |
@@ -447,6 +465,8 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | GET | `/api/proposals` | List reviewable suggestions |
 | POST | `/api/proposals/:id/decisions` | Accept, edit, or reject |
 | POST | `/api/entry-agent/questions` | Query global-curated knowledge |
+| POST | `/api/entry-agent/sources/:type/:id/open` | Record an Entry result source-open event |
+| GET | `/api/metrics/takeaway-distillation` | Read Selection, review, duplicate, coverage, retry, and source-open metrics |
 
 Commands accept an `Idempotency-Key`. Errors use stable problem codes such as
 `invalid-arxiv-reference`, `paper-source-unavailable`, `proposal-already-decided`,

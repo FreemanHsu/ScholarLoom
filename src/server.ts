@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { PaperSourceError } from "./adapters/safe-pdf-downloader.js";
 import type { AgenticEvidenceRunner } from "./agent/agentic-evidence-runner.js";
+import type { TakeawaySelectionRunner } from "./agent/takeaway-distillation.js";
 import Database from "better-sqlite3";
 import type { StorageLayout } from "./storage/layout.js";
 import { PdfPageRenderer } from "./storage/pdf-page-renderer.js";
@@ -20,6 +21,7 @@ import { VisualEvidenceShim } from "./storage/visual-evidence-shim.js";
 import { VisualEvidenceStore } from "./storage/visual-evidence-store.js";
 
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
+const takeawayQualityReleased = process.env.SCHOLARLOOM_TAKEAWAY_V2_RELEASED === "1";
 const fixtureChatFailures = new Set<string>();
 function fixtureAgenticRunner(layout: StorageLayout): AgenticEvidenceRunner { return {
   async run(input) {
@@ -45,7 +47,6 @@ function fixtureAgenticRunner(layout: StorageLayout): AgenticEvidenceRunner { re
         return { answer: "## 图表结论\n\n页面图表中橙色柱 B 最高。", groundingStatus: "answered",
           citations: [{ kind: "visual", sourceId, page: 2, imageHash: inspected.imageHash,
             observation: "The orange bar labelled B is the tallest bar on the rendered page." }],
-          proposedTakeaways: [{ claim: "图表中橙色柱 B 最高。", receiptOrdinals: [1] }],
           usage: { status: "unavailable" } };
       } finally { database.close(); }
     }
@@ -61,10 +62,32 @@ function fixtureAgenticRunner(layout: StorageLayout): AgenticEvidenceRunner { re
     });
     input.onActivity({ type: "grounding", text: `已验证 ${citations.length} 条最终引用` });
     return { answer: "## 回答\n\n冻结的论文、代码与 curated library 证据支持这一结论。", groundingStatus: "answered",
-      citations, proposedTakeaways: citations.length ? [{ claim: "冻结证据连接了论文结论与实现。", receiptOrdinals: [1] }] : [],
+      citations,
       usage: { status: "reported", inputTokens: 38_400, cachedInputTokens: 12_000, outputTokens: 940, totalTokens: 39_340 } };
   },
 }; }
+const fixtureSelectionRunner: TakeawaySelectionRunner = {
+  async select(input) {
+    input.onActivity({ type: "selection", text: "正在运行 fixture Takeaway Selection" });
+    if (input.material.question.includes("FACT_ONLY")) return { selection: { decision: "no-proposal",
+      reasonCode: "not-durable", rationale: "这是一次局部事实查找，不具有独立的长期知识价值。" },
+      usage: { status: "unavailable" } };
+    if (input.material.question.includes("MULTIPLE_CLAIMS")) return { selection: { decision: "no-proposal",
+      reasonCode: "multiple-claims", rationale: "回答包含多个不能合并为同一结论的候选方向。" },
+      usage: { status: "unavailable" } };
+    const receipt = input.material.receipts[0]!;
+    return { selection: { decision: "candidate", candidate: {
+      kind: input.material.question.includes("误解") ? "correction" : "mechanism",
+      claim: "Fixture Paper 通过固定 Paper Version、verified Evidence Receipt 与不可变 revision 连接回答和长期知识，从而让结论在脱离原 Conversation 后仍可追溯。",
+      epistemicStatus: "evidence-backed",
+      evidenceRationale: `Receipt ${receipt.id} 固定了支持该结论的来源、locator 与 content hash。`,
+      caveat: "该 fixture 只验证 ScholarLoom 的流程契约，不代表真实论文模型质量。",
+      receiptIds: [receipt.id],
+      selectionRationale: "该结论整合了方法、作用和适用边界，具有脱离当前问答后的复用价值。",
+      duplicateHints: [],
+    } }, usage: { status: "reported", inputTokens: 1200, outputTokens: 180, totalTokens: 1380 } };
+  },
+};
 const paperSource: PaperSource = fixture ? {
   async resolve(arxivId) { return { arxivId, latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
   async fetchPdf() { return createFixturePdf(); },
@@ -110,13 +133,15 @@ try {
           return { answer: "## 回答\n\n- 固定 commit 中的 `README.md` 说明了证据与实现的连接。\n- PDF 与 Summary 提供论文侧证据。", citations: [
             { sourceHandle: code.handle, locator: code.locator }, { sourceHandle: "pdf-page:2", locator: "p. 2" },
             { sourceHandle: summary.handle, locator: summary.locator }],
-            proposedTakeaways: [{ claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", code.handle], quote: null }] };
+          };
         },
         async runEntry(context) { return { answer: "已确认结论与 active Summary 支持可追溯阅读。",
           sourceHandles: context.sources.map((source) => source.handle), uncertainty: null }; },
       },
-      agenticEvidenceRunner: fixtureAgenticRunner(layout),
-    } : { repositoryAdapter: new GitRepositoryAdapter(), codexRunner: productionCodex!, agenticEvidenceRunner: productionCodex! }) });
+      agenticEvidenceRunner: fixtureAgenticRunner(layout), takeawaySelectionRunner: fixtureSelectionRunner,
+    } : { repositoryAdapter: new GitRepositoryAdapter(), codexRunner: productionCodex!,
+      agenticEvidenceRunner: productionCodex!,
+      ...(takeawayQualityReleased ? { takeawaySelectionRunner: productionCodex! } : {}) }) });
   let closing = false;
   const shutdown = async () => {
     if (closing) return;

@@ -130,14 +130,10 @@ describe("paper ingestion lifecycle", () => {
             answer: "该实现将 attention 记录在固定仓库快照中。",
             citations: [{ sourceHandle: codeHandle, locator: "README.md:1-2" }, { sourceHandle: "pdf-page:2", locator: "p. 2" },
               { sourceHandle: summaryHandle, locator: "overview" }],
-            proposedTakeaways: [
-              { claim: "该论文用可追溯证据连接实验与实现。", sourceHandles: ["pdf-page:2", codeHandle], quote: null },
-              { claim: "这条候选含有未核验引文。", quote: "NOT PRESENT VERBATIM", sourceHandles: ["pdf-page:2"] },
-            ],
           };
         },
         async runEntry(context) {
-          expect(context.sources).toHaveLength(2);
+          expect(context.sources).toHaveLength(1);
           expect(context.sources.map((source) => source.body).join(" ")).not.toContain("WORKING_ONLY_SENTINEL");
           return { answer: "已确认结论与 active Summary 都支持可追溯阅读。", sourceHandles: context.sources.map((source) => source.handle), uncertainty: null };
         },
@@ -189,70 +185,21 @@ describe("paper ingestion lifecycle", () => {
     });
     const proposalResponse = await app.inject({ method: "GET", url: "/api/proposals" });
     const takeawayProposals = proposalResponse.json().proposals.filter((proposal: { proposalType: string }) => proposal.proposalType === "takeaway");
-    expect(takeawayProposals).toEqual(expect.arrayContaining([
-      expect.objectContaining({ proposalType: "takeaway", oneClickEligible: true }),
-      expect.objectContaining({ proposalType: "takeaway", oneClickEligible: false }),
-    ]));
-    const eligibleProposal = takeawayProposals.find((proposal: { oneClickEligible: boolean }) => proposal.oneClickEligible)!;
-    const unverifiedProposal = takeawayProposals.find((proposal: { oneClickEligible: boolean }) => !proposal.oneClickEligible)!;
-    const proposalId = eligibleProposal.id;
-    const firstDecision = await app.inject({ method: "POST", url: `/api/proposals/${proposalId}/decisions`, headers: { "idempotency-key": "accept-fixture-takeaway" }, payload: { action: "accept" } });
-    const retry = await app.inject({ method: "POST", url: `/api/proposals/${proposalId}/decisions`, headers: { "idempotency-key": "accept-fixture-takeaway" }, payload: { action: "accept" } });
-    expect(firstDecision.statusCode).toBe(201);
-    expect(retry.json()).toEqual(firstDecision.json());
-    expect(firstDecision.json()).toMatchObject({ takeaway: { reviewStatus: "confirmed", revision: 1 } });
-    const knowledge = await app.inject({ method: "GET", url: `/api/papers/${imported.json().paper.id}/knowledge` });
-    expect(knowledge.statusCode).toBe(200);
-    expect(knowledge.json()).toMatchObject({
-      pendingProposals: [expect.objectContaining({ proposalType: "takeaway", source: {
-        conversationId: conversation.json().conversation.id, messageId: expect.stringMatching(/^message:/),
-      } })],
-      confirmedTakeaways: [expect.objectContaining({ claim: "该论文用可追溯证据连接实验与实现。", source: {
-        conversationId: conversation.json().conversation.id, messageId: expect.stringMatching(/^message:/),
-      } })],
-    });
+    expect(takeawayProposals).toEqual([]);
     const summaryMarkdown = await readFile(join(storageLayout.vaultRoot, workspace.json().summary.markdownPath), "utf8");
-    const takeawayMarkdown = await readFile(join(storageLayout.vaultRoot, firstDecision.json().takeaway.markdownPath), "utf8");
     const frontmatter = (markdown: string) => parse(markdown.split("---")[1]!) as Record<string, unknown>;
     expect(frontmatter(summaryMarkdown)).toMatchObject({ summary_revision_id: workspace.json().summary.id, paper_version_id: workspace.json().paper.versionId });
-    expect(frontmatter(takeawayMarkdown)).toMatchObject({ id: firstDecision.json().takeaway.id, revision_id: firstDecision.json().takeaway.revisionId, review_status: "confirmed" });
-    const blocked = await app.inject({ method: "POST", url: `/api/proposals/${unverifiedProposal.id}/decisions`, headers: { "idempotency-key": "blocked-unverified" }, payload: { action: "accept" } });
-    expect(blocked.statusCode).toBe(409);
-    expect(blocked.json()).toEqual({ code: "source-verification-required" });
-    const sourceDatabase = new Database(storageLayout.databasePath);
-    const newerVersionId = `${workspace.json().paper.versionId}:newer`;
-    sourceDatabase.prepare(`INSERT INTO paper_versions
-      (id,paper_id,source_type,source_version,source_url,resolved_at,processing_status,accepted_at,created_at,updated_at,
-       source_content_hash,source_media_type,pdf_artifact_id)
-      SELECT ?,paper_id,source_type,'v99',source_url,resolved_at,'ready',accepted_at,created_at,updated_at,
-        source_content_hash,source_media_type,pdf_artifact_id FROM paper_versions WHERE id=?`)
-      .run(newerVersionId, workspace.json().paper.versionId);
-    sourceDatabase.prepare("UPDATE papers SET current_version_id=? WHERE id=?").run(newerVersionId, imported.json().paper.id);
-    sourceDatabase.close();
-    const opened = await app.inject({ method: "POST", url: `/api/proposals/${unverifiedProposal.id}/open-source` });
-    expect(opened.statusCode).toBe(201);
-    expect(decodeURIComponent(opened.json().pdfUrl)).toContain(`/api/paper-versions/${workspace.json().paper.versionId}/pdf`);
-    const openedPdf = await app.inject({ method: "GET", url: opened.json().pdfUrl.split("#")[0] });
-    expect(openedPdf.statusCode).toBe(200);
-    const acceptedAfterOpen = await app.inject({ method: "POST", url: `/api/proposals/${unverifiedProposal.id}/decisions`,
-      headers: { "idempotency-key": "accepted-after-open" },
-      payload: { action: "edit-and-accept", editedClaim: "编辑后确认的固定来源结论。", sourceOpened: false } });
-    expect(acceptedAfterOpen.statusCode).toBe(201);
-    const auditDatabase = new Database(storageLayout.databasePath, { readonly: true });
-    expect(auditDatabase.prepare("SELECT action FROM review_decisions WHERE idempotency_key='accepted-after-open'").get())
-      .toEqual({ action: "accept-with-edit" });
-    auditDatabase.close();
 
     const entry = await app.inject({ method: "POST", url: "/api/entry-agent/questions", payload: { question: "fixture 可追溯证据" } });
     expect(entry.statusCode).toBe(200);
     expect(entry.json()).toMatchObject({
       answer: "已确认结论与 active Summary 都支持可追溯阅读。",
-      sources: [{ sourceType: "summary" }, { sourceType: "takeaway" }],
+      sources: [{ sourceType: "summary" }],
       projection: { stale: false },
     });
     expect(JSON.stringify(entry.json())).not.toContain("WORKING_ONLY_SENTINEL");
     const rebuilt = await app.inject({ method: "POST", url: "/api/diagnostics/rebuild-curated" });
-    expect(rebuilt.json()).toMatchObject({ count: 3 });
+    expect(rebuilt.json()).toMatchObject({ count: 1 });
     const afterRebuild = await app.inject({ method: "POST", url: "/api/entry-agent/questions", payload: { question: "fixture 可追溯证据" } });
     expect(afterRebuild.json().sources).toEqual(entry.json().sources);
     await app.close();

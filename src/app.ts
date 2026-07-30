@@ -14,6 +14,8 @@ import type { StorageLayout } from "./storage/layout.js";
 import { assertDataRootWritable } from "./storage/layout.js";
 import type { AgenticEvidenceRunner } from "./agent/agentic-evidence-runner.js";
 import { AgentRunCoordinator } from "./storage/agent-run-coordinator.js";
+import type { TakeawaySelectionRunner } from "./agent/takeaway-distillation.js";
+import { TakeawayDistillationCoordinator } from "./storage/takeaway-distillation.js";
 
 export type ResolvedPaper = {
   arxivId: string;
@@ -46,6 +48,7 @@ export type CreateAppOptions = {
   clock?: { now(): Date };
   agentMessageTimeoutMs?: number;
   agenticEvidenceRunner?: AgenticEvidenceRunner;
+  takeawaySelectionRunner?: TakeawaySelectionRunner;
 };
 
 function classifyPaperResolutionError(error: unknown): { status: 404 | 503; code: string; detail: string } {
@@ -94,14 +97,19 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       void task.finally(() => backgroundTasks.delete(task));
     },
   });
+  const distillationCoordinator = options.takeawaySelectionRunner ? new TakeawayDistillationCoordinator(options.storageLayout,
+    options.takeawaySelectionRunner, { ...(options.agentMessageTimeoutMs ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
+      ...(options.clock ? { now: () => options.clock!.now() } : {}) }) : null;
   const agentCoordinator = options.agenticEvidenceRunner ? new AgentRunCoordinator(options.storageLayout,
     options.agenticEvidenceRunner, { ...(options.agentMessageTimeoutMs ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
-      ...(options.clock ? { now: () => options.clock!.now() } : {}) }) : null;
+      ...(options.clock ? { now: () => options.clock!.now() } : {}),
+      automaticDistillation: Boolean(distillationCoordinator) }) : null;
   const chatControllers = new Set<AbortController>();
   app.addHook("onClose", async () => {
     for (const controller of chatControllers) controller.abort(new Error("application-closing"));
     await Promise.allSettled(backgroundTasks);
     await agentCoordinator?.close();
+    await distillationCoordinator?.close();
     store.close();
   });
   const runPaperChat = (context: Parameters<NonNullable<CodexRunner["runChat"]>>[0]) => {
@@ -362,7 +370,9 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   app.get<{ Params: { id: string } }>("/api/conversations/:id", async (request, reply) => {
     const conversation = store.getConversation(request.params.id);
-    return conversation ?? reply.code(404).send({ code: "conversation-not-found" });
+    return conversation ? { ...(conversation as object),
+      capabilities: { takeawayDistillation: Boolean(distillationCoordinator) } }
+      : reply.code(404).send({ code: "conversation-not-found" });
   });
 
   app.get<{ Params: { id: string } }>("/api/conversations/:id/lineage", async (request, reply) => {
@@ -441,12 +451,42 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     return reply.code(202).send({ conversation: store.getConversation(conversationId) });
   });
 
+  app.post<{ Params: { id: string }; Body: { focus?: unknown } }>("/api/messages/:id/distill", async (request, reply) => {
+    if (!distillationCoordinator) return reply.code(503).send({ code: "takeaway-distillation-unavailable" });
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    if (request.body?.focus !== undefined && typeof request.body.focus !== "string") {
+      return reply.code(400).send({ code: "distillation-focus-invalid" });
+    }
+    try {
+      return reply.code(202).send({ distillation: distillationCoordinator.request({
+        assistantMessageId: request.params.id, idempotencyKey: key, trigger: "explicit-save",
+        ...(typeof request.body?.focus === "string" ? { focus: request.body.focus } : {}),
+      }) });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "takeaway-distillation-failed";
+      return reply.code(409).send({ code });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/distillations/:id/retry", async (request, reply) => {
+    if (!distillationCoordinator) return reply.code(503).send({ code: "takeaway-distillation-unavailable" });
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    try { return reply.code(202).send({ distillation: distillationCoordinator.retry(request.params.id, key) }); }
+    catch (error) {
+      const code = error instanceof Error ? error.message : "takeaway-distillation-retry-failed";
+      return reply.code(409).send({ code });
+    }
+  });
+
   app.post<{ Params: { id: string } }>("/api/agent-runs/:id/cancel", async (request, reply) =>
     agentCoordinator?.cancel(request.params.id)
       ? reply.code(202).send({ status: "canceled" })
       : reply.code(409).send({ code: "agent-run-not-cancelable" }));
 
-  app.post<{ Params: { id: string }; Body: { action?: unknown; sourceOpened?: unknown; editedClaim?: unknown } }>("/api/proposals/:id/decisions", async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { action?: unknown; edited?: unknown; editedClaim?: unknown;
+    evidenceReviewed?: unknown; duplicateAcknowledged?: unknown; rejectReason?: unknown } }>("/api/proposals/:id/decisions", async (request, reply) => {
     if (request.body?.action !== "accept" && request.body?.action !== "edit-and-accept" && request.body?.action !== "reject") {
       return reply.code(400).send({ code: "decision-action-invalid" });
     }
@@ -455,8 +495,17 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     if (!options.codexRunner && store.isDirectVersionProposal(request.params.id)) {
       return reply.code(503).send({ code: "import-runner-unavailable" });
     }
-    const result = store.decideProposal(request.params.id, key, request.body.action,
-      typeof request.body.editedClaim === "string" ? request.body.editedClaim : undefined);
+    const compatibilityEdited = typeof request.body.editedClaim === "string" ? { claim: request.body.editedClaim } : undefined;
+    const reviewInput: import("./storage/import-store.js").TakeawayReviewInput = {};
+    if (request.body.edited && typeof request.body.edited === "object") {
+      reviewInput.edited = request.body.edited as NonNullable<import("./storage/import-store.js").TakeawayReviewInput["edited"]>;
+    } else if (compatibilityEdited) reviewInput.edited = compatibilityEdited;
+    if (request.body.evidenceReviewed === true) reviewInput.evidenceReviewed = true;
+    if (request.body.duplicateAcknowledged === true) reviewInput.duplicateAcknowledged = true;
+    if (typeof request.body.rejectReason === "string") {
+      reviewInput.rejectReason = request.body.rejectReason as NonNullable<import("./storage/import-store.js").TakeawayReviewInput["rejectReason"]>;
+    }
+    const result = store.decideProposal(request.params.id, key, request.body.action, reviewInput);
     if (result.execution) {
       startImport(result.execution);
     }
@@ -472,11 +521,17 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     if (!options.codexRunner?.runEntry) return reply.code(503).send({ code: "codex-runner-unavailable" });
     return store.answerEntry(request.body.question, (context) => options.codexRunner!.runEntry!(context));
   });
+  app.post<{ Params: { sourceType: "summary" | "takeaway"; sourceId: string } }>(
+    "/api/entry-agent/sources/:sourceType/:sourceId/open", async (request, reply) =>
+      store.recordEntrySourceOpen(request.params.sourceType, request.params.sourceId)
+        ? reply.code(201).send({ recorded: true }) : reply.code(404).send({ code: "entry-source-not-found" }));
 
   app.get("/api/proposals", async () => ({ proposals: store.listProposals() }));
   app.post<{ Params: { id: string } }>("/api/proposals/:id/reopen", async (request, reply) =>
     store.reopenProposal(request.params.id) ? reply.code(200).send({ status: "pending" }) : reply.code(409).send({ code: "proposal-not-archived" }));
   app.get("/api/diagnostics", async () => store.diagnostics());
+  app.get("/api/metrics/takeaway-distillation", async () =>
+    distillationCoordinator?.metrics() ?? { outcomes: [], review: [], timing: null });
   app.post("/api/diagnostics/rebuild-curated", async () => store.rebuildCuratedProjection());
 
   app.get<{ Params: { id: string } }>("/api/imports/:id", async (request, reply) => {

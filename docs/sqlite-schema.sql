@@ -676,13 +676,18 @@ CREATE TABLE takeaway_revisions (
     takeaway_id TEXT NOT NULL REFERENCES takeaways(id) ON DELETE CASCADE,
     revision_number INTEGER NOT NULL CHECK (revision_number >= 1),
     markdown_document_id TEXT NOT NULL UNIQUE REFERENCES markdown_documents(id) ON DELETE RESTRICT,
+    title TEXT NOT NULL,
     claim_text TEXT NOT NULL,
     review_status TEXT NOT NULL CHECK (
         review_status IN ('confirmed', 'needs-review', 'superseded', 'provenance-missing')
     ),
-    epistemic_status TEXT NOT NULL DEFAULT 'evidence-backed' CHECK (
-        epistemic_status = 'evidence-backed'
+    epistemic_status TEXT NOT NULL CHECK (
+        epistemic_status IN ('evidence-backed', 'interpretation', 'hypothesis')
     ),
+    contract_version TEXT NOT NULL,
+    structured_json TEXT NOT NULL CHECK (json_valid(structured_json)),
+    source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE RESTRICT,
+    distillation_job_run_id TEXT NOT NULL REFERENCES job_runs(id) ON DELETE RESTRICT,
     confirmed_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE (takeaway_id, revision_number)
@@ -752,6 +757,52 @@ CREATE TABLE proposals (
 CREATE UNIQUE INDEX uq_pending_proposal_fingerprint
     ON proposals(fingerprint)
     WHERE state = 'pending';
+
+CREATE TABLE takeaway_distillation_manifests (
+    id TEXT PRIMARY KEY,
+    manifest_hash TEXT NOT NULL UNIQUE,
+    manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json)),
+    created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE takeaway_distillation_runs (
+    job_run_id TEXT PRIMARY KEY REFERENCES job_runs(id) ON DELETE RESTRICT,
+    assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE RESTRICT,
+    manifest_id TEXT NOT NULL REFERENCES takeaway_distillation_manifests(id) ON DELETE RESTRICT,
+    contract_version TEXT NOT NULL,
+    trigger TEXT NOT NULL CHECK (trigger IN ('automatic', 'explicit-save')),
+    focus_hash TEXT NOT NULL,
+    outcome_kind TEXT CHECK (outcome_kind IS NULL OR outcome_kind IN ('candidate', 'no-proposal')),
+    reason_code TEXT CHECK (reason_code IS NULL OR reason_code IN (
+        'not-durable', 'duplicate', 'insufficient-evidence', 'multiple-claims'
+    )),
+    proposal_id TEXT REFERENCES proposals(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX uq_takeaway_distillation_terminal_identity
+    ON takeaway_distillation_runs(assistant_message_id, contract_version, trigger, focus_hash)
+    WHERE outcome_kind IS NOT NULL;
+
+CREATE TABLE takeaway_review_requirements (
+    proposal_id TEXT PRIMARY KEY REFERENCES proposals(id) ON DELETE RESTRICT,
+    evidence_review_required INTEGER NOT NULL DEFAULT 0 CHECK (evidence_review_required IN (0,1)),
+    duplicate_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (duplicate_acknowledged IN (0,1)),
+    live_duplicate_warning INTEGER NOT NULL DEFAULT 0 CHECK (live_duplicate_warning IN (0,1)),
+    live_duplicate_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(live_duplicate_ids_json)),
+    reviewed_receipt_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(reviewed_receipt_ids_json)),
+    updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE entry_source_open_events (
+    id TEXT PRIMARY KEY,
+    source_type TEXT NOT NULL CHECK (source_type IN ('summary', 'takeaway')),
+    source_id TEXT NOT NULL,
+    opened_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_entry_source_open_source
+    ON entry_source_open_events(source_type, source_id, opened_at);
 
 CREATE TABLE review_decisions (
     id TEXT PRIMARY KEY,

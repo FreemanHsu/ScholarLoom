@@ -460,6 +460,24 @@ file or Git history when their canonical file is missing.
 Agents do not directly race to edit knowledge files. Index failure does not roll back
 valid knowledge; it marks the relevant projection stale and retries.
 
+### 11.4 Takeaway Distillation Run
+
+An eligible grounded assistant Message owns an automatic Takeaway Distillation Job.
+The immutable Distillation Context Manifest freezes the Paper/Paper Version, source
+Message hashes, verified Evidence Receipt identities and hashes, active Summary,
+confirmed Paper Takeaways, trigger/focus hash, and contract/prompt hashes.
+
+`takeaway_distillation_runs` binds this manifest to the existing `job_runs` lifecycle.
+Its terminal domain outcome is either durable `no-proposal` with a stable reason code,
+or one V2 Takeaway Proposal. Operational failure, timeout, interruption, and retry
+remain Job states and never degrade into a weaker Proposal. One terminal outcome is
+unique by assistant Message, contract version, trigger, and focus hash.
+
+V2 Proposal payload stores advisory kind, standalone claim, epistemic status, evidence
+rationale, caveat, verified Receipt IDs, selection rationale, duplicate hints, title,
+contract version, trigger, and Distillation Job identity. Selection rationale,
+duplicate hints, and focus never enter confirmed Markdown.
+
 ## 12. Search corpora
 
 The data boundary is fixed even though future downward retrieval is not designed.
@@ -475,7 +493,9 @@ Searchable by the MVP entry Agent:
 This corpus has its own FTS projection in the same SQLite database. `EntryAgentSearch`
 is its sole query interface; it cannot query the shared working-corpus FTS. The
 projection is updated from the outbox and can be deterministically rebuilt from
-canonical active Summary and confirmed knowledge revisions. When the outbox is behind,
+canonical active Summary and confirmed knowledge Markdown. Rebuild reads the vault
+files and verifies their recorded hashes; SQLite structured columns are operational
+metadata and cannot silently replace the knowledge authority. When the outbox is behind,
 the Entry Agent may answer from the last good projection but must display an indexing
 staleness notice and its last successful update time.
 

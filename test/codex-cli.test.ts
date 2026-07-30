@@ -52,7 +52,7 @@ process.stdin.on("end", () => {
     }
   });
 
-  it("emits a Codex-compatible strict schema for optional Takeaway quotes", async () => {
+  it("keeps Takeaway generation out of the strict Paper answer schema", async () => {
     const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-chat-codex-"));
     const executable = join(directory, "codex");
     await writeFile(executable, `#!/usr/bin/env node
@@ -61,19 +61,11 @@ const args = process.argv.slice(2);
 const schemaPath = args[args.indexOf("--output-schema") + 1];
 const outputPath = args[args.indexOf("--output-last-message") + 1];
 const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
-const proposal = schema.properties.proposedTakeaways.items;
-const keys = Object.keys(proposal.properties).sort();
-const required = [...proposal.required].sort();
-if (JSON.stringify(required) !== JSON.stringify(keys)) {
-  process.stderr.write("Invalid schema for response_format: 'required' must include every key in properties. Missing 'quote'.");
-  process.exit(44);
-}
-if (JSON.stringify(proposal.properties.quote.type) !== JSON.stringify(["string", "null"])) process.exit(45);
+if (schema.properties.proposedTakeaways || schema.required.includes("proposedTakeaways")) process.exit(44);
 process.stdin.resume();
 process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
   answer: "fixture answer",
-  citations: [],
-  proposedTakeaways: [{ claim: "fixture claim", sourceHandles: ["pdf-page:1"], quote: null }]
+  citations: []
 })));
 `, "utf8");
     await chmod(executable, 0o700);
@@ -117,7 +109,7 @@ process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "rg user-secret-quote paper" } }) + "\\n");
 fs.writeFileSync(output, JSON.stringify({ answer: "grounded", groundingStatus: "answered",
   citations: [{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 10, lineEnd: 10, quote: "evidence" }],
-  proposedTakeaways: [], usage: { status: "reported", inputTokens: 10, cachedInputTokens: 2, outputTokens: 3, totalTokens: 13 } }));
+  usage: { status: "reported", inputTokens: 10, cachedInputTokens: 2, outputTokens: 3, totalTokens: 13 } }));
 `, "utf8");
     await chmod(executable, 0o700);
     const originalPath = process.env.PATH;
@@ -163,7 +155,7 @@ process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({
   answer: "the orange bar is tallest", groundingStatus: "answered",
   citations: [{ kind: "visual", sourceId: "artifact:pdf:fixture", page: 2,
     imageHash: "${"a".repeat(64)}", observation: "The orange bar labelled B is tallest." }],
-  proposedTakeaways: [], usage: { status: "unavailable", inputTokens: null, cachedInputTokens: null,
+  usage: { status: "unavailable", inputTokens: null, cachedInputTokens: null,
     outputTokens: null, totalTokens: null }
 })));
 `, "utf8");
@@ -230,7 +222,7 @@ if (parsed.attemptId !== "job:visual-mcp" || parsed.runEpoch !== 7) process.exit
 const output = args[args.indexOf("--output-last-message") + 1];
 process.stdin.resume();
 process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({ answer: "insufficient",
-  groundingStatus: "insufficient_evidence", citations: [], proposedTakeaways: [], usage: { status: "unavailable",
+  groundingStatus: "insufficient_evidence", citations: [], usage: { status: "unavailable",
   inputTokens: null, cachedInputTokens: null, outputTokens: null, totalTokens: null } })));
 `, "utf8");
     await chmod(executable, 0o700);

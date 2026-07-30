@@ -110,9 +110,22 @@ export class ConversationStore {
           ? normalized.map((citation) => ({ kind: citation.kind, sourceHandle: citation.source_handle,
             locator: JSON.parse(citation.locator_json) as unknown, verificationStatus: citation.verification_status }))
           : JSON.parse(message.citations_json) as unknown[];
+        const distillations = message.role === "assistant" ? (this.database.prepare(`SELECT j.id,j.state,j.error_json,
+          j.started_at,j.completed_at,d.contract_version,d.trigger,d.outcome_kind,d.reason_code,d.proposal_id,
+          json_extract(manifest.manifest_json,'$.focus') focus
+          FROM takeaway_distillation_runs d JOIN job_runs j ON j.id=d.job_run_id
+          JOIN takeaway_distillation_manifests manifest ON manifest.id=d.manifest_id
+          WHERE d.assistant_message_id=? ORDER BY d.created_at,d.job_run_id`).all(message.id) as Array<{
+            id: string; state: string; error_json: string | null; started_at: string | null; completed_at: string | null;
+            contract_version: string; trigger: string; outcome_kind: string | null; reason_code: string | null;
+            proposal_id: string | null; focus: string | null;
+          }>).map((item) => ({ id: item.id, state: item.state, error: item.error_json ? JSON.parse(item.error_json) as unknown : null,
+            contractVersion: item.contract_version, trigger: item.trigger, outcome: item.outcome_kind,
+            reasonCode: item.reason_code, proposalId: item.proposal_id, focus: item.focus,
+            startedAt: item.started_at, completedAt: item.completed_at })) : [];
         return { id: message.id, role: message.role, content: message.content, ordinal: message.ordinal,
           inReplyToMessageId: message.in_reply_to_message_id, createdAt: message.created_at,
-          groundingStatus: message.grounding_status, citations, attempts };
+          groundingStatus: message.grounding_status, citations, attempts, distillations };
       });
     return {
       conversation: { id: row.id, paperId: row.paper_id, title: row.title, status: row.status,

@@ -9,7 +9,8 @@ import {
 import { paperHref, readBrowserRoute, type BrowserRoute } from "./browser-navigation.js";
 import { importMonitor } from "./import-monitor.js";
 import { SummaryMarkdown } from "./summary-markdown.js";
-import { ConversationMessageBody, ConversationProposalGroup } from "./conversation-message.js";
+import { ConversationMessageBody, ConversationProposalGroup, TakeawayReviewCard,
+  type ConversationProposal, type TakeawayDecisionInput } from "./conversation-message.js";
 import { canContinueConversation, conversationActionRequest, filterConversationsByArchive, conversationListStatus, ConversationHeaderActions,
   NewConversationButton, type ConversationLineage }
   from "./conversation-controls.js";
@@ -44,7 +45,7 @@ type Workspace = {
   processing: null | { jobId: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null };
   repositories: RepositoryAssociation[];
 };
-type Proposal = { id: string; claim: string; oneClickEligible: boolean; sourceHandles: string[] };
+type Proposal = ConversationProposal & { oneClickEligible: boolean };
 type ReviewProposal = {
   id: string;
   proposalType: string;
@@ -54,12 +55,16 @@ type ReviewProposal = {
   legacySource?: boolean;
   createdAt: string;
   archivedAt: string | null;
-  payload: { claim?: string; sourceType?: string; currentVersion?: number | string; latestVersion?: number | string;
+  liveDuplicateIds?: string[];
+  duplicateAcknowledgementRequired?: boolean;
+  sourceConversationHref?: string | null;
+  distillationState?: string | null;
+  payload: ConversationProposal & { sourceType?: string; currentVersion?: number | string; latestVersion?: number | string;
     candidateVersionId?: string; error?: string };
 };
 type EntryAnswer = {
   answer: string;
-  sources: Array<{ sourceType: string; title: string; paperId: string; href?: string }>;
+  sources: Array<{ sourceType: "summary" | "takeaway"; sourceId: string; title: string; paperId: string; href?: string }>;
   projection: { stale: boolean; notice?: string; lastSuccessfulAt: string | null };
 };
 type OpenedPdfSource = { href: string; anchor: string; page: number };
@@ -78,6 +83,7 @@ type ConversationSummary = { id: string; paperId: string; title: string; status:
   snapshotIntegrity: "frozen" | "legacy"; continuedFromConversationId: string | null; updatedAt: string };
 type ConversationDetail = {
   conversation: ConversationSummary & { contextSnapshotId: string };
+  capabilities?: { takeawayDistillation: boolean };
   contextSnapshot: { id: string; paperVersionId: string; summaryRevisionId: string; extractionRunId: string;
     pageCount: number; repositorySnapshots: Array<{ id: string; commitSha: string }> } | null;
   messages: Array<{ id: string; role: "user" | "assistant"; content: string; inReplyToMessageId: string | null;
@@ -88,9 +94,15 @@ type ConversationDetail = {
     attempts: Array<{ id: string; attemptNo: number; state: string; runnerKind?: string | null; error: { code?: string } | null;
       receiptCounts?: Record<string, number> & { total: number };
       activities?: Array<{ type: string; text: string; createdAt: string }>; usage?: { status: string; inputTokens: number | null;
-        cachedInputTokens: number | null; outputTokens: number | null; totalTokens: number | null; elapsedMs: number | null } | null }> }>;
+        cachedInputTokens: number | null; outputTokens: number | null; totalTokens: number | null; elapsedMs: number | null } | null }>;
+    distillations: Array<{ id: string; state: string; trigger: string; outcome: string | null; reasonCode: string | null;
+      proposalId: string | null; focus: string | null; error: { code?: string } | null }> }>;
 };
 type KnowledgeModel = { pendingProposals: Array<Proposal & { reviewStatus: string; legacySource: boolean;
+  title?: string; kind?: string; epistemicStatus?: string; evidenceRationale?: string; caveat?: string | null;
+  receiptIds?: string[]; selectionRationale?: string; duplicateHints?: string[]; liveDuplicateIds?: string[];
+  duplicateAcknowledgementRequired?: boolean; contractVersion?: string;
+  sourceConversationHref?: string | null; distillationState?: string | null;
   source: { conversationId: string; messageId: string } }>;
   confirmedTakeaways: Array<{ id: string; claim: string; revision: number; source: { conversationId: string; messageId: string } }> };
 
@@ -361,6 +373,23 @@ function App() {
     await refreshConversationWorkspace(route.paperId, route.conversationId);
   }
 
+  async function distillMessage(messageId: string, focus?: string) {
+    if (route.name !== "paper" || !route.conversationId) return;
+    const response = await fetch(`/api/messages/${encodeURIComponent(messageId)}/distill`, { method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+      body: JSON.stringify({ ...(focus?.trim() ? { focus: focus.trim() } : {}) }) });
+    if (!response.ok) { setDiscussionError("这条回答当前不满足 Takeaway Selection 条件。"); return; }
+    await refreshConversationWorkspace(route.paperId, route.conversationId);
+  }
+
+  async function retryDistillation(distillationId: string) {
+    if (route.name !== "paper" || !route.conversationId) return;
+    const response = await fetch(`/api/distillations/${encodeURIComponent(distillationId)}/retry`, { method: "POST",
+      headers: { "idempotency-key": crypto.randomUUID() } });
+    if (!response.ok) { setDiscussionError("这次 Takeaway Selection 当前无法重试。"); return; }
+    await refreshConversationWorkspace(route.paperId, route.conversationId);
+  }
+
   async function cancelAttempt(attemptId: string) {
     const response = await fetch(`/api/agent-runs/${encodeURIComponent(attemptId)}/cancel`, { method: "POST" });
     if (!response.ok) { setDiscussionError("该 Attempt 已结束，无法取消。"); return; }
@@ -427,38 +456,20 @@ function App() {
       pdfOpen: false, page: 1, anchor: null }));
   }
 
-  async function acceptProposal(proposal: Proposal) {
-    if (!proposal.oneClickEligible) {
-      const opened = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/open-source`, { method: "POST" });
-      if (opened.ok && workspace) {
-        const source = await opened.json() as { pdfUrl: string; page: number };
-        setOpenedPdfSource({ href: source.pdfUrl, anchor: proposal.id, page: source.page });
-        navigate(paperHref(workspace.paper.id, { pdfOpen: true, page: source.page, anchor: proposal.id }));
-        setProposals((items) => items.map((item) => item.id === proposal.id ? { ...item, oneClickEligible: true } : item));
-      }
-      return;
-    }
-    const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/decisions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": `web-${proposal.id}` },
-      body: JSON.stringify({ action: "accept" }),
-    });
-    if (response.ok) {
-      setProposals((items) => items.filter((item) => item.id !== proposal.id));
-      void refreshReviews();
-      void refreshPapers();
-      if (route.name === "paper") void refreshConversationWorkspace(route.paperId, route.conversationId);
-    }
-  }
-
-  async function reviewProposal(proposal: Proposal, action: "accept" | "edit-and-accept" | "reject", editedClaim?: string) {
-    if (action === "accept") { await acceptProposal(proposal); return; }
+  async function reviewProposal(proposal: Proposal, action: "accept" | "edit-and-accept" | "reject",
+    input: TakeawayDecisionInput = {}) {
     const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/decisions`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
-      body: JSON.stringify({ action, ...(editedClaim ? { editedClaim } : {}) }),
+      body: JSON.stringify({ action, ...input }),
     });
-    if (!response.ok) { setDiscussionError("Proposal 状态已变化或来源不可确认。"); return; }
+    if (!response.ok) {
+      const failure = await response.json() as { code?: string };
+      setDiscussionError(failure.code === "full-evidence-review-required" ? "修改结论、证据、Receipt 或认识状态后，需要重新检查完整证据。"
+        : failure.code === "duplicate-acknowledgement-required" ? "请先比较并确认可能重复的已确认 Takeaway。"
+          : "Proposal 状态已变化或来源不可确认。");
+      return;
+    }
     if (route.name === "paper") await refreshConversationWorkspace(route.paperId, route.conversationId);
     void refreshReviews();
     void refreshPapers();
@@ -595,7 +606,8 @@ function App() {
         : workspace && workspace.paper.id === route.paperId && <PaperWorkspace key={workspace.paper.id} workspace={workspace} route={route} busy={busy} progress={progress}
           error={workspaceError ?? discussionError} openedPdfSource={openedPdfSource} conversations={conversations}
           conversation={conversation} lineage={conversationLineage} knowledge={knowledge} question={question} onQuestion={updateQuestion}
-          onAskPaper={askPaper} onRetryMessage={retryMessage} onAcceptProposal={acceptProposal}
+          onAskPaper={askPaper} onRetryMessage={retryMessage} onDistillMessage={distillMessage}
+          onRetryDistillation={retryDistillation}
           onCancelAttempt={cancelAttempt} evidence={evidence}
           onEvidenceIntegrityFailure={() => route.evidenceReceiptId && void refreshEvidence(route.evidenceReceiptId)}
           onReviewProposal={reviewProposal}
@@ -640,7 +652,11 @@ function ResearchHome(props: {
       {props.entryAnswer && <div className="entry-result">{props.entryAnswer.projection.stale && <div className="stale">
         {props.entryAnswer.projection.notice} · {props.entryAnswer.projection.lastSuccessfulAt ?? "尚无成功索引"}</div>}
         <p>{props.entryAnswer.answer}</p><div className="source-list">{props.entryAnswer.sources.map((source) => <button className="source-card"
-          key={`${source.sourceType}-${source.title}`} onClick={() => props.onNavigate(paperHref(source.paperId))}>{source.sourceType} · {source.title}</button>)}</div>
+          key={`${source.sourceType}-${source.sourceId}`} onClick={() => {
+            void fetch(`/api/entry-agent/sources/${source.sourceType}/${encodeURIComponent(source.sourceId)}/open`,
+              { method: "POST" });
+            props.onNavigate(paperHref(source.paperId));
+          }}>{source.sourceType} · {source.title}</button>)}</div>
       </div>}
     </section>
 
@@ -724,11 +740,18 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
     setActionError(null);
     await onRefresh();
   };
-  const decideTakeaway = async (proposal: ReviewProposal, action: "accept" | "edit-and-accept" | "reject", editedClaim?: string) => {
+  const decideTakeaway = async (proposal: ReviewProposal, action: "accept" | "edit-and-accept" | "reject",
+    input: TakeawayDecisionInput = {}) => {
     const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/decisions`, { method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
-      body: JSON.stringify({ action, ...(editedClaim ? { editedClaim } : {}) }) });
-    if (!response.ok) { setActionError("Proposal 已变化，或固定来源尚未完成核验。"); return; }
+      body: JSON.stringify({ action, ...input }) });
+    if (!response.ok) {
+      const failure = await response.json() as { code?: string };
+      setActionError(failure.code === "full-evidence-review-required" ? "这些编辑会改变证据判断；请勾选已重新检查完整证据。"
+        : failure.code === "duplicate-acknowledgement-required" ? "请先比较并确认可能重复的 Takeaway。"
+          : "Proposal 已变化，或固定来源尚未完成核验。");
+      return;
+    }
     setActionError(null);
     await onRefresh();
   };
@@ -748,15 +771,15 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
           <button onClick={() => void openCandidate(proposal)}>打开候选 PDF</button>
           <button disabled={!opened.has(proposal.id)} onClick={() => void acceptCandidate(proposal)}>确认采用此版本</button>
         </div>}
-        {proposal.proposalType === "takeaway" && <div className="review-actions">
-          {!proposal.oneClickEligible && <button onClick={() => void openCandidate(proposal)}>查看固定来源</button>}
-          {!proposal.legacySource && <button disabled={!proposal.oneClickEligible && !opened.has(proposal.id)}
-            onClick={() => void decideTakeaway(proposal, "accept")}>确认</button>}
-          {!proposal.legacySource && <button disabled={!proposal.oneClickEligible && !opened.has(proposal.id)} onClick={() => {
-            const edited = window.prompt("编辑确认后的 Takeaway", proposal.payload.claim ?? "");
-            if (edited) void decideTakeaway(proposal, "edit-and-accept", edited); }}>编辑后确认</button>}
-          <button onClick={() => void decideTakeaway(proposal, "reject")}>拒绝</button>
-        </div>}
+        {proposal.proposalType === "takeaway" && <TakeawayReviewCard proposal={{
+          ...proposal.payload, id: proposal.id, claim: proposal.payload.claim ?? "", legacySource: Boolean(proposal.legacySource),
+          ...(proposal.liveDuplicateIds ? { liveDuplicateIds: proposal.liveDuplicateIds } : {}),
+          ...(proposal.duplicateAcknowledgementRequired !== undefined
+            ? { duplicateAcknowledgementRequired: proposal.duplicateAcknowledgementRequired } : {}),
+          ...(proposal.sourceConversationHref !== undefined
+            ? { sourceConversationHref: proposal.sourceConversationHref } : {}),
+          ...(proposal.distillationState !== undefined ? { distillationState: proposal.distillationState } : {}),
+        }} onDecide={(candidate, action, input) => void decideTakeaway(proposal, action, input)} />}
         {proposal.legacySource && <p className="inline-alert">旧 Conversation 来源不完整，只能查看或拒绝，不能确认。</p>}
         {proposal.paperId && <button className="text-button" onClick={() => onNavigate(paperHref(proposal.paperId!))}>打开相关 Paper →</button>}
       </article>)}</div>}
@@ -778,9 +801,11 @@ function PaperWorkspace(props: {
   onQuestion(value: string): void;
   onAskPaper(event: React.FormEvent): void;
   onRetryMessage(messageId: string): void;
+  onDistillMessage(messageId: string, focus?: string): void;
+  onRetryDistillation(distillationId: string): void;
   onCancelAttempt(attemptId: string): void;
-  onAcceptProposal(proposal: Proposal): void;
-  onReviewProposal(proposal: Proposal, action: "accept" | "edit-and-accept" | "reject", editedClaim?: string): void;
+  onReviewProposal(proposal: Proposal, action: "accept" | "edit-and-accept" | "reject",
+    input?: TakeawayDecisionInput): void;
   onManageConversation(action: "rename" | "archive" | "restore", title?: string): void;
   onContinueConversation(): void;
   onRetry(): void;
@@ -910,6 +935,10 @@ function PaperWorkspace(props: {
               conversationId: route.conversationId, pdfOpen: true, page,
               anchor: props.conversation?.contextSnapshot
                 ? `evidence:${props.conversation.contextSnapshot.paperVersionId}:page:${page}:source` : null }));
+            const latestDistillation = message.distillations?.at(-1);
+            const eligibleForExplicitSave = props.conversation?.capabilities?.takeawayDistillation === true &&
+              message.role === "assistant" &&
+              ["answered", "partially_answered"].includes(message.groundingStatus ?? "") && message.citations.length > 0;
             return <article key={message.id} className={`message ${message.role}`}>
             <b>{message.role === "user" ? "你" : "ScholarLoom"}</b>
             <ConversationMessageBody role={message.role} content={message.content} pageCount={pdfPageCount}
@@ -939,13 +968,26 @@ function PaperWorkspace(props: {
                 onClick={(event) => { event.preventDefault(); props.onNavigate(href); }}>{label}</a>;
             })}</div>}
             <ConversationProposalGroup proposals={messageProposals}
-              onAccept={(proposal) => { const source = messageProposals.find((candidate) => candidate.id === proposal.id);
-                if (source) void props.onReviewProposal(source, "accept"); }}
-              onEdit={(proposal) => { const edited = window.prompt("编辑确认后的 Takeaway", proposal.claim);
+              onDecide={(proposal, action, input) => {
                 const source = messageProposals.find((candidate) => candidate.id === proposal.id);
-                if (edited && source) void props.onReviewProposal(source, "edit-and-accept", edited); }}
-              onReject={(proposal) => { const source = messageProposals.find((candidate) => candidate.id === proposal.id);
-                if (source) void props.onReviewProposal(source, "reject"); }} />
+                if (source) void props.onReviewProposal(source, action, input);
+              }} />
+            {message.role === "assistant" && (props.conversation?.capabilities?.takeawayDistillation || latestDistillation) &&
+              <div className={`distillation-state ${latestDistillation?.state ?? "idle"}`}>
+              <span>{!latestDistillation ? "尚未运行 Takeaway Selection"
+                : latestDistillation.state === "queued" || latestDistillation.state === "running" ? "正在判断是否值得沉淀…"
+                  : latestDistillation.outcome === "candidate" ? "已生成 1 个 Takeaway Proposal"
+                    : latestDistillation.outcome === "no-proposal" ? `未建议沉淀 · ${distillationReasonLabel(latestDistillation.reasonCode)}`
+                      : `Selection ${latestDistillation.state}`}</span>
+              {latestDistillation?.reasonCode === "multiple-claims" && <button onClick={() => {
+                const focus = window.prompt("选择一个要提炼的结论方向");
+                if (focus) void props.onDistillMessage(message.id, focus);
+              }}>选择一个方向</button>}
+              {eligibleForExplicitSave && latestDistillation?.reasonCode !== "multiple-claims" &&
+                <button onClick={() => void props.onDistillMessage(message.id)}>保存为 Takeaway…</button>}
+              {latestDistillation && ["failed", "timed_out", "interrupted"].includes(latestDistillation.state) &&
+                <button onClick={() => void props.onRetryDistillation(latestDistillation.id)}>重试 Selection</button>}
+            </div>}
             {message.attempts.slice(-1).map((attempt) => <div key={attempt.id} className={`attempt ${attempt.state}`}>
               <div><span>{attempt.state === "queued" ? "排队中" : attempt.state === "running" ? "正在处理…"
                 : attempt.state === "interrupted" ? "服务中断，回答未完成" : attempt.state === "succeeded"
@@ -975,11 +1017,8 @@ function PaperWorkspace(props: {
     </div>}
     {route.mode === "knowledge" && <section className="knowledge-workspace"><header><span className="eyebrow">PAPER KNOWLEDGE</span><h2>已审核知识</h2></header>
       <div className="knowledge-columns"><div><h3>Pending Proposals</h3>{props.knowledge.pendingProposals.length === 0 && <p className="empty">没有待审核 Proposal。</p>}
-        {props.knowledge.pendingProposals.map((proposal) => <article className="proposal" key={proposal.id}><span>{proposal.legacySource ? "LEGACY · REJECT ONLY" : "TAKEAWAY PROPOSAL"}</span>
-          <p>{proposal.claim}</p><small>来源：{proposal.source.conversationId}</small><div className="review-actions">
-            {!proposal.legacySource && <><button onClick={() => void props.onReviewProposal(proposal, "accept")}>确认</button>
-              <button onClick={() => { const edited = window.prompt("编辑确认后的 Takeaway", proposal.claim); if (edited) void props.onReviewProposal(proposal, "edit-and-accept", edited); }}>编辑后确认</button></>}
-            <button onClick={() => void props.onReviewProposal(proposal, "reject")}>拒绝</button></div></article>)}</div>
+        {props.knowledge.pendingProposals.map((proposal) => <TakeawayReviewCard key={proposal.id} proposal={proposal}
+          onDecide={(candidate, action, input) => void props.onReviewProposal(proposal, action, input)} />)}</div>
         <div><h3>Confirmed Takeaways</h3>{props.knowledge.confirmedTakeaways.length === 0 && <p className="empty">尚无 confirmed Takeaway。</p>}
           {props.knowledge.confirmedTakeaways.map((takeaway) => <article className="takeaway" key={takeaway.id}><span className="eyebrow">CONFIRMED · R{takeaway.revision}</span>
             <p>{takeaway.claim}</p><a href={paperHref(workspace.paper.id, { mode: "discussion", conversationId: takeaway.source.conversationId,
@@ -1036,4 +1075,9 @@ function formatReceiptCounts(counts: (Record<string, number> & { total: number }
     if (counts[kind]) parts.push(`${label} ${counts[kind]}`);
   }
   return parts.join(" · ");
+}
+
+function distillationReasonLabel(reason: string | null): string {
+  return ({ "not-durable": "不属于长期知识", duplicate: "可能重复", "insufficient-evidence": "证据不足",
+    "multiple-claims": "包含多个结论" } as Record<string, string>)[reason ?? ""] ?? "未达到门槛";
 }

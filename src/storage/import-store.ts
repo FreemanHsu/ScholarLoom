@@ -20,6 +20,8 @@ import { ContextSnapshotBuilder } from "./context-snapshot-builder.js";
 import { ConversationStore } from "./conversation-store.js";
 import { canonicalSectionHash } from "./canonical-section-hash.js";
 import { RepositoryAssociations } from "./repository-associations.js";
+import { liveDuplicateRevisionIds } from "./takeaway-distillation.js";
+import { EPISTEMIC_STATUSES, TAKEAWAY_KINDS, type EpistemicStatus, type TakeawayKind } from "../agent/takeaway-distillation.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -50,7 +52,6 @@ export type SummaryResult = {
 export type ChatResult = {
   answer: string;
   citations: Array<{ sourceHandle: string; locator: string }>;
-  proposedTakeaways: Array<{ claim: string; sourceHandles: string[]; quote: string | null }>;
 };
 export type ChatSource = {
   handle: string;
@@ -59,6 +60,14 @@ export type ChatSource = {
   locator: string;
 };
 export type EntryResult = { answer: string; sourceHandles: string[]; uncertainty: string | null };
+export type TakeawayReviewInput = {
+  edited?: Partial<{ title: string; claim: string; evidenceRationale: string; caveat: string | null;
+    receiptIds: string[]; epistemicStatus: EpistemicStatus }>;
+  evidenceReviewed?: boolean;
+  duplicateAcknowledged?: boolean;
+  rejectReason?: "useful-answer-not-knowledge" | "context-incomplete" | "incorrect-or-unsupported" |
+    "duplicate" | "too-broad" | "too-trivial" | "other";
+};
 
 type ImportStatus = {
   importRequest: { id: string; paperId: string | null; resolutionStatus: string;
@@ -113,6 +122,7 @@ export class ImportStore {
     this.#knowledgeWriter = new KnowledgeWriter(this.#database, {
       now: this.#now,
       stagedFileExists: (relativePath) => existsSync(this.#knowledgePath(relativePath)),
+      afterTakeawayPhase: (phase) => this.#maybeFail(phase),
       advanceSummary: (id) => this.#advanceSummaryWrite(id),
       advancePaperManifest: (id) => this.#advanceManifestWrite(id),
       knowledgePath: (relativePath) => this.#knowledgePath(relativePath),
@@ -567,8 +577,7 @@ export class ImportStore {
     let output: ChatResult;
     try {
       output = await runChat(chatContext);
-      if (!output.answer || output.citations.some((citation) => !sources.some((source) => source.handle === citation.sourceHandle)) ||
-          output.proposedTakeaways.some((proposal) => proposal.sourceHandles.some((handle) => !sources.some((source) => source.handle === handle)))) {
+      if (!output.answer || output.citations.some((citation) => !sources.some((source) => source.handle === citation.sourceHandle))) {
         throw new Error("codex-output-invalid");
       }
     } catch (error) {
@@ -593,13 +602,7 @@ export class ImportStore {
       return { type: "code", commitSha: file.repository.commitSha, path: file.relative_path,
         startLine: file.start_line, endLine: file.end_line, locator: citation.locator };
     });
-    const proposals = output.proposedTakeaways.map((proposal) => {
-      const resolved = proposal.sourceHandles.map((handle) => sources.find((source) => source.handle === handle)).filter(Boolean) as typeof sources;
-      if (resolved.length !== proposal.sourceHandles.length) throw new Error("codex-output-invalid");
-      const quoteVerified = !proposal.quote || resolved.some((source) => source.text.includes(proposal.quote!));
-      return { id: `proposal:${randomUUID()}`, proposalType: "takeaway", claim: proposal.claim,
-        sourceHandles: proposal.sourceHandles, quote: proposal.quote ?? null, oneClickEligible: quoteVerified };
-    });
+    const proposals: never[] = [];
     try { this.#database.transaction(() => {
       const completedAt = new Date().toISOString();
       const changed = this.#database.prepare(`UPDATE job_runs SET state='succeeded',progress=1,output_json=?,completed_at=?,heartbeat_at=?
@@ -622,12 +625,9 @@ export class ImportStore {
           citation.type === "pdf" ? "pdf_anchor" : citation.type === "summary" ? "summary_locator"
             : citation.type === "message" ? "message" : "repo_lines",
           output.citations[index]!.sourceHandle, JSON.stringify(citation)));
-      for (const proposal of proposals) this.#database.prepare(`INSERT INTO proposals(id,proposal_type,paper_id,source_message_id,payload_json,review_status,one_click_eligible,created_at)
-        VALUES (?,'takeaway',?,?,?,'pending',?,?)`).run(proposal.id, conversation.paper_id, assistantMessageId,
-          JSON.stringify({ claim: proposal.claim, sourceHandles: proposal.sourceHandles, quote: proposal.quote }), proposal.oneClickEligible ? 1 : 0, completedAt);
       this.#database.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(completedAt, conversationId);
       this.#database.prepare("INSERT INTO durable_events(scope,event_type,data_json,created_at) VALUES (?,'message-complete',?,?)")
-        .run(conversationId, JSON.stringify({ jobRunId, messageId: assistantMessageId, proposalIds: proposals.map((proposal) => proposal.id) }), completedAt);
+        .run(conversationId, JSON.stringify({ jobRunId, messageId: assistantMessageId, proposalIds: [] }), completedAt);
     })(); } catch (error) {
       const failedAt = new Date().toISOString();
       this.#database.transaction(() => {
@@ -659,23 +659,33 @@ export class ImportStore {
   getPaperKnowledge(paperId: string): unknown | null {
     if (!this.#database.prepare("SELECT 1 FROM papers WHERE id=?").get(paperId)) return null;
     const pendingProposals = (this.#database.prepare(`SELECT p.id,p.proposal_type,p.review_status,p.one_click_eligible,
-      p.payload_json,p.created_at,p.source_message_id,m.conversation_id,c.snapshot_integrity
+      p.payload_json,p.created_at,p.source_message_id,m.conversation_id,c.snapshot_integrity,j.state distillation_state
       FROM proposals p LEFT JOIN messages m ON m.id=p.source_message_id
       LEFT JOIN conversations c ON c.id=m.conversation_id
+      LEFT JOIN job_runs j ON j.id=json_extract(p.payload_json,'$.distillationJobRunId')
       WHERE p.paper_id=? AND p.proposal_type='takeaway' AND p.review_status='pending'
       ORDER BY p.created_at,p.id`).all(paperId) as Array<{
         id: string; proposal_type: string; review_status: string; one_click_eligible: number; payload_json: string;
-        created_at: string; source_message_id: string | null; conversation_id: string | null; snapshot_integrity: string | null;
-      }>).map((proposal) => ({
+        created_at: string; source_message_id: string | null; conversation_id: string | null;
+        snapshot_integrity: string | null; distillation_state: string | null;
+      }>).map((proposal) => {
+        const payload = JSON.parse(proposal.payload_json) as Record<string, unknown> & { claim?: string };
+        const liveDuplicateIds = payload.claim ? liveDuplicateRevisionIds(this.#database, paperId, payload.claim) : [];
+        return {
         id: proposal.id,
         proposalType: proposal.proposal_type,
         reviewStatus: proposal.review_status,
-        oneClickEligible: proposal.one_click_eligible === 1 && proposal.snapshot_integrity !== "legacy",
+        oneClickEligible: proposal.one_click_eligible === 1 && proposal.snapshot_integrity !== "legacy" && liveDuplicateIds.length === 0,
         legacySource: proposal.snapshot_integrity === "legacy",
-        ...JSON.parse(proposal.payload_json) as Record<string, unknown>,
+        ...payload,
+        liveDuplicateIds,
+        duplicateAcknowledgementRequired: liveDuplicateIds.length > 0,
         source: { conversationId: proposal.conversation_id, messageId: proposal.source_message_id },
+        sourceConversationHref: proposal.conversation_id
+          ? `/papers/${encodeURIComponent(paperId)}/conversations/${encodeURIComponent(proposal.conversation_id)}` : null,
+        distillationState: proposal.distillation_state,
         createdAt: proposal.created_at,
-      }));
+      }; });
     const confirmedTakeaways = (this.#database.prepare(`SELECT t.id,tr.id revision_id,tr.revision,tr.claim,tr.provenance_json,
       tr.markdown_path,tr.confirmed_at,p.source_message_id,m.conversation_id
       FROM takeaways t JOIN takeaway_revisions tr ON tr.id=t.active_revision_id
@@ -694,7 +704,7 @@ export class ImportStore {
   }
 
   decideProposal(proposalId: string, idempotencyKey: string, action: "accept" | "edit-and-accept" | "reject" = "accept",
-    editedClaim?: string): { status: number; body: unknown; execution?: ImportExecution } {
+    reviewInput: TakeawayReviewInput = {}): { status: number; body: unknown; execution?: ImportExecution } {
     const existing = this.#database.prepare("SELECT result_json FROM review_decisions WHERE idempotency_key=?").get(idempotencyKey) as
       { result_json: string } | undefined;
     if (existing) return { status: 200, body: JSON.parse(existing.result_json) as unknown };
@@ -706,10 +716,22 @@ export class ImportStore {
     if (!proposal) return { status: 404, body: { code: "proposal-not-found" } };
     if (proposal.review_status !== "pending") return { status: 409, body: { code: "proposal-already-decided" } };
     if (action === "reject") {
+      const allowedReasons = ["useful-answer-not-knowledge", "context-incomplete", "incorrect-or-unsupported",
+        "duplicate", "too-broad", "too-trivial", "other"];
+      if (reviewInput.rejectReason && !allowedReasons.includes(reviewInput.rejectReason)) {
+        return { status: 400, body: { code: "reject-reason-invalid" } };
+      }
       const now = this.#now().toISOString();
       const decisionId = `review-decision:${randomUUID()}`;
-      const body = { reviewDecision: { id: decisionId, action: "reject" }, proposal: { id: proposalId, reviewStatus: "rejected" } };
+      const rejectedPayload = JSON.parse(proposal.payload_json) as { claim?: string };
+      const liveDuplicateIds = proposal.proposal_type === "takeaway" && rejectedPayload.claim
+        ? liveDuplicateRevisionIds(this.#database, proposal.paper_id, rejectedPayload.claim) : [];
+      const body = { reviewDecision: { id: decisionId, action: "reject", reason: reviewInput.rejectReason ?? null },
+        proposal: { id: proposalId, reviewStatus: "rejected" } };
       this.#database.transaction(() => {
+        if (proposal.proposal_type === "takeaway") this.#database.prepare(`UPDATE takeaway_review_requirements
+          SET live_duplicate_warning=?,live_duplicate_ids_json=?,updated_at=? WHERE proposal_id=?`)
+          .run(liveDuplicateIds.length > 0 ? 1 : 0, JSON.stringify(liveDuplicateIds), now, proposalId);
         this.#database.prepare("UPDATE proposals SET review_status='rejected',decided_at=? WHERE id=? AND review_status='pending'").run(now, proposalId);
         this.#database.prepare("INSERT INTO review_decisions(id,proposal_id,action,idempotency_key,result_json,created_at) VALUES (?,?,'reject',?,?,?)")
           .run(decisionId, proposalId, idempotencyKey, JSON.stringify(body), now);
@@ -719,8 +741,6 @@ export class ImportStore {
     if (proposal.proposal_type === "takeaway" && proposal.snapshot_integrity === "legacy") {
       return { status: 409, body: { code: "LEGACY_PROVENANCE" } };
     }
-    const opened = this.#database.prepare("SELECT 1 FROM source_open_events WHERE proposal_id=? LIMIT 1").get(proposalId);
-    if (!proposal.one_click_eligible && !opened) return { status: 409, body: { code: "source-verification-required" } };
     if (proposal.proposal_type === "paper-version-update") {
       const payload = JSON.parse(proposal.payload_json) as { candidateVersionId?: string };
       if (!payload.candidateVersionId) return { status: 409, body: { code: "paper-version-candidate-missing" } };
@@ -749,15 +769,60 @@ export class ImportStore {
         importRequest: { id: candidate.import_request_id, paperId: proposal.paper_id, status: "resolved" },
         job: { id: candidate.job_id, attempt: candidate.attempt, state: "running" } } };
     }
-    const payload = JSON.parse(proposal.payload_json) as { claim: string; sourceHandles?: string[]; receiptIds?: string[] };
-    if (action === "edit-and-accept") {
-      if (!editedClaim?.trim()) return { status: 400, body: { code: "edited-claim-required" } };
-      payload.claim = editedClaim.trim();
+    const payload = JSON.parse(proposal.payload_json) as { contractVersion?: string; title?: string; kind?: TakeawayKind;
+      claim: string; epistemicStatus?: EpistemicStatus; evidenceRationale?: string; caveat?: string | null;
+      receiptIds?: string[]; distillationJobRunId?: string; trigger?: string };
+    if (!payload.contractVersion || !payload.title || !payload.kind || !payload.epistemicStatus ||
+        !payload.evidenceRationale || !payload.receiptIds?.length || !payload.distillationJobRunId || !payload.trigger) {
+      return { status: 409, body: { code: "takeaway-v2-upgrade-required" } };
+    }
+    const edited = reviewInput.edited ?? {};
+    if (action === "edit-and-accept" && Object.keys(edited).length === 0) {
+      return { status: 400, body: { code: "structured-edit-required" } };
+    }
+    const candidate = { title: edited.title?.trim() || payload.title,
+      claim: edited.claim?.trim() || payload.claim,
+      evidenceRationale: edited.evidenceRationale?.trim() || payload.evidenceRationale,
+      caveat: edited.caveat === undefined ? payload.caveat ?? null : edited.caveat?.trim() || null,
+      receiptIds: edited.receiptIds ?? payload.receiptIds,
+      epistemicStatus: edited.epistemicStatus ?? payload.epistemicStatus };
+    if (!candidate.title || candidate.title.length > 160 || candidate.claim.length < 40 || candidate.claim.length > 2000 ||
+        candidate.evidenceRationale.length < 10 || candidate.evidenceRationale.length > 2000 ||
+        !EPISTEMIC_STATUSES.includes(candidate.epistemicStatus) || !TAKEAWAY_KINDS.includes(payload.kind)) {
+      return { status: 400, body: { code: "takeaway-structured-edit-invalid" } };
+    }
+    const evidenceSensitiveEdit = edited.claim !== undefined || edited.evidenceRationale !== undefined ||
+      edited.receiptIds !== undefined || edited.epistemicStatus !== undefined;
+    if ((evidenceSensitiveEdit || candidate.epistemicStatus !== "evidence-backed") && !reviewInput.evidenceReviewed) {
+      return { status: 409, body: { code: "full-evidence-review-required" } };
+    }
+    if (candidate.receiptIds.length === 0) return { status: 409, body: { code: "takeaway-receipt-unverified" } };
+    const verifiedCount = (this.#database.prepare(`SELECT count(*) count FROM all_evidence_receipts
+      WHERE message_id=(SELECT source_message_id FROM proposals WHERE id=?)
+      AND verification_status='verified' AND id IN (${candidate.receiptIds.map(() => "?").join(",")})`)
+      .get(proposalId, ...candidate.receiptIds) as { count: number }).count;
+    if (verifiedCount !== new Set(candidate.receiptIds).size) {
+      return { status: 409, body: { code: "takeaway-receipt-unverified" } };
+    }
+    const liveDuplicateIds = liveDuplicateRevisionIds(this.#database, proposal.paper_id, candidate.claim);
+    if (liveDuplicateIds.length > 0 && !reviewInput.duplicateAcknowledged) {
+      return { status: 409, body: { code: "duplicate-acknowledgement-required", duplicateIds: liveDuplicateIds } };
     }
     const paper = this.listPapers().find((candidate) => candidate.id === proposal.paper_id)!;
-    const sourceHandles = payload.receiptIds ?? payload.sourceHandles ?? [];
+    const sourceMessageId = (this.#database.prepare("SELECT source_message_id FROM proposals WHERE id=?")
+      .pluck().get(proposalId) as string);
+    this.#database.prepare(`UPDATE takeaway_review_requirements SET evidence_review_required=?,
+      duplicate_acknowledged=?,live_duplicate_warning=?,live_duplicate_ids_json=?,
+      reviewed_receipt_ids_json=?,updated_at=? WHERE proposal_id=?`).run(
+      evidenceSensitiveEdit ? 1 : 0, reviewInput.duplicateAcknowledged ? 1 : 0,
+      liveDuplicateIds.length > 0 ? 1 : 0, JSON.stringify(liveDuplicateIds),
+      JSON.stringify(reviewInput.evidenceReviewed ? candidate.receiptIds : []), this.#now().toISOString(), proposalId);
     const write = this.#knowledgeWriter.commitTakeaway({ paperId: proposal.paper_id, paperTitle: paper.title,
-      proposalId, idempotencyKey, action, claim: payload.claim, sourceHandles });
+      proposalId, idempotencyKey, action, title: candidate.title, kind: payload.kind, claim: candidate.claim,
+      epistemicStatus: candidate.epistemicStatus, evidenceRationale: candidate.evidenceRationale,
+      caveat: candidate.caveat, receiptIds: candidate.receiptIds, contractVersion: payload.contractVersion,
+      sourceMessageId, distillationJobRunId: payload.distillationJobRunId, trigger: payload.trigger,
+      editedFields: Object.keys(edited) });
     if (!write.complete) return { status: 409, body: { code: "knowledge-write-conflicted" } };
     return { status: 201, body: write.body };
   }
@@ -849,19 +914,41 @@ export class ImportStore {
         ...(pending > 0 ? { notice: "知识索引更新中" } : {}) } };
   }
 
+  recordEntrySourceOpen(sourceType: "summary" | "takeaway", sourceId: string): boolean {
+    const source = this.#database.prepare("SELECT 1 FROM curated_search_documents WHERE source_type=? AND source_id=?")
+      .get(sourceType, sourceId);
+    if (!source) return false;
+    this.#database.prepare(`INSERT INTO entry_source_open_events(id,source_type,source_id,opened_at)
+      VALUES (?,?,?,?)`).run(`entry-source-open:${randomUUID()}`, sourceType, sourceId, this.#now().toISOString());
+    return true;
+  }
+
   listProposals(): unknown[] {
     return (this.#database.prepare(`SELECT p.id,p.proposal_type,p.paper_id,p.review_status,p.one_click_eligible,
-      p.created_at,p.archived_at,p.payload_json,c.snapshot_integrity
+      p.created_at,p.archived_at,p.payload_json,c.snapshot_integrity,c.id source_conversation_id,
+      j.state distillation_state
       FROM proposals p LEFT JOIN messages m ON m.id=p.source_message_id
-      LEFT JOIN conversations c ON c.id=m.conversation_id ORDER BY p.created_at,p.id`).all() as Array<{
+      LEFT JOIN conversations c ON c.id=m.conversation_id
+      LEFT JOIN job_runs j ON j.id=json_extract(p.payload_json,'$.distillationJobRunId')
+      ORDER BY p.created_at,p.id`).all() as Array<{
       id: string; proposal_type: string; review_status: string; paper_id: string | null; one_click_eligible: number;
       created_at: string; archived_at: string | null; payload_json: string; snapshot_integrity: string | null;
-    }>).map((row) => ({
+      source_conversation_id: string | null; distillation_state: string | null;
+    }>).map((row) => {
+      const payload = JSON.parse(row.payload_json) as { claim?: string };
+      const liveDuplicateIds = row.paper_id && payload.claim
+        ? liveDuplicateRevisionIds(this.#database, row.paper_id, payload.claim) : [];
+      return {
         id: row.id, proposalType: row.proposal_type, paperId: row.paper_id, reviewStatus: row.review_status,
-        oneClickEligible: row.one_click_eligible === 1 && row.snapshot_integrity !== "legacy",
+        oneClickEligible: row.one_click_eligible === 1 && row.snapshot_integrity !== "legacy" && liveDuplicateIds.length === 0,
         legacySource: row.snapshot_integrity === "legacy",
-        createdAt: row.created_at, archivedAt: row.archived_at, payload: JSON.parse(row.payload_json) as unknown,
-      }));
+        liveDuplicateIds, duplicateAcknowledgementRequired: liveDuplicateIds.length > 0,
+        sourceConversationHref: row.paper_id && row.source_conversation_id
+          ? `/papers/${encodeURIComponent(row.paper_id)}/conversations/${encodeURIComponent(row.source_conversation_id)}` : null,
+        distillationState: row.distillation_state,
+        createdAt: row.created_at, archivedAt: row.archived_at, payload,
+      };
+    });
   }
 
   reopenProposal(id: string): boolean {
@@ -873,24 +960,38 @@ export class ImportStore {
     const now = this.#now().toISOString();
     return this.#database.transaction(() => {
       this.#database.prepare("DELETE FROM curated_search_documents").run();
-      const summaries = this.#database.prepare(`SELECT s.id,p.title,s.structured_json FROM summary_revisions s
+      const summaries = this.#database.prepare(`SELECT s.id,p.title,s.markdown_path,s.markdown_hash FROM summary_revisions s
         JOIN papers p ON p.id=s.paper_id WHERE s.status='active' ORDER BY s.id`).all() as
-        Array<{ id: string; title: string; structured_json: string }>;
+        Array<{ id: string; title: string; markdown_path: string; markdown_hash: string }>;
       for (const summary of summaries) {
-        const structured = JSON.parse(summary.structured_json) as SummaryResult;
+        const markdown = this.#readAuthoritativeMarkdown(summary.id, summary.markdown_path, summary.markdown_hash);
         this.#database.prepare(`INSERT INTO curated_search_documents(id,source_type,source_id,title,body,updated_at)
           VALUES (?,'summary',?,?,?,?)`).run(`curated:${summary.id}`, summary.id, summary.title,
-            structured.sections.map((section) => section.body).join("\n"), now);
+            summaryProjectionBody(markdown), now);
       }
-      const takeaways = this.#database.prepare(`SELECT tr.id,tr.claim FROM takeaway_revisions tr
+      const takeaways = this.#database.prepare(`SELECT tr.id,tr.markdown_path,tr.markdown_hash FROM takeaway_revisions tr
         JOIN takeaways t ON t.active_revision_id=tr.id WHERE tr.review_status='confirmed' ORDER BY tr.id`).all() as
-        Array<{ id: string; claim: string }>;
-      for (const takeaway of takeaways) this.#database.prepare(`INSERT INTO curated_search_documents(id,source_type,source_id,title,body,updated_at)
-        VALUES (?,'takeaway',?,?,?,?)`).run(`curated:${takeaway.id}`, takeaway.id, takeaway.claim, takeaway.claim, now);
+        Array<{ id: string; markdown_path: string; markdown_hash: string }>;
+      for (const takeaway of takeaways) {
+        const markdown = this.#readAuthoritativeMarkdown(takeaway.id, takeaway.markdown_path, takeaway.markdown_hash);
+        const projection = takeawayProjection(markdown);
+        this.#database.prepare(`INSERT INTO curated_search_documents(id,source_type,source_id,title,body,updated_at)
+          VALUES (?,'takeaway',?,?,?,?)`).run(`curated:${takeaway.id}`, takeaway.id,
+            projection.title, projection.body, now);
+      }
       this.#database.prepare(`UPDATE projection_state SET last_successful_at=?,rebuilt_at=?,updated_at=? WHERE projection='global-curated'`).run(now, now, now);
       this.#database.prepare("UPDATE index_outbox SET state='complete',completed_at=? WHERE projection='global-curated' AND state='pending'").run(now);
       return { count: summaries.length + takeaways.length, rebuiltAt: now };
     })();
+  }
+
+  #readAuthoritativeMarkdown(sourceId: string, relativePath: string, expectedHash: string): string {
+    const path = this.#knowledgePath(relativePath);
+    if (!existsSync(path)) throw new Error(`authoritative-markdown-missing:${sourceId}`);
+    const markdown = readFileSync(path, "utf8");
+    const actualHash = createHash("sha256").update(markdown).digest("hex");
+    if (actualHash !== expectedHash) throw new Error(`authoritative-markdown-drift:${sourceId}`);
+    return markdown;
   }
 
   diagnostics(): unknown {
@@ -1372,6 +1473,36 @@ function renderSummary(input: { summaryId: string; paper: StoredPaper; versionId
   const sections = input.result.sections.map((section, index) => `## ${index + 1}. ${section.title}\n\n${section.body}`).join("\n\n");
   const claims = input.result.claims.map((claim) => `| ${claim.voice} | ${claim.claim} | p. ${claim.page} |`).join("\n");
   return `---\nartifact_id: "artifact:${input.summaryId}"\ntype: paper-summary\npaper_id: "${input.paper.id}"\npaper_version_id: "${input.versionId}"\nextraction_run_id: "${input.extractionId}"\nsummary_revision_id: "${input.summaryId}"\nrevision: 1\nstatus: active\nread_status: ${input.result.readStatus}\nskill_path: skills/paper-reading/SKILL.md\nskill_content_hash: "${input.skillHash}"\nagent_run_id: "${input.agentRunId}"\ngenerated_at: ${input.date}\ncreated: ${input.date}\nupdated: ${input.date}\n---\n\n# ${input.paper.title} — Paper Summary\n\n${sections}\n\n## Key Claims\n\n| Voice | Claim | Evidence Anchor |\n|---|---|---|\n${claims}\n`;
+}
+
+function markdownWithoutFrontmatter(markdown: string): string {
+  return markdown.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim();
+}
+
+function summaryProjectionBody(markdown: string): string {
+  const body = markdownWithoutFrontmatter(markdown).replace(/^# .*(?:\r?\n)+/, "");
+  return body.split(/\r?\n## Key Claims\r?\n/)[0]!.trim();
+}
+
+function markdownSection(markdown: string, heading: string): string | null {
+  const marker = `## ${heading}`;
+  const start = markdown.indexOf(marker);
+  if (start < 0) return null;
+  const contentStart = start + marker.length;
+  const next = markdown.indexOf("\n## ", contentStart);
+  return markdown.slice(contentStart, next < 0 ? undefined : next).trim();
+}
+
+function takeawayProjection(markdown: string): { title: string; body: string } {
+  const authoritative = markdownWithoutFrontmatter(markdown);
+  const title = authoritative.match(/^# (.+)$/m)?.[1]?.trim();
+  const claim = markdownSection(authoritative, "Claim");
+  const evidence = markdownSection(authoritative, "Evidence")?.split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith("|")).join("\n").trim();
+  const interpretation = markdownSection(authoritative, "Interpretation");
+  const caveat = markdownSection(authoritative, "Challenges or conflicts");
+  if (!title || !claim || !evidence) throw new Error("authoritative-takeaway-markdown-invalid");
+  return { title, body: [claim, evidence, interpretation, caveat].filter(Boolean).join("\n\n") };
 }
 
 function classifyImportError(error: unknown, stage: ImportStage): ImportJobError {

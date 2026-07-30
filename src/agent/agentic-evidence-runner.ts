@@ -12,7 +12,6 @@ export type AgenticEvidenceResult = {
   answer: string;
   groundingStatus: "answered" | "partially_answered" | "insufficient_evidence" | "conflicting_evidence";
   citations: ProposedCitation[];
-  proposedTakeaways: Array<{ claim: string; receiptOrdinals: number[] }>;
   usage: AgentUsage;
 };
 export type AgenticEvidenceRunner = {

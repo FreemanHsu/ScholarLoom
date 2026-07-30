@@ -17,7 +17,8 @@ export function recoverInterruptedRuns(database: Database.Database, now: string)
         VALUES (?,'message-interrupted',?,?)`).run(run.conversation_id,
           JSON.stringify({ jobRunId: run.id, userMessageId: run.user_message_id }), now);
     }
-    database.prepare(`UPDATE job_runs SET state='interrupted',progress=1,completed_at=?,heartbeat_at=?
-      WHERE state IN ('running','canceling')`).run(now, now);
+    database.prepare(`UPDATE job_runs SET state='interrupted',progress=1,failure_kind='process_interrupted',
+      error_json='{"code":"process-interrupted"}',completed_at=?,heartbeat_at=?,run_epoch=run_epoch+1,
+      lease_owner=NULL,lease_expires_at=NULL WHERE state IN ('running','canceling')`).run(now, now);
   })();
 }

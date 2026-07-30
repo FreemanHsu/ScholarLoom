@@ -515,7 +515,7 @@ describe("recoverable paper conversation workspace", () => {
     appOptions.codexRunner!.runChat = async () => {
       chatStarted();
       await blocked;
-      return { answer: "完成", citations: [], proposedTakeaways: [] };
+      return { answer: "完成", citations: [] };
     };
     const app = await createApp(appOptions);
     const imported = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
@@ -565,7 +565,7 @@ describe("recoverable paper conversation workspace", () => {
     appOptions.codexRunner!.runChat = async () => {
       calls += 1;
       if (calls === 1) throw new Error("fixture-codex-failure");
-      return { answer: "retry succeeded", citations: [], proposedTakeaways: [] };
+      return { answer: "retry succeeded", citations: [] };
     };
     const app = await createApp(appOptions);
     const imported = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
@@ -594,12 +594,12 @@ describe("recoverable paper conversation workspace", () => {
     await app.close();
   });
 
-  it("fails an invented Proposal handle atomically without an assistant Message", async () => {
+  it("fails an invented citation handle atomically without an assistant Message", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-invalid-handle-"));
     const storageLayout = initializeDataRoot(join(root, "data"));
     const appOptions = options(storageLayout);
-    appOptions.codexRunner!.runChat = async () => ({ answer: "must not persist", citations: [],
-      proposedTakeaways: [{ claim: "invented", sourceHandles: ["agent-invented-handle"], quote: null }] });
+    appOptions.codexRunner!.runChat = async () => ({ answer: "must not persist",
+      citations: [{ sourceHandle: "agent-invented-handle", locator: "invented" }] });
     const app = await createApp(appOptions);
     const imported = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.54321v1" } });
     await waitForImport(app, imported.json().importRequest.id);

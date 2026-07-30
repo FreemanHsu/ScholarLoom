@@ -9,8 +9,9 @@ import { FrozenPdfSourceResolver } from "./frozen-pdf-source-resolver.js";
 import type { StorageLayout } from "./layout.js";
 import { PDF_RENDERER_FINGERPRINT, PdfPageRenderer } from "./pdf-page-renderer.js";
 import { VisualEvidenceStore } from "./visual-evidence-store.js";
+import { enqueueAutomaticDistillation } from "./takeaway-distillation.js";
 
-type CoordinatorOptions = { concurrency?: number; hardTimeoutMs?: number; now?: () => Date };
+type CoordinatorOptions = { concurrency?: number; hardTimeoutMs?: number; now?: () => Date; automaticDistillation?: boolean };
 
 export class AgentRunCoordinator {
   readonly #database: Database.Database;
@@ -19,6 +20,7 @@ export class AgentRunCoordinator {
   readonly #concurrency: number;
   readonly #hardTimeoutMs: number;
   readonly #now: () => Date;
+  readonly #automaticDistillation: boolean;
   #closed = false;
 
   constructor(private readonly layout: StorageLayout, private readonly runner: AgenticEvidenceRunner, options: CoordinatorOptions = {}) {
@@ -29,6 +31,7 @@ export class AgentRunCoordinator {
     this.#concurrency = options.concurrency ?? 2;
     this.#hardTimeoutMs = options.hardTimeoutMs ?? 180_000;
     this.#now = options.now ?? (() => new Date());
+    this.#automaticDistillation = options.automaticDistillation ?? false;
     queueMicrotask(() => this.#pump());
   }
 
@@ -238,14 +241,14 @@ export class AgentRunCoordinator {
         workspaceRoot: workspace.root, question: input.content, signal: controller.signal,
         onActivity: (activity) => this.#activity(attempt.id, attempt.run_epoch, activity) });
       this.#assertVisualInfraHealthy(attempt.id, attempt.run_epoch);
-      if (!result.answer || result.proposedTakeaways.length > 3) throw new Error("codex-output-invalid");
+      if (!result.answer) throw new Error("codex-output-invalid");
       const gate = AnswerGroundingGate.open(workspace.root, this.#database, input.contextSnapshotId,
         { attemptId: attempt.id, runEpoch: attempt.run_epoch, layout: this.layout });
       let receipts: ReturnType<AnswerGroundingGate["verify"]>;
       try { receipts = gate.verify(result.citations); }
       catch { receipts = gate.repair(result.citations); }
       if (result.groundingStatus === "answered" && receipts.length === 0) throw new Error("grounding-required");
-      this.#commitSuccess(attempt, result.answer, result.groundingStatus, receipts, result.proposedTakeaways, result.usage,
+      this.#commitSuccess(attempt, result.answer, result.groundingStatus, receipts, result.usage,
         this.#now().getTime() - started);
     } catch (error) {
       const timedOut = controller.signal.aborted && controller.signal.reason instanceof Error &&
@@ -279,8 +282,7 @@ export class AgentRunCoordinator {
   }
 
   #commitSuccess(attempt: { id: string; run_epoch: number; conversation_id: string; user_message_id: string }, answer: string,
-    groundingStatus: string, receipts: ReturnType<AnswerGroundingGate["verify"]>, proposals: Array<{ claim: string; receiptOrdinals: number[] }>,
-    usage: AgentUsage, elapsedMs: number): void {
+    groundingStatus: string, receipts: ReturnType<AnswerGroundingGate["verify"]>, usage: AgentUsage, elapsedMs: number): void {
     const now = this.#now().toISOString();
     const assistantId = `message:${randomUUID()}`;
     const receiptIds = receipts.map(() => `evidence-receipt:${randomUUID()}`);
@@ -316,15 +318,7 @@ export class AgentRunCoordinator {
               JSON.stringify(receipt.locator), receipt.contentHash, receipt.quote, now);
         }
       });
-      proposals.forEach((proposal) => {
-        if (!proposal.claim.trim() || proposal.receiptOrdinals.some((ordinal) => ordinal < 1 || ordinal > receipts.length)) {
-          throw new Error("proposal-receipt-invalid");
-        }
-        this.#database.prepare(`INSERT INTO proposals(id,proposal_type,paper_id,source_message_id,payload_json,review_status,one_click_eligible,created_at)
-          SELECT ?,'takeaway',paper_id,?,?, 'pending',1,? FROM conversations WHERE id=?`)
-          .run(`proposal:${randomUUID()}`, assistantId, JSON.stringify({ claim: proposal.claim,
-            receiptIds: proposal.receiptOrdinals.map((ordinal) => receiptIds[ordinal - 1]) }), now, attempt.conversation_id);
-      });
+      if (this.#automaticDistillation) enqueueAutomaticDistillation(this.#database, assistantId, this.#now());
       this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,codex_version,context_snapshot_id,
         output_schema_hash,prompt_hash,output_json) VALUES (?,'paper-chat',NULL,'unknown',?,?,?,?)`)
         .run(attempt.id, snapshotId, createHash("sha256").update("agentic-evidence-result:v1").digest("hex"),
