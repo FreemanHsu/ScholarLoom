@@ -375,8 +375,9 @@ process. A successful check for one profile must not imply that the other passed
 
 An application-owned Agent Configuration Registry is the single source for both
 execution and the read-only `/settings` snapshot. Every launch explicitly passes its
-model and `model_reasoning_effort`: Paper Summary uses `sol`/`high`; Agentic Evidence,
-Entry Agent, Takeaway Selection, and legacy Paper Chat use `sol`/`medium`. Agent Run
+model and `model_reasoning_effort`: Paper Summary uses `gpt-5.6-sol`/`high`; Agentic
+Evidence, Entry Agent, Takeaway Selection, and legacy Paper Chat use
+`gpt-5.6-sol`/`medium`. Agent Run
 lineage records these values, the observed Codex version, and the configuration
 version when available; historical unknowns are not inferred.
 

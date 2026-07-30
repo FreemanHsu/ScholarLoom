@@ -12,7 +12,7 @@ describe("SettingsPage", () => {
       loadedAt: "2026-07-30T08:00:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v2",
+        configurationVersion: "agent-configuration.v3",
         startedAt: "2026-07-30T08:00:00.000Z",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: "$HOME/ScholarLoomData",
@@ -38,11 +38,11 @@ describe("SettingsPage", () => {
       agents: [{
         taskKind: "paper-summary",
         displayName: "Paper Summary",
-        model: "sol",
+        model: "gpt-5.6-sol",
         reasoningEffort: "high",
         status: "enabled",
-        configured: { model: "sol", reasoningEffort: "high" },
-        effective: { model: "sol", reasoningEffort: "high" },
+        configured: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+        effective: { model: "gpt-5.6-sol", reasoningEffort: "high" },
         observed: {
           runId: "job:summary", completedAt: "2026-07-30T08:00:00.000Z",
           model: "sol", reasoningEffort: "high", codexVersion: "0.145.0",
@@ -81,14 +81,14 @@ describe("SettingsPage", () => {
     expect(html).toContain("系统配置");
     expect(html).toContain("只读");
     expect(html).toContain("Paper Summary");
-    expect(html).toContain("sol");
+    expect(html).toContain("gpt-5.6-sol");
     expect(html).toContain("high");
     expect(html).toContain("0.145.0");
     expect(html).toContain("能力检查通过");
     expect(html).toContain("0.1.0");
     expect(html).toContain("Takeaway Quality V2");
     expect(html).toContain("vault-markdown-yaml");
-    expect(html).toContain("agent-configuration.v2");
+    expect(html).toContain("agent-configuration.v3");
     expect(html).toContain("job:summary");
     expect(html).toContain("环境变量最小化");
   });

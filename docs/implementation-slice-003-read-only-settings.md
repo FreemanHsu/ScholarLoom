@@ -14,13 +14,15 @@ execution and Settings read the same application-owned configuration registry.
 
 | Task | Model | Thinking budget | Product status |
 |---|---|---|---|
-| Paper Summary | `sol` | `high` | enabled |
-| Discussion / Agentic Evidence | `sol` | `medium` | enabled |
-| Entry Agent | `sol` | `medium` | enabled |
-| Takeaway Selection | `sol` | `medium` | enabled or feature-disabled |
-| Legacy Paper Chat | `sol` | `medium` | legacy |
+| Paper Summary | `gpt-5.6-sol` | `high` | enabled |
+| Discussion / Agentic Evidence | `gpt-5.6-sol` | `medium` | enabled |
+| Entry Agent | `gpt-5.6-sol` | `medium` | enabled |
+| Takeaway Selection | `gpt-5.6-sol` | `medium` | enabled or feature-disabled |
+| Legacy Paper Chat | `gpt-5.6-sol` | `medium` | legacy |
 
-Every Codex launch passes the configured model and `model_reasoning_effort`. New
+Every Codex launch passes the full configured runtime model ID and
+`model_reasoning_effort`; product-family labels such as `sol` are not valid values
+for `codex exec --model`. New
 Agent Run records store the model, thinking budget, Codex version, and configuration
 version when those fields are available. Historical unknown values are never inferred.
 
@@ -57,8 +59,8 @@ snapshot-level load time; observed values carry their own run identity and time.
 
 ## Acceptance
 
-- Summary executes with `sol` and high reasoning; every other configured task executes
-  with `sol` and medium reasoning.
+- Summary executes with `gpt-5.6-sol` and high reasoning; every other configured task
+  executes with `gpt-5.6-sol` and medium reasoning.
 - Settings and the Codex adapter consume the same registry.
 - All five task kinds are visible with correct enabled, feature-disabled, or legacy
   status.

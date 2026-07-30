@@ -47,13 +47,14 @@ Takeaway → curated-only Entry Agent。系统使用 React/Vite、Fastify、SQLi
 Codex CLI，不引入向量数据库。
 
 二级导航的 `/settings` 提供只读配置总览。页面与执行链路共享同一份应用内 Agent
-配置注册表：Paper Summary 使用 `sol` / `high`，Agentic Evidence、Entry Agent、
-Takeaway Selection 和 legacy Paper Chat 使用 `sol` / `medium`。页面还展示
+配置注册表：Paper Summary 使用 `gpt-5.6-sol` / `high`，Agentic Evidence、Entry Agent、
+Takeaway Selection 和 legacy Paper Chat 使用 `gpt-5.6-sol` / `medium`。页面还展示
 application-owned Prompt、Skill、JSON Schema 与有界系统参数，不展示运行时问题、
 论文/Vault 内容、secret 或环境变量。Codex CLI `0.144.6` 是最低支持版本；更高版本在
 全部 capability canary 通过后自动接收，否则 fail closed。
 
-当前 `agent-configuration.v2` 已按五条独立 Fable 评审轨道收紧 Prompt 与输出契约：
+当前 `agent-configuration.v3` 已按五条独立 Fable 评审轨道收紧 Prompt 与输出契约，
+并使用 ChatGPT 账户支持的完整 Codex 模型 ID：
 Summary 使用 canonical sections，Agentic Evidence 在 verified Receipts 后复核状态，
 Entry Agent 返回机器可读 evidence status，Takeaway v2 强化 hypothesis/atomicity
 纪律，legacy Paper Chat 使用 runtime handle/locator allowlist。

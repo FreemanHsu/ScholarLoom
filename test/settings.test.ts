@@ -45,7 +45,7 @@ describe("read-only Settings", () => {
       loadedAt: "2026-07-30T08:05:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v2",
+        configurationVersion: "agent-configuration.v3",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: layout.root,
         codex: {
@@ -64,16 +64,16 @@ describe("read-only Settings", () => {
       },
       agents: [
         { taskKind: "paper-summary", status: "enabled",
-          configured: { model: "sol", reasoningEffort: "high" },
-          effective: { model: "sol", reasoningEffort: "high" } },
+          configured: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+          effective: { model: "gpt-5.6-sol", reasoningEffort: "high" } },
         { taskKind: "agentic-evidence", status: "enabled",
-          configured: { model: "sol", reasoningEffort: "medium" } },
+          configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
         { taskKind: "entry-answer", status: "enabled",
-          configured: { model: "sol", reasoningEffort: "medium" } },
+          configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
         { taskKind: "takeaway-distillation", status: "feature-disabled",
-          configured: { model: "sol", reasoningEffort: "medium" } },
+          configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
         { taskKind: "paper-chat", status: "legacy",
-          configured: { model: "sol", reasoningEffort: "medium" } },
+          configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
       ],
     });
     expect(response.body).not.toContain("process.env");
@@ -222,10 +222,10 @@ describe("read-only Settings", () => {
     const snapshot = (await app.inject({ method: "GET", url: "/api/settings" })).json();
     expect(snapshot.agents.find((agent: { taskKind: string }) => agent.taskKind === "paper-summary").observed)
       .toMatchObject({
-        model: "sol",
+        model: "gpt-5.6-sol",
         reasoningEffort: "high",
         codexVersion: "0.145.0",
-        configurationVersion: "agent-configuration.v2",
+        configurationVersion: "agent-configuration.v3",
       });
     await app.close();
   });

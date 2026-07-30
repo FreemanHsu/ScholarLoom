@@ -28,6 +28,47 @@ exit 1
     } finally { process.env.PATH = originalPath; }
   });
 
+  it("uses the ChatGPT-account-compatible Codex model ID instead of the display alias", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-model-id-"));
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--version") { process.stdout.write("codex-cli 0.145.0\\n"); process.exit(0); }
+const model = args[args.indexOf("--model") + 1];
+if (model === "sol") {
+  process.stderr.write("The 'sol' model is not supported when using Codex with a ChatGPT account.");
+  process.exit(1);
+}
+if (model !== "gpt-5.6-sol") process.exit(2);
+const outputPath = args[args.indexOf("--output-last-message") + 1];
+process.stdin.resume();
+process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
+  sections: [
+    { key: "overview", title: "概述", body: "正文 [pdf-page:1]" },
+    { key: "core-ideas", title: "核心想法", body: "动机 [pdf-page:1]" },
+    { key: "technical-implementation", title: "方法", body: "实现 [pdf-page:1]" },
+    { key: "experiments-analysis", title: "实验", body: "结果 [pdf-page:1]" },
+    { key: "summary-thoughts", title: "总结", body: "总结 [pdf-page:1]" }
+  ],
+  claims: [{ voice: "paper-evidence", claim: "有证据的结论", sourceHandle: "pdf-page:1" }],
+  readStatus: "read"
+})));
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      await expect(new CodexCliRunner({ canaries: false }).runSummary({
+        paperId: "paper:model-id",
+        title: "Model ID",
+        pages: [{ handle: "pdf-page:1", page: 1, text: "evidence" }],
+      })).resolves.toMatchObject({ readStatus: "read" });
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
   it("accepts a newer CLI for Paper Summary only after its structured launch canary passes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-codex-"));
     const executable = join(directory, "codex");
@@ -51,7 +92,7 @@ if (args[0] === "sandbox") {
 	const outputPath = args[args.indexOf("--output-last-message") + 1];
 	if (!args.includes("--strict-config") || args.includes("--sandbox")) process.exit(35);
 	if (!fs.existsSync(args[args.indexOf("--cd") + 1] + "/CANARY")) process.exit(33);
-	if (args[args.indexOf("--model") + 1] !== "sol") process.exit(39);
+	if (args[args.indexOf("--model") + 1] !== "gpt-5.6-sol") process.exit(39);
 	const configValues = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
 	if (!configValues.includes('model_reasoning_effort="high"')) process.exit(40);
 	if (!configValues.includes('default_permissions="scholarloom-structured"')) process.exit(34);
@@ -184,7 +225,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 	if (args[0] !== "exec" || !args.includes("--strict-config") || args.includes("--sandbox")) process.exit(51);
 	const configValues = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
-	if (args[args.indexOf("--model") + 1] !== "sol") process.exit(58);
+	if (args[args.indexOf("--model") + 1] !== "gpt-5.6-sol") process.exit(58);
 	if (!configValues.includes('model_reasoning_effort="medium"')) process.exit(59);
 	if (!configValues.includes('default_permissions="scholarloom-evidence"')) process.exit(54);
 if (!configValues.some((value) => value.includes('permissions.scholarloom-evidence=') &&

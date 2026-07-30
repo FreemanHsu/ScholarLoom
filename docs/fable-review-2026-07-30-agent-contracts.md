@@ -2,7 +2,10 @@
 
 日期：2026-07-30  
 评审模型：`claude-fable-5`  
-配置版本：`agent-configuration.v2`
+评审时配置版本：`agent-configuration.v2`
+
+当前执行配置：`agent-configuration.v3`（将展示别名 `sol` 更正为 ChatGPT
+账户支持的完整运行时 ID `gpt-5.6-sol`；本评审的 Prompt/输出契约结论不变）
 
 本轮将五个 Agent 分成独立 Canvas 评审：Paper Summary、Agentic Evidence、Entry
 Agent、Takeaway Selection 与 legacy Paper Chat。发送给外部评审的内容仅包含仓库内

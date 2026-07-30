@@ -1,5 +1,6 @@
-export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v2";
+export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v3";
 export const MINIMUM_CODEX_VERSION = "0.144.6";
+export const CODEX_SOL_MODEL = "gpt-5.6-sol";
 
 export type AgentTaskKind =
   | "paper-summary"
@@ -34,7 +35,7 @@ export type AgentExecutionMetadataProvider = (taskKind: AgentTaskKind) => AgentE
 export type AgentConfiguration = {
   taskKind: AgentTaskKind;
   displayName: string;
-  model: "sol";
+  model: typeof CODEX_SOL_MODEL;
   reasoningEffort: ReasoningEffort;
   execution: {
     timeoutMs: number;
@@ -60,7 +61,7 @@ const configurations: readonly AgentConfiguration[] = [
 function configuration(taskKind: AgentTaskKind, displayName: string, reasoningEffort: ReasoningEffort,
   timeoutMs: number, concurrency: number | null, agentic = false): AgentConfiguration {
   return {
-    taskKind, displayName, model: "sol", reasoningEffort,
+    taskKind, displayName, model: CODEX_SOL_MODEL, reasoningEffort,
     execution: {
       timeoutMs,
       concurrency,
