@@ -4,7 +4,7 @@ import {
   readFileSync,
   readdirSync,
 } from "node:fs";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 
 import type Database from "better-sqlite3";
 import { parseDocument } from "yaml";
@@ -429,7 +429,20 @@ export class PaperOrganizationStore {
     blocked?: boolean;
   } {
     const rebuiltAt = this.now().toISOString();
-    const topicPaths = this.readMarkdownFiles(join(this.layout.vaultRoot, "knowledge", "topics"));
+    const allTopicPaths = this.readMarkdownFiles(join(this.layout.vaultRoot, "knowledge", "topics"));
+    const ignoredTopicPaths = allTopicPaths.filter((path) => basename(path).toLocaleLowerCase("en-US") === "readme.md");
+    const topicPaths = allTopicPaths.filter((path) => basename(path).toLocaleLowerCase("en-US") !== "readme.md");
+    if (ignoredTopicPaths.length > 0) {
+      const supersede = this.database.prepare(`UPDATE proposals
+        SET review_status='superseded',decided_at=?
+        WHERE proposal_type='reconciliation' AND review_status IN ('pending','archived')
+          AND json_extract(payload_json,'$.targetPath')=?`);
+      this.database.transaction(() => {
+        for (const path of ignoredTopicPaths) {
+          supersede.run(rebuiltAt, relative(this.layout.vaultRoot, path));
+        }
+      })();
+    }
     const paperPaths = this.readMarkdownFiles(join(this.layout.vaultRoot, "library", "papers"))
       .filter((path) => path.endsWith(`${join("", "paper.md")}`));
     const knownHashes = new Map<string, { hash: string; targetId: string; targetKind: "paper" | "topic" }>([

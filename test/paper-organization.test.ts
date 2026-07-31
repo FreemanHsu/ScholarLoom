@@ -39,6 +39,43 @@ describe("Paper organization", () => {
     expect(normalizePaperLookup("ᾀ")).toBe(normalizePaperLookup("ἀι"));
   });
 
+  it("treats the Topics README as directory documentation rather than a Topic", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-topic-readme-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    await writeFile(join(storageLayout.vaultRoot, "knowledge", "topics", "README.md"),
+      "# Topics\n\n主题笔记是领域地图，使用 `templates/topic.md`。\n", "utf8");
+    const app = await createApp({
+      storageLayout,
+      paperSource: { async resolve() { throw new Error("unused"); } },
+    });
+    const rebuilt = await app.inject({ method: "POST", url: "/api/diagnostics/rebuild-paper-catalog" });
+    expect(rebuilt.statusCode).toBe(200);
+    expect(rebuilt.json()).toMatchObject({ count: 0 });
+    expect(rebuilt.json()).not.toHaveProperty("blocked");
+    const database = new Database(storageLayout.databasePath, { readonly: true });
+    expect(database.prepare(`SELECT count(*) FROM proposals
+      WHERE proposal_type='reconciliation' AND review_status='pending'
+        AND json_extract(payload_json,'$.targetPath')='knowledge/topics/README.md'`).pluck().get()).toBe(0);
+    database.close();
+    const staleDatabase = new Database(storageLayout.databasePath);
+    staleDatabase.prepare(`INSERT INTO proposals
+      (id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
+      VALUES ('proposal:stale-topic-readme','reconciliation',NULL,?,'pending',0,?)`)
+      .run(JSON.stringify({
+        targetKind: "topic",
+        targetPath: "knowledge/topics/README.md",
+        actualHash: "stale",
+        validationError: "markdown-frontmatter-invalid",
+      }), new Date().toISOString());
+    staleDatabase.close();
+    await app.inject({ method: "POST", url: "/api/diagnostics/rebuild-paper-catalog" });
+    const cleanedDatabase = new Database(storageLayout.databasePath, { readonly: true });
+    expect(cleanedDatabase.prepare("SELECT review_status FROM proposals WHERE id='proposal:stale-topic-readme'")
+      .pluck().get()).toBe("superseded");
+    cleanedDatabase.close();
+    await app.close();
+  });
+
   it("recovers direction writes from every durable KWR phase", async () => {
     for (const phase of ["reserved", "staged", "renamed", "metadata-committed", "indexed"] as const) {
       const root = await mkdtemp(join(tmpdir(), `scholarloom-direction-recovery-${phase}-`));
