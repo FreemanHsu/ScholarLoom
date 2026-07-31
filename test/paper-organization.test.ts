@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,6 +10,7 @@ import { parse } from "yaml";
 
 import { createApp } from "../src/app.js";
 import { normalizePaperLookup } from "../src/domain/paper-organization.js";
+import { createSnapshot, restoreSnapshot, verifySnapshot } from "../src/storage/data-operations.js";
 import { initializeDataRoot } from "../src/storage/layout.js";
 
 async function fixturePdf(): Promise<Uint8Array> {
@@ -35,10 +36,11 @@ async function waitForImport(app: FastifyInstance, id: string): Promise<void> {
 describe("Paper organization", () => {
   it("uses deterministic Unicode case folding for lookup keys", () => {
     expect(normalizePaperLookup("  Straẞe  ")).toBe(normalizePaperLookup("STRASSE"));
+    expect(normalizePaperLookup("ᾀ")).toBe(normalizePaperLookup("ἀι"));
   });
 
   it("recovers direction writes from every durable KWR phase", async () => {
-    for (const phase of ["staged", "renamed", "metadata-committed"] as const) {
+    for (const phase of ["reserved", "staged", "renamed", "metadata-committed", "indexed"] as const) {
       const root = await mkdtemp(join(tmpdir(), `scholarloom-direction-recovery-${phase}-`));
       const storageLayout = initializeDataRoot(join(root, "data"));
       const options = {
@@ -70,6 +72,151 @@ describe("Paper organization", () => {
       database.close();
       await resumed.close();
     }
+  });
+
+  it("rejects legacy non-Catalog reconciliation Proposals without misrouting them to Takeaway review", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-legacy-reconciliation-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const options = {
+      storageLayout,
+      paperSource: { async resolve() { throw new Error("unused"); } },
+    };
+    const initial = await createApp(options);
+    await initial.close();
+    const database = new Database(storageLayout.databasePath);
+    database.prepare(`INSERT INTO proposals
+      (id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
+      VALUES ('proposal:legacy-reconciliation','reconciliation',NULL,?,'pending',0,?)`)
+      .run(JSON.stringify({
+        writeId: "knowledge-write:legacy-summary",
+        targetPath: "library/papers/legacy/summary.md",
+        expectedHash: "expected",
+        actualHash: "actual",
+      }), new Date().toISOString());
+    database.close();
+
+    const app = await createApp(options);
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api/proposals/proposal%3Alegacy-reconciliation/decisions",
+      headers: { "idempotency-key": "reject-legacy-reconciliation" },
+      payload: { action: "reject" },
+    });
+    expect(rejected.statusCode, rejected.body).toBe(201);
+    expect(rejected.json()).toMatchObject({
+      proposal: { id: "proposal:legacy-reconciliation", reviewStatus: "rejected" },
+      requiresFileRestore: true,
+    });
+    await app.close();
+  });
+
+  it("never overwrites an externally edited Direction during same-key retry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-direction-conflict-retry-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const options = {
+      storageLayout,
+      paperSource: { async resolve() { throw new Error("unused"); } },
+    };
+    const interrupted = await createApp({ ...options, knowledgeWriteFailurePoint: "staged" });
+    const first = await interrupted.inject({
+      method: "POST",
+      url: "/api/directions",
+      headers: { "idempotency-key": "direction-conflict-retry" },
+      payload: {
+        id: "topic:direction-conflict-retry",
+        title: "Direction Conflict Retry",
+        scope: "原始 Scope。",
+      },
+    });
+    expect(first.statusCode).toBe(500);
+    await interrupted.close();
+
+    const database = new Database(storageLayout.databasePath, { readonly: true });
+    const stagedPath = database.prepare(`SELECT staged_path FROM knowledge_write_requests
+      WHERE request_type='direction-taxonomy'`).pluck().get() as string;
+    database.close();
+    const staged = await readFile(join(storageLayout.vaultRoot, stagedPath), "utf8");
+    const target = join(storageLayout.vaultRoot, "knowledge", "topics", "direction-conflict-retry.md");
+    await writeFile(target, staged.replace("原始 Scope。", "外部修改后的 Scope。"), "utf8");
+
+    const resumed = await createApp(options);
+    const retried = await resumed.inject({
+      method: "POST",
+      url: "/api/directions",
+      headers: { "idempotency-key": "direction-conflict-retry" },
+      payload: {
+        id: "topic:direction-conflict-retry",
+        title: "Direction Conflict Retry",
+        scope: "原始 Scope。",
+      },
+    });
+    expect(retried.statusCode).toBe(409);
+    expect(retried.json()).toEqual({ code: "direction-retry-review-required" });
+    expect(await readFile(target, "utf8")).toContain("外部修改后的 Scope。");
+    await resumed.close();
+  });
+
+  it("keeps offline Topic additions and deletions non-activating until reconciliation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-direction-membership-reconciliation-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const options = {
+      storageLayout,
+      paperSource: { async resolve() { throw new Error("unused"); } },
+    };
+    const app = await createApp(options);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/directions",
+      headers: { "idempotency-key": "create-membership-base" },
+      payload: {
+        id: "topic:membership-base",
+        title: "Membership Base",
+        scope: "用于验证目录成员变化。",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    await app.close();
+
+    const topicRoot = join(storageLayout.vaultRoot, "knowledge", "topics");
+    const basePath = join(topicRoot, "membership-base.md");
+    const addedPath = join(topicRoot, "membership-added.md");
+    const base = await readFile(basePath, "utf8");
+    await writeFile(addedPath, base
+      .replaceAll("topic:membership-base", "topic:membership-added")
+      .replaceAll("Membership Base", "Membership Added"), "utf8");
+
+    const afterAddition = await createApp(options);
+    const additionDirections = await afterAddition.inject({ method: "GET", url: "/api/directions" });
+    expect(additionDirections.json().directions.map((direction: { id: string }) => direction.id))
+      .toEqual(["topic:membership-base"]);
+    const additionDatabase = new Database(storageLayout.databasePath, { readonly: true });
+    const additionPayloads = (additionDatabase.prepare(`SELECT payload_json FROM proposals
+      WHERE proposal_type='reconciliation' AND review_status='pending'`).all() as
+      Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as Record<string, unknown>);
+    expect(additionPayloads).toContainEqual(expect.objectContaining({
+      targetPath: "knowledge/topics/membership-added.md",
+      expectedHash: null,
+      source: "external-markdown-rebuild",
+    }));
+    additionDatabase.close();
+    await afterAddition.close();
+
+    await unlink(basePath);
+    const afterDeletion = await createApp(options);
+    const deletionDirections = await afterDeletion.inject({ method: "GET", url: "/api/directions" });
+    expect(deletionDirections.json().directions.map((direction: { id: string }) => direction.id))
+      .toEqual(["topic:membership-base"]);
+    const deletionDatabase = new Database(storageLayout.databasePath, { readonly: true });
+    const deletionPayloads = (deletionDatabase.prepare(`SELECT payload_json FROM proposals
+      WHERE proposal_type='reconciliation' AND review_status='pending'`).all() as
+      Array<{ payload_json: string }>).map((row) => JSON.parse(row.payload_json) as Record<string, unknown>);
+    expect(deletionPayloads).toContainEqual(expect.objectContaining({
+      targetId: "topic:membership-base",
+      actualHash: null,
+      source: "external-markdown-rebuild",
+    }));
+    deletionDatabase.close();
+    await afterDeletion.close();
   });
 
   it("keeps an offline Topic edit non-activating until reconciliation", async () => {
@@ -110,7 +257,20 @@ describe("Paper organization", () => {
       targetId: "topic:offline-edit",
       source: "external-markdown-rebuild",
     });
+    const proposalId = database.prepare(`SELECT id FROM proposals
+      WHERE proposal_type='reconciliation' AND review_status='pending'`).pluck().get() as string;
     database.close();
+    const accepted = await reopened.inject({
+      method: "POST",
+      url: `/api/proposals/${encodeURIComponent(proposalId)}/decisions`,
+      headers: { "idempotency-key": "accept-offline-topic-edit" },
+      payload: { action: "accept" },
+    });
+    expect(accepted.statusCode, accepted.body).toBe(201);
+    const activatedDirections = await reopened.inject({ method: "GET", url: "/api/directions" });
+    expect(activatedDirections.json().directions).toEqual([
+      expect.objectContaining({ id: "topic:offline-edit", title: "Externally Edited Direction" }),
+    ]);
     await reopened.close();
   });
 
@@ -226,6 +386,19 @@ describe("Paper organization", () => {
     expect(database.prepare("SELECT count(*) count FROM curated_search_documents").pluck().get()).toBe(1);
     database.close();
 
+    const snapshotRoot = join(root, "snapshot");
+    await createSnapshot(storageLayout, snapshotRoot);
+    expect(verifySnapshot(snapshotRoot)).toMatchObject({ healthy: true });
+    const restoredLayout = restoreSnapshot(snapshotRoot, join(root, "restored"));
+    const restored = await createApp({ ...options, storageLayout: restoredLayout });
+    const restoredCatalog = await restored.inject({ method: "GET", url: "/api/papers?q=genception" });
+    expect(restoredCatalog.json().papers[0]).toMatchObject({
+      id: paperId,
+      preferredAlias: "GenCeption",
+      matchedBy: { kind: "preferred-alias", exact: true },
+    });
+    await restored.close();
+
     const restarted = await createApp(options);
     const catalog = await restarted.inject({ method: "GET", url: "/api/papers?q=genception" });
     expect(catalog.statusCode).toBe(200);
@@ -285,6 +458,81 @@ describe("Paper organization", () => {
     expect(conflictedDatabase.prepare(`SELECT count(*) FROM proposals
       WHERE proposal_type='paper-organization' AND review_status='pending'`).pluck().get()).toBe(1);
     conflictedDatabase.close();
+
+    const changedRetry = await restarted.inject({
+      method: "PUT",
+      url: `/api/papers/${encodeURIComponent(paperId)}/organization`,
+      headers: { "idempotency-key": "organize-after-external-edit" },
+      payload: {
+        aliases: [
+          { name: "GenCeption", kind: "model-name", preferred: true },
+          { name: "Different Retry", kind: "user-defined", preferred: false },
+        ],
+        directions: [
+          { topicId: "topic:vision-representation-learning", role: "primary" },
+          { topicId: "topic:video-generation", role: "secondary" },
+        ],
+      },
+    });
+    expect(changedRetry.statusCode).toBe(409);
+    expect(changedRetry.json()).toEqual({ code: "idempotency-key-conflict" });
+
+    const retried = await restarted.inject({
+      method: "PUT",
+      url: `/api/papers/${encodeURIComponent(paperId)}/organization`,
+      headers: { "idempotency-key": "organize-after-external-edit" },
+      payload: {
+        aliases: [
+          { name: "GenCeption", kind: "model-name", preferred: true },
+          { name: "GenCeption Paper", kind: "user-defined", preferred: false },
+        ],
+        directions: [
+          { topicId: "topic:vision-representation-learning", role: "primary" },
+          { topicId: "topic:video-generation", role: "secondary" },
+        ],
+      },
+    });
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(await readFile(manifestPath, "utf8")).toContain("external edit");
+    const retriedDatabase = new Database(storageLayout.databasePath, { readonly: true });
+    expect(retriedDatabase.prepare(`SELECT phase FROM knowledge_write_requests
+      WHERE request_type='paper-organization'
+        AND json_extract(payload_json,'$.idempotencyKey')='organize-after-external-edit'`).pluck().get())
+      .toBe("complete");
+    expect(retriedDatabase.prepare(`SELECT count(*) FROM proposals
+      WHERE proposal_type='reconciliation' AND review_status='pending'
+        AND json_extract(payload_json,'$.writeId') IS NOT NULL`).pluck().get()).toBe(0);
+    retriedDatabase.close();
+
+    const organizedManifest = await readFile(manifestPath, "utf8");
+    await writeFile(manifestPath, organizedManifest.replace("name: GenCeption Paper", "name: External Alias"), "utf8");
+    const fieldConflictPayload = {
+      aliases: [
+        { name: "GenCeption", kind: "model-name", preferred: true },
+        { name: "GenCeption Paper", kind: "user-defined", preferred: false },
+        { name: "Fresh Alias", kind: "user-defined", preferred: false },
+      ],
+      directions: [
+        { topicId: "topic:vision-representation-learning", role: "primary" },
+        { topicId: "topic:video-generation", role: "secondary" },
+      ],
+    };
+    const fieldConflict = await restarted.inject({
+      method: "PUT",
+      url: `/api/papers/${encodeURIComponent(paperId)}/organization`,
+      headers: { "idempotency-key": "organization-field-conflict" },
+      payload: fieldConflictPayload,
+    });
+    expect(fieldConflict.statusCode).toBe(409);
+    const blockedRetry = await restarted.inject({
+      method: "PUT",
+      url: `/api/papers/${encodeURIComponent(paperId)}/organization`,
+      headers: { "idempotency-key": "organization-field-conflict" },
+      payload: fieldConflictPayload,
+    });
+    expect(blockedRetry.statusCode).toBe(409);
+    expect(blockedRetry.json()).toEqual({ code: "paper-organization-retry-review-required" });
+    expect(await readFile(manifestPath, "utf8")).toContain("name: External Alias");
     await restarted.close();
   });
 });

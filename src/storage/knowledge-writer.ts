@@ -9,13 +9,13 @@ type KnowledgeWritePorts = {
   now(): Date;
   stagedFileExists(relativePath: string): boolean;
   afterTakeawayPhase?(phase: "staged" | "renamed" | "metadata-committed"): void;
-  afterOrganizationPhase?(phase: "staged" | "renamed" | "metadata-committed"): void;
+  afterOrganizationPhase?(phase: "reserved" | "staged" | "renamed" | "metadata-committed" | "indexed"): void;
   advanceSummary(id: string): void;
   advancePaperManifest(id: string): void;
   knowledgePath(relativePath: string): string;
   storeArtifact(id: string, bytes: Uint8Array, reviewDecisionId: string, parentArtifactId: string | null): void;
   createWriteConflict(writeId: string, paperId: string, targetPath: string, expectedHash: string, actualHash: string): void;
-  rebuildPaperCatalog(trustedWrite?: { targetPath: string; resultHash: string }): void;
+  rebuildPaperCatalog(trustedWrite?: { targetPath: string; resultHash: string }): { blocked?: boolean };
 };
 
 export type OrganizationWriteCommand = {
@@ -42,9 +42,12 @@ export class KnowledgeWriter {
         request_type: string;
         phase: string;
         staged_path: string;
-      }>;
+    }>;
     for (const row of rows) {
-      if (row.request_type === "takeaway") this.advanceTakeaway(row.id);
+      if (row.request_type === "paper-organization" || row.request_type === "direction-taxonomy") {
+        this.advanceOrganization(row.id);
+      }
+      else if (row.request_type === "takeaway") this.advanceTakeaway(row.id);
       else if (row.phase === "reserved" && !this.ports.stagedFileExists(row.staged_path)) {
         this.database.prepare(`UPDATE knowledge_write_requests
           SET phase='failed',error_code='staged-file-missing',updated_at=? WHERE id=?`)
@@ -52,9 +55,6 @@ export class KnowledgeWriter {
       }
       else if (row.request_type === "summary") this.ports.advanceSummary(row.id);
       else if (row.request_type === "paper-manifest") this.ports.advancePaperManifest(row.id);
-      else if (row.request_type === "paper-organization" || row.request_type === "direction-taxonomy") {
-        this.advanceOrganization(row.id);
-      }
     }
   }
 
@@ -67,17 +67,34 @@ export class KnowledgeWriter {
       WHERE target_path=? AND phase NOT IN ('complete','failed','conflicted')`).get(command.targetPath) as
       { id: string } | undefined;
     if (active && active.id !== writeId) throw new Error("organization-write-in-progress");
-    this.database.prepare(`INSERT INTO knowledge_write_requests
-      (id,request_type,target_path,staged_path,result_hash,phase,created_at,updated_at,payload_json)
-      VALUES (?,?,?,?,?,'reserved',?,?,?) ON CONFLICT(id) DO NOTHING`)
-      .run(writeId, command.requestType, command.targetPath, stagedPath, resultHash, now, now,
-        JSON.stringify({ ...command, markdown: undefined }));
-    const staged = this.ports.knowledgePath(stagedPath);
-    mkdirSync(dirname(staged), { recursive: true });
-    writeFileSync(staged, command.markdown, "utf8");
-    this.database.prepare(`UPDATE knowledge_write_requests SET phase='staged',updated_at=?
-      WHERE id=? AND phase='reserved'`).run(now, writeId);
-    this.ports.afterOrganizationPhase?.("staged");
+    const existing = this.database.prepare(`SELECT phase,staged_path FROM knowledge_write_requests WHERE id=?`)
+      .get(writeId) as { phase: string; staged_path: string } | undefined;
+    let reserveWrite = false;
+    if (!existing) {
+      this.database.prepare(`INSERT INTO knowledge_write_requests
+        (id,request_type,target_path,staged_path,result_hash,phase,created_at,updated_at,payload_json)
+        VALUES (?,?,?,?,?,'reserved',?,?,?)`)
+        .run(writeId, command.requestType, command.targetPath, stagedPath, resultHash, now, now,
+          JSON.stringify({ ...command, markdown: undefined }));
+      reserveWrite = true;
+    } else if (existing.phase === "failed" || existing.phase === "conflicted") {
+      const previousStaged = this.ports.knowledgePath(existing.staged_path);
+      if (existsSync(previousStaged)) unlinkSync(previousStaged);
+      this.database.prepare(`UPDATE knowledge_write_requests
+        SET request_type=?,target_path=?,staged_path=?,result_hash=?,phase='reserved',
+            error_code=NULL,updated_at=?,payload_json=? WHERE id=?`)
+        .run(command.requestType, command.targetPath, stagedPath, resultHash, now,
+          JSON.stringify({ ...command, markdown: undefined }), writeId);
+      reserveWrite = true;
+    } else if (existing.phase === "complete") {
+      return;
+    }
+    if (reserveWrite) {
+      const staged = this.ports.knowledgePath(stagedPath);
+      mkdirSync(dirname(staged), { recursive: true });
+      writeFileSync(staged, command.markdown, "utf8");
+      this.ports.afterOrganizationPhase?.("reserved");
+    }
     this.advanceOrganization(writeId);
     const phase = (this.database.prepare("SELECT phase FROM knowledge_write_requests WHERE id=?").get(writeId) as
       { phase: string }).phase;
@@ -98,7 +115,21 @@ export class KnowledgeWriter {
     const target = this.ports.knowledgePath(row.target_path);
     const staged = this.ports.knowledgePath(row.staged_path);
     let phase = row.phase;
-    if (phase === "reserved" || phase === "staged") {
+    if (phase === "reserved") {
+      if (!existsSync(staged)) {
+        this.failOrganizationWrite(writeId, "staged-file-missing");
+        return;
+      }
+      if (fileHash(staged) !== row.result_hash) {
+        this.failOrganizationWrite(writeId, "staged-hash-mismatch");
+        return;
+      }
+      this.database.prepare("UPDATE knowledge_write_requests SET phase='staged',updated_at=? WHERE id=?")
+        .run(this.ports.now().toISOString(), writeId);
+      phase = "staged";
+      this.ports.afterOrganizationPhase?.("staged");
+    }
+    if (phase === "staged") {
       if (!existsSync(staged)) {
         if (existsSync(target) && fileHash(target) === row.result_hash) phase = "renamed";
         else {
@@ -138,8 +169,14 @@ export class KnowledgeWriter {
             .run(decisionId, proposalId, `${payload.idempotencyKey}:${ordinal}`,
               JSON.stringify(payload.response), now);
         });
+        this.database.prepare(`UPDATE proposals SET review_status='superseded',decided_at=?
+          WHERE proposal_type='reconciliation' AND review_status='pending'
+            AND (json_extract(payload_json,'$.writeId')=?
+              OR json_extract(payload_json,'$.targetPath')=?)`).run(now, writeId, payload.targetPath);
         this.database.prepare(`INSERT INTO index_outbox(projection,source_id,operation,state,created_at)
-          VALUES ('paper-catalog',?,'upsert','pending',?)`)
+          VALUES ('paper-catalog',?,'upsert','pending',?)
+          ON CONFLICT(projection,source_id,operation) DO UPDATE
+          SET state='pending',created_at=excluded.created_at,completed_at=NULL`)
           .run(payload.paperId ?? payload.topicId, now);
         this.database.prepare(`UPDATE knowledge_write_requests SET phase='metadata-committed',updated_at=?
           WHERE id=?`).run(now, writeId);
@@ -148,10 +185,12 @@ export class KnowledgeWriter {
       this.ports.afterOrganizationPhase?.("metadata-committed");
     }
     if (phase === "metadata-committed") {
-      this.ports.rebuildPaperCatalog({ targetPath: row.target_path, resultHash: row.result_hash });
+      const rebuilt = this.ports.rebuildPaperCatalog({ targetPath: row.target_path, resultHash: row.result_hash });
+      if (rebuilt.blocked) return;
       this.database.prepare(`UPDATE knowledge_write_requests SET phase='indexed',updated_at=?
         WHERE id=?`).run(this.ports.now().toISOString(), writeId);
       phase = "indexed";
+      this.ports.afterOrganizationPhase?.("indexed");
     }
     if (phase === "indexed") {
       const now = this.ports.now().toISOString();

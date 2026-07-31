@@ -54,6 +54,7 @@ export type StoredPaper = {
   aliases?: import("../domain/paper-organization.js").PaperAlias[];
   preferredAlias?: string | null;
   directions?: import("./paper-organization-store.js").CatalogDirection[];
+  externalIdentities?: string[];
   pendingOrganizationCount?: number;
   aliasCollision?: boolean;
   matchedBy?: {
@@ -110,7 +111,7 @@ export class ImportStore {
   readonly #database: Database.Database;
   readonly #artifactRoot: string;
   readonly #knowledgeRoot: string;
-  readonly #failurePoint: "staged" | "renamed" | "metadata-committed" | null;
+  readonly #failurePoint: "reserved" | "staged" | "renamed" | "metadata-committed" | "indexed" | null;
   readonly #now: () => Date;
   readonly #contextSnapshots: ContextSnapshotBuilder;
   readonly #conversations: ConversationStore;
@@ -119,13 +120,15 @@ export class ImportStore {
   readonly #paperOrganization: PaperOrganizationStore;
   readonly #agentExecutionMetadata: AgentExecutionMetadataProvider | undefined;
 
-  static open(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
+  static open(layout: StorageLayout,
+    failurePoint: "reserved" | "staged" | "renamed" | "metadata-committed" | "indexed" | null = null,
     now?: () => Date, repositoryRuntime?: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void;
       agentExecutionMetadata?: AgentExecutionMetadataProvider }): ImportStore {
     return new ImportStore(layout, failurePoint, now, repositoryRuntime);
   }
 
-  private constructor(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
+  private constructor(layout: StorageLayout,
+    failurePoint: "reserved" | "staged" | "renamed" | "metadata-committed" | "indexed" | null = null,
     now: () => Date = () => new Date(),
     repositoryRuntime: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void;
       agentExecutionMetadata?: AgentExecutionMetadataProvider } = { schedule() {} }) {
@@ -296,7 +299,7 @@ export class ImportStore {
     this.#advanceSummaryWrite(writeId);
   }
 
-  #maybeFail(phase: "staged" | "renamed" | "metadata-committed"): void {
+  #maybeFail(phase: "reserved" | "staged" | "renamed" | "metadata-committed" | "indexed"): void {
     if (this.#failurePoint === phase) throw new Error(`fault-injected:${phase}`);
   }
 
@@ -332,7 +335,13 @@ export class ImportStore {
             this.#database.prepare("UPDATE knowledge_write_requests SET phase='conflicted',error_code='external-edit',updated_at=? WHERE id=?").run(now, writeId);
             this.#database.prepare(`INSERT OR IGNORE INTO proposals(id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
               VALUES (?,'reconciliation',?,?,'pending',0,?)`).run(`proposal:reconciliation:${writeId}`, payload.paperId,
-                JSON.stringify({ writeId, targetPath: row.target_path, expectedHash: row.result_hash, actualHash: finalHash }), now);
+                JSON.stringify({
+                  writeId,
+                  targetKind: "summary",
+                  targetPath: row.target_path,
+                  expectedHash: row.result_hash,
+                  actualHash: finalHash,
+                }), now);
           })();
           return;
         }
@@ -403,7 +412,7 @@ export class ImportStore {
     writeFileSync(`${target}.staged`, markdown, "utf8");
     this.#database.prepare("UPDATE knowledge_write_requests SET phase='staged',updated_at=? WHERE id=?").run(now, writeId);
     this.#advanceManifestWrite(writeId);
-    this.#paperOrganization.rebuildCatalog();
+    this.#paperOrganization.rebuildCatalog({ targetPath: relativePath, resultHash: hash });
   }
 
   #advanceManifestWrite(writeId: string): void {
@@ -430,11 +439,20 @@ export class ImportStore {
 
   #createWriteConflict(writeId: string, paperId: string, targetPath: string, expectedHash: string, actualHash: string): void {
     const now = new Date().toISOString();
+    const requestType = this.#database.prepare("SELECT request_type FROM knowledge_write_requests WHERE id=?")
+      .pluck().get(writeId) as string | undefined;
     this.#database.transaction(() => {
       this.#database.prepare("UPDATE knowledge_write_requests SET phase='conflicted',error_code='external-edit',updated_at=? WHERE id=?").run(now, writeId);
       this.#database.prepare(`INSERT OR IGNORE INTO proposals(id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
         VALUES (?,'reconciliation',?,?,'pending',0,?)`).run(`proposal:reconciliation:${writeId}`, paperId,
-          JSON.stringify({ writeId, targetPath, expectedHash, actualHash }), now);
+          JSON.stringify({
+            writeId,
+            targetKind: requestType === "paper-manifest" ? "paper-manifest"
+              : requestType === "takeaway" ? "takeaway" : "unknown",
+            targetPath,
+            expectedHash,
+            actualHash,
+          }), now);
     })();
   }
 
@@ -752,6 +770,72 @@ export class ImportStore {
         one_click_eligible: number; snapshot_integrity: string | null } | undefined;
     if (!proposal) return { status: 404, body: { code: "proposal-not-found" } };
     if (proposal.review_status !== "pending") return { status: 409, body: { code: "proposal-already-decided" } };
+    if (proposal.proposal_type === "reconciliation") {
+      if (action === "edit-and-accept") {
+        return { status: 400, body: { code: "reconciliation-edit-not-supported" } };
+      }
+      const payload = JSON.parse(proposal.payload_json) as {
+        targetKind?: string;
+        targetPath?: string;
+        actualHash?: string | null;
+        writeId?: string;
+      };
+      if (!payload.targetPath || (payload.actualHash !== undefined && payload.actualHash !== null &&
+          typeof payload.actualHash !== "string")) {
+        return { status: 409, body: { code: "reconciliation-payload-invalid" } };
+      }
+      if (action === "accept") {
+        if (payload.targetKind !== "paper" && payload.targetKind !== "topic") {
+          return { status: 409, body: { code: "reconciliation-accept-not-supported" } };
+        }
+        try {
+          this.#paperOrganization.validateReconciliationTarget({
+            targetKind: payload.targetKind,
+            targetPath: payload.targetPath,
+            actualHash: payload.actualHash ?? null,
+          });
+        } catch (error) {
+          return { status: 409, body: {
+            code: error instanceof Error ? error.message : "reconciliation-target-invalid",
+          } };
+        }
+      }
+      const now = this.#now().toISOString();
+      const decisionId = `review-decision:${randomUUID()}`;
+      const body = {
+        reviewDecision: { id: decisionId, action },
+        proposal: { id: proposalId, reviewStatus: action === "accept" ? "accepted" : "rejected" },
+        ...(action === "reject" ? { requiresFileRestore: true } : {}),
+      };
+      let rebuild: { count: number; rebuiltAt: string; blocked?: boolean } | undefined;
+      try {
+        this.#database.transaction(() => {
+          this.#database.prepare(`UPDATE proposals SET review_status=?,decided_at=?
+            WHERE id=? AND review_status='pending'`)
+            .run(action === "accept" ? "accepted" : "rejected", now, proposalId);
+          this.#database.prepare(`INSERT INTO review_decisions
+            (id,proposal_id,action,idempotency_key,result_json,created_at)
+            VALUES (?,?,?,?,?,?)`).run(decisionId, proposalId, action, idempotencyKey, JSON.stringify(body), now);
+          if (action === "accept") {
+            if (payload.writeId) {
+              this.#database.prepare(`UPDATE knowledge_write_requests
+                SET phase='failed',error_code='reconciliation-accepted-external',updated_at=?
+                WHERE id=? AND phase='conflicted'`).run(now, payload.writeId);
+            }
+            rebuild = this.#paperOrganization.rebuildCatalog();
+          }
+        })();
+      } catch (error) {
+        return { status: 409, body: {
+          code: error instanceof Error ? error.message : "reconciliation-activation-failed",
+        } };
+      }
+      if (action === "accept") this.#knowledgeWriter.recover();
+      return { status: 201, body: {
+        ...body,
+        ...(rebuild ? { projection: { blocked: rebuild.blocked === true, count: rebuild.count } } : {}),
+      } };
+    }
     if (action === "reject") {
       const allowedReasons = ["useful-answer-not-knowledge", "context-incomplete", "incorrect-or-unsupported",
         "duplicate", "too-broad", "too-trivial", "other"];
@@ -1506,7 +1590,7 @@ export class ImportStore {
     return this.#paperOrganization.savePaperOrganization(paperId, input, idempotencyKey);
   }
 
-  rebuildPaperCatalog(): { count: number; rebuiltAt: string } {
+  rebuildPaperCatalog(): { count: number; rebuiltAt: string; blocked?: boolean } {
     return this.#paperOrganization.rebuildCatalog();
   }
 

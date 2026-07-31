@@ -48,7 +48,7 @@ export type CreateAppOptions = {
   webRoot?: string;
   codexRunner?: CodexRunner;
   repositoryAdapter?: RepositoryAdapter;
-  knowledgeWriteFailurePoint?: "staged" | "renamed" | "metadata-committed";
+  knowledgeWriteFailurePoint?: "reserved" | "staged" | "renamed" | "metadata-committed" | "indexed";
   clock?: { now(): Date };
   agentMessageTimeoutMs?: number;
   agenticEvidenceRunner?: AgenticEvidenceRunner;

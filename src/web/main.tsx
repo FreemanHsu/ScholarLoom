@@ -38,6 +38,7 @@ type Paper = {
   aliases: Array<{ name: string; kind: "model-name" | "method-name" | "acronym" | "project-name" | "user-defined"; preferred: boolean }>;
   preferredAlias: string | null;
   directions: Array<{ topicId: string; title: string; role: "primary" | "secondary" }>;
+  externalIdentities: string[];
   pendingOrganizationCount: number;
   aliasCollision: boolean;
   matchedBy?: { kind: string; value: string; exact: boolean };
@@ -77,7 +78,7 @@ type ReviewProposal = {
   sourceConversationHref?: string | null;
   distillationState?: string | null;
   payload: ConversationProposal & { sourceType?: string; currentVersion?: number | string; latestVersion?: number | string;
-    candidateVersionId?: string; error?: string };
+    candidateVersionId?: string; error?: string; targetKind?: string; targetPath?: string; validationError?: string };
 };
 type EntryAnswer = {
   answer: string;
@@ -643,7 +644,9 @@ function App() {
       error={papersError} onNavigate={navigate} onImport={() => setImportOpen(true)}
       onDirectionsChanged={async () => { await refreshDirections(); await refreshPapers(); }} />}
     {route.name === "reviews" && <ReviewCenter proposals={reviewProposals} error={reviewsError} onNavigate={navigate}
-      onRefresh={refreshReviews} />}
+      onRefresh={async () => {
+        await Promise.all([refreshReviews(), refreshPapers(), refreshDirections()]);
+      }} />}
     {route.name === "settings" && <SettingsPage snapshot={settings} error={settingsError} />}
     {route.name === "not-found" && <main className="page-state"><span className="eyebrow">NOT FOUND</span><h1>找不到这个页面</h1>
       <button onClick={() => navigate("/", true)}>返回研究首页</button></main>}
@@ -679,7 +682,10 @@ function App() {
             if (!response.ok) {
               const failure = await response.json() as { code?: string };
               throw new Error(failure.code === "paper-organization-conflicted"
-                ? "Paper 已在外部修改；请刷新后重试。" : "别名与方向保存失败。");
+                ? "Paper 已在外部修改；请先到审核中心处理 reconciliation。"
+                : failure.code === "paper-organization-retry-review-required"
+                  ? "外部修改包含别名或方向；请先确认 reconciliation，再重新打开编辑器。"
+                  : "别名与方向保存失败。");
             }
             await refreshPapers();
             await refreshWorkspace(route.paperId);
@@ -783,7 +789,7 @@ function PaperLibrary(props: {
     if (route.pending && !paper.pendingOrganizationCount) return false;
     if (route.direction && !paper.directions.some((direction) =>
       direction.topicId === route.direction && (route.relation !== "primary" || direction.role === "primary"))) return false;
-    if (!normalizedQuery) return true;
+    if (!normalizedQuery || catalogMatches) return true;
     return [paper.title, ...paper.aliases.map((alias) => alias.name), ...paper.authors,
       ...paper.directions.map((direction) => direction.title)].join(" ").normalize("NFKC")
       .toLocaleLowerCase().includes(normalizedQuery);
@@ -985,6 +991,24 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
     setActionError(null);
     await onRefresh();
   };
+  const decideReconciliation = async (proposal: ReviewProposal, action: "accept" | "reject") => {
+    const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/decisions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+      body: JSON.stringify({ action }),
+    });
+    if (!response.ok) {
+      const failure = await response.json() as { code?: string };
+      setActionError(failure.code === "reconciliation-target-changed"
+        ? "Markdown 在审核期间再次变化，请重新检查。"
+        : "该 Markdown 目前无法安全激活，请先修复格式或引用。");
+      return;
+    }
+    setActionError(action === "reject"
+      ? "已拒绝外部版本；恢复原文件后 Catalog 才能解除阻塞。"
+      : null);
+    await onRefresh();
+  };
   return <main className="app page reviews-page"><header className="page-header"><span className="eyebrow">REVIEW CENTER</span><h1>审核中心</h1>
     <p>Proposal 在确认前不会成为长期知识。</p></header>
     {actionError && <p className="error-block">{actionError}</p>}
@@ -1010,6 +1034,18 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
             ? { sourceConversationHref: proposal.sourceConversationHref } : {}),
           ...(proposal.distillationState !== undefined ? { distillationState: proposal.distillationState } : {}),
         }} onDecide={(candidate, action, input) => void decideTakeaway(proposal, action, input)} />}
+        {proposal.proposalType === "reconciliation" && <div className="review-actions">
+          <p>检测到外部 Markdown 变化：{String(proposal.payload.targetPath ?? "未知路径")}</p>
+          {proposal.payload.validationError && <p className="inline-alert">
+            当前文件未通过校验：{String(proposal.payload.validationError)}
+          </p>}
+          {(proposal.payload.targetKind === "paper" || proposal.payload.targetKind === "topic") &&
+            <button disabled={Boolean(proposal.payload.validationError)}
+              onClick={() => void decideReconciliation(proposal, "accept")}>确认采用外部版本</button>}
+          {proposal.payload.targetKind !== "paper" && proposal.payload.targetKind !== "topic" &&
+            <p>此类写入冲突暂不支持直接采用外部版本；可拒绝后恢复原文件，或从对应工作流重试。</p>}
+          <button className="ghost" onClick={() => void decideReconciliation(proposal, "reject")}>拒绝并保留当前投影</button>
+        </div>}
         {proposal.legacySource && <p className="inline-alert">旧 Conversation 来源不完整，只能查看或拒绝，不能确认。</p>}
         {proposal.paperId && <button className="text-button" onClick={() => onNavigate(paperHref(proposal.paperId!))}>打开相关 Paper →</button>}
       </article>)}</div>}
@@ -1101,7 +1137,10 @@ function PaperOrganizationEditor(props: {
           <select aria-label="Primary Research Direction" value={primary} onChange={(event) => {
             const next = event.target.value;
             setPrimary(next);
-            setSecondary((current) => { const copy = new Set(current); copy.delete(next); return copy; });
+            setSecondary((current) => {
+              if (!next) return new Set();
+              const copy = new Set(current); copy.delete(next); return copy;
+            });
           }}>
             <option value="">未分类</option>
             {props.directions.map((direction) => <option key={direction.id} value={direction.id}>{direction.title}</option>)}
@@ -1168,6 +1207,7 @@ function PaperWorkspace(props: {
   const { workspace, route } = props;
   const [showArchivedConversations, setShowArchivedConversations] = useState(false);
   const [organizationOpen, setOrganizationOpen] = useState(false);
+  const [organizationStatus, setOrganizationStatus] = useState<string | null>(null);
   const readyRepositories = workspace.repositories.filter((repository) => repository.materializationStatus === "ready").length;
   const hasRepositoryCandidates = workspace.repositories.some((repository) =>
     repository.associationStatus === "candidate");
@@ -1227,12 +1267,14 @@ function PaperWorkspace(props: {
     {organizationOpen && <PaperOrganizationEditor paper={workspace.paper} directions={props.directions}
       onClose={() => setOrganizationOpen(false)} onSave={async (input, idempotencyKey) => {
         await props.onSaveOrganization(input, idempotencyKey);
+        setOrganizationStatus("别名与方向已保存。");
         setOrganizationOpen(false);
       }} />}
     {route.repositoriesOpen && <RepositoryPanel repositories={workspace.repositories} busy={props.repositoryBusy}
       error={props.repositoryError} onClose={() => props.onNavigate(repositoryHref(false))}
       onAdd={props.onAddRepository} onConfirm={props.onConfirmRepository} onRetry={props.onRetryRepository}
       onRemove={props.onRemoveRepository} />}
+    {organizationStatus && <div className="inline-alert" role="status">{organizationStatus}</div>}
     {props.error && <div className="inline-alert">{props.error}</div>}
     <nav className="workspace-modes" aria-label="Paper workspace mode">
       {(["reading", "discussion", "knowledge"] as const).map((mode) => <a key={mode} href={modeHref(mode)}

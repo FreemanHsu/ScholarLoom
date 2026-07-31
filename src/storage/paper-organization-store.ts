@@ -39,6 +39,7 @@ export type CatalogPaper<T extends BasePaper = BasePaper> = T & {
   aliases: PaperAlias[];
   preferredAlias: string | null;
   directions: CatalogDirection[];
+  externalIdentities: string[];
   pendingOrganizationCount: number;
   aliasCollision: boolean;
   matchedBy?: {
@@ -60,9 +61,7 @@ export class PaperOrganizationStore {
     private readonly layout: StorageLayout,
     private readonly now: () => Date,
     private readonly knowledgeWriter: KnowledgeWriter,
-  ) {
-    this.rebuildCatalog();
-  }
+  ) {}
 
   listDirections(): Array<{
     id: string;
@@ -102,6 +101,8 @@ export class PaperOrganizationStore {
   createDirection(input: unknown, idempotencyKey: string): unknown {
     const replay = this.replay(idempotencyKey);
     if (replay) return replay;
+    const retrying = this.hasRetryableWrite(idempotencyKey);
+    const continuing = this.hasUnfinishedWrite(idempotencyKey);
     if (!input || typeof input !== "object") throw new PaperOrganizationStoreError("direction-invalid");
     const value = input as { id?: unknown; title?: unknown; aliases?: unknown; scope?: unknown };
     const id = typeof value.id === "string" ? value.id.trim() : "";
@@ -116,9 +117,31 @@ export class PaperOrganizationStore {
       throw new PaperOrganizationStoreError("direction-already-exists", 409);
     }
     const uniqueAliases = [...new Map((aliases as string[]).map((alias) => [normalizePaperLookup(alias), alias.trim()])).values()];
+    if (retrying || continuing) {
+      const prior = this.writePayload(idempotencyKey)?.response as {
+        direction?: { id?: string; title?: string; aliases?: string[]; scope?: string };
+      } | undefined;
+      if (!prior?.direction || JSON.stringify({
+        id: prior.direction.id,
+        title: prior.direction.title,
+        aliases: prior.direction.aliases ?? [],
+        scope: prior.direction.scope,
+      }) !== JSON.stringify({ id, title, aliases: uniqueAliases, scope })) {
+        throw new PaperOrganizationStoreError("idempotency-key-conflict", 409);
+      }
+    }
     const now = this.now().toISOString();
     const relativePath = join("knowledge", "topics", `${id.slice("topic:".length)}.md`);
-    if (existsSync(join(this.layout.vaultRoot, relativePath))) {
+    const target = join(this.layout.vaultRoot, relativePath);
+    if (retrying && existsSync(target)) {
+      const priorHash = this.database.prepare(`SELECT result_hash FROM knowledge_write_requests
+        WHERE request_type='direction-taxonomy' AND json_extract(payload_json,'$.idempotencyKey')=?`)
+        .pluck().get(idempotencyKey) as string | undefined;
+      if (!priorHash || hashFile(target) !== priorHash) {
+        throw new PaperOrganizationStoreError("direction-retry-review-required", 409);
+      }
+    }
+    if (existsSync(target) && !retrying && !continuing) {
       throw new PaperOrganizationStoreError("direction-path-conflict", 409);
     }
     const revisionId = `${id}:r1`;
@@ -142,7 +165,7 @@ export class PaperOrganizationStore {
       },
     };
     const proposalId = `proposal:direction-taxonomy:${hashKey(idempotencyKey)}`;
-    this.database.prepare(`INSERT INTO proposals
+    this.database.prepare(`INSERT OR IGNORE INTO proposals
       (id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
       VALUES (?,'direction-taxonomy',NULL,?,'pending',1,?)`)
       .run(proposalId, JSON.stringify({
@@ -159,7 +182,7 @@ export class PaperOrganizationStore {
       targetPath: relativePath,
       markdown,
       topicId: id,
-      expectedHash: null,
+      expectedHash: retrying && existsSync(target) ? hashFile(target) : null,
       proposalIds: [proposalId],
       idempotencyKey,
       response,
@@ -170,7 +193,26 @@ export class PaperOrganizationStore {
   savePaperOrganization(paperId: string, input: unknown, idempotencyKey: string): unknown {
     const replay = this.replay(idempotencyKey);
     if (replay) return replay;
+    const retrying = this.hasRetryableWrite(idempotencyKey);
+    const continuing = this.hasUnfinishedWrite(idempotencyKey);
     const organization = validatePaperOrganization(input);
+    if (retrying || continuing) {
+      const prior = this.writePayload(idempotencyKey)?.response as {
+        organization?: {
+          aliases?: PaperAlias[];
+          directions?: Array<{ topicId: string; role: "primary" | "secondary" }>;
+        };
+      } | undefined;
+      if (!prior?.organization || JSON.stringify({
+        aliases: prior.organization.aliases ?? [],
+        directions: (prior.organization.directions ?? []).map((direction) => ({
+          topicId: direction.topicId,
+          role: direction.role,
+        })),
+      }) !== JSON.stringify(organization)) {
+        throw new PaperOrganizationStoreError("idempotency-key-conflict", 409);
+      }
+    }
     const manifest = this.database.prepare("SELECT markdown_path,markdown_hash FROM paper_manifests WHERE paper_id=?")
       .get(paperId) as { markdown_path: string; markdown_hash: string } | undefined;
     if (!manifest) throw new PaperOrganizationStoreError("paper-not-found", 404);
@@ -185,8 +227,24 @@ export class PaperOrganizationStore {
     }
     for (const direction of organization.directions) this.requireDirection(direction.topicId);
     const before = organizationFromData(parsed.data);
+    if (retrying && JSON.stringify(before) !== JSON.stringify(this.projectedOrganization(paperId))) {
+      throw new PaperOrganizationStoreError("paper-organization-retry-review-required", 409);
+    }
     if (JSON.stringify(before) === JSON.stringify(organization)) {
-      return { organization: this.organizationResponse(paperId, organization) };
+      const response = { organization: this.organizationResponse(paperId, organization) };
+      if (this.hasUnfinishedWrite(idempotencyKey)) {
+        this.commitOrganization({
+          requestType: "paper-organization",
+          targetPath: manifest.markdown_path,
+          markdown: currentMarkdown,
+          paperId,
+          expectedHash: hashFile(target),
+          proposalIds: [],
+          idempotencyKey,
+          response,
+        });
+      }
+      return response;
     }
 
     parsed.document.set("aliases", organization.aliases.map((alias) => ({
@@ -228,7 +286,7 @@ export class PaperOrganizationStore {
     ].filter((change) => change.changed);
     const proposalIds = proposalKinds.map((change) => {
       const proposalId = `proposal:paper-organization:${hashKey(`${idempotencyKey}:${change.kind}`)}`;
-      this.database.prepare(`INSERT INTO proposals
+      this.database.prepare(`INSERT OR IGNORE INTO proposals
         (id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
         VALUES (?,'paper-organization',?,?,'pending',1,?)`)
         .run(proposalId, paperId, JSON.stringify({
@@ -246,7 +304,7 @@ export class PaperOrganizationStore {
       targetPath: manifest.markdown_path,
       markdown,
       paperId,
-      expectedHash: manifest.markdown_hash,
+      expectedHash: retrying ? hashFile(target) : manifest.markdown_hash,
       proposalIds,
       idempotencyKey,
       response,
@@ -261,7 +319,14 @@ export class PaperOrganizationStore {
     relation?: "all" | "primary";
     pending?: boolean;
   } = {}): CatalogPaper<T>[] {
+    const canonicalTitles = this.database.prepare(`SELECT paper_id,canonical_title FROM paper_catalog_documents`)
+      .all() as Array<{ paper_id: string; canonical_title: string }>;
     const decorated = papers.map((paper) => {
+      const catalogDocument = this.database.prepare(`SELECT external_identities_json FROM paper_catalog_documents
+        WHERE paper_id=?`).get(paper.id) as { external_identities_json: string } | undefined;
+      const externalIdentities = catalogDocument
+        ? JSON.parse(catalogDocument.external_identities_json) as string[]
+        : [];
       const aliases = (this.database.prepare(`SELECT name,alias_kind,preferred FROM paper_aliases
         WHERE paper_id=? ORDER BY preferred DESC,ordinal`).all(paper.id) as Array<{
           name: string;
@@ -280,13 +345,20 @@ export class PaperOrganizationStore {
       const pendingOrganizationCount = (this.database.prepare(`SELECT count(*) count FROM proposals
         WHERE paper_id=? AND proposal_type='paper-organization' AND review_status='pending'`)
         .get(paper.id) as { count: number }).count;
-      const aliasCollision = aliases.some((alias) => (this.database.prepare(`SELECT count(DISTINCT paper_id) count
-        FROM paper_aliases WHERE normalized_name=?`).get(normalizePaperLookup(alias.name)) as { count: number }).count > 1);
+      const aliasCollision = aliases.some((alias) => {
+        const normalized = normalizePaperLookup(alias.name);
+        const aliasMatches = (this.database.prepare(`SELECT count(DISTINCT paper_id) count
+          FROM paper_aliases WHERE normalized_name=?`).get(normalized) as { count: number }).count > 1;
+        return aliasMatches || canonicalTitles.some((candidate) =>
+          candidate.paper_id !== paper.id && normalizePaperLookup(candidate.canonical_title) === normalized);
+      }) || (this.database.prepare(`SELECT count(DISTINCT paper_id) count FROM paper_aliases
+        WHERE normalized_name=? AND paper_id<>?`).get(normalizePaperLookup(paper.title), paper.id) as { count: number }).count > 0;
       return {
         ...paper,
         aliases,
         preferredAlias: aliases.find((alias) => alias.preferred)?.name ?? null,
         directions,
+        externalIdentities,
         pendingOrganizationCount,
         aliasCollision,
       } satisfies CatalogPaper<T>;
@@ -308,11 +380,7 @@ export class PaperOrganizationStore {
     const ftsIds = this.ftsPaperIds(query);
     const matched: CatalogPaper<T>[] = [];
     for (const paper of result) {
-      const externalIdentities = [
-        paper.arxivId,
-        typeof paper.sourceUrl === "string" ? paper.sourceUrl : undefined,
-      ].filter((value): value is string => Boolean(value));
-      const external = externalIdentities.find((identity) => normalizePaperLookup(identity) === normalized);
+      const external = paper.externalIdentities.find((identity) => normalizePaperLookup(identity) === normalized);
       if (external) {
         matched.push({ ...paper, matchedBy: { kind: "external-identity", value: external, exact: true } });
         continue;
@@ -355,13 +423,15 @@ export class PaperOrganizationStore {
       left.id.localeCompare(right.id));
   }
 
-  rebuildCatalog(trustedWrite?: { targetPath: string; resultHash: string }): { count: number; rebuiltAt: string } {
+  rebuildCatalog(trustedWrite?: { targetPath: string; resultHash: string }): {
+    count: number;
+    rebuiltAt: string;
+    blocked?: boolean;
+  } {
     const rebuiltAt = this.now().toISOString();
-    const topics = this.readMarkdownFiles(join(this.layout.vaultRoot, "knowledge", "topics"))
-      .map((path) => this.readTopic(path));
-    const papers = this.readMarkdownFiles(join(this.layout.vaultRoot, "library", "papers"))
-      .filter((path) => path.endsWith(`${join("", "paper.md")}`))
-      .map((path) => this.readPaper(path));
+    const topicPaths = this.readMarkdownFiles(join(this.layout.vaultRoot, "knowledge", "topics"));
+    const paperPaths = this.readMarkdownFiles(join(this.layout.vaultRoot, "library", "papers"))
+      .filter((path) => path.endsWith(`${join("", "paper.md")}`));
     const knownHashes = new Map<string, { hash: string; targetId: string; targetKind: "paper" | "topic" }>([
       ...(this.database.prepare("SELECT markdown_path,markdown_hash,paper_id FROM paper_manifests").all() as
         Array<{ markdown_path: string; markdown_hash: string; paper_id: string }>).map((row) =>
@@ -370,19 +440,66 @@ export class PaperOrganizationStore {
         Array<{ markdown_path: string; markdown_hash: string; topic_id: string }>).map((row) =>
         [row.markdown_path, { hash: row.markdown_hash, targetId: row.topic_id, targetKind: "topic" as const }] as const),
     ]);
-    const conflicts = [
-      ...topics.map((topic) => ({ ...topic, targetId: topic.id, targetKind: "topic" as const })),
-      ...papers.map((paper) => ({ ...paper, targetId: paper.id, targetKind: "paper" as const })),
-    ].filter((item) => {
+    const scanned = [
+      ...topicPaths.map((path) => ({
+        relativePath: relative(this.layout.vaultRoot, path),
+        hash: hashFile(path),
+        targetKind: "topic" as const,
+      })),
+      ...paperPaths.map((path) => ({
+        relativePath: relative(this.layout.vaultRoot, path),
+        hash: hashFile(path),
+        targetKind: "paper" as const,
+      })),
+    ];
+    const acceptedReconciliations = new Set((this.database.prepare(`SELECT payload_json FROM proposals
+      WHERE proposal_type='reconciliation' AND review_status='accepted'`).all() as
+      Array<{ payload_json: string }>).map((row) => {
+        const payload = JSON.parse(row.payload_json) as { targetPath?: string; actualHash?: string | null };
+        return payload.targetPath ? reconciliationKey(payload.targetPath, payload.actualHash ?? null) : "";
+      }).filter(Boolean));
+    const initialized = Boolean((this.database.prepare(`SELECT last_successful_at FROM projection_state
+      WHERE projection='paper-catalog'`).pluck().get() as string | null | undefined));
+    const scannedPaths = new Set(scanned.map((item) => item.relativePath));
+    const conflicts: Array<{
+      targetId: string | null;
+      targetKind: "paper" | "topic";
+      relativePath: string;
+      expectedHash: string | null;
+      actualHash: string | null;
+    }> = scanned.flatMap((item) => {
       const known = knownHashes.get(item.relativePath);
-      if (!known || known.hash === item.hash) return false;
-      return trustedWrite?.targetPath !== item.relativePath || trustedWrite.resultHash !== item.hash;
+      const trusted = trustedWrite?.targetPath === item.relativePath && trustedWrite.resultHash === item.hash;
+      const accepted = acceptedReconciliations.has(reconciliationKey(item.relativePath, item.hash));
+      if (trusted || accepted || known?.hash === item.hash || (!known && !initialized)) return [];
+      return [{
+        targetId: known?.targetId ?? null,
+        targetKind: item.targetKind,
+        relativePath: item.relativePath,
+        expectedHash: known?.hash ?? null,
+        actualHash: item.hash,
+      }];
     });
+    if (initialized) {
+      for (const [relativePath, known] of knownHashes) {
+        if (!scannedPaths.has(relativePath) &&
+            !acceptedReconciliations.has(reconciliationKey(relativePath, null))) {
+          conflicts.push({
+            targetId: known.targetId,
+            targetKind: known.targetKind,
+            relativePath,
+            expectedHash: known.hash,
+            actualHash: null,
+          });
+        }
+      }
+    }
     if (conflicts.length > 0) {
       this.database.transaction(() => {
         for (const conflict of conflicts) {
-          const known = knownHashes.get(conflict.relativePath)!;
-          const proposalId = `proposal:reconciliation:catalog:${hashKey(`${conflict.relativePath}:${conflict.hash}`)}`;
+          const proposalId = `proposal:reconciliation:catalog:${hashKey(
+            `${conflict.relativePath}:${conflict.actualHash ?? "deleted"}`,
+          )}`;
           this.database.prepare(`INSERT OR IGNORE INTO proposals
             (id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
             VALUES (?,'reconciliation',?,?,'pending',0,?)`).run(proposalId,
@@ -391,15 +508,76 @@ export class PaperOrganizationStore {
                 targetKind: conflict.targetKind,
                 targetId: conflict.targetId,
                 targetPath: conflict.relativePath,
-                expectedHash: known.hash,
-                actualHash: conflict.hash,
+                expectedHash: conflict.expectedHash,
+                actualHash: conflict.actualHash,
                 source: "external-markdown-rebuild",
               }), rebuiltAt);
         }
       })();
       const count = (this.database.prepare("SELECT count(*) count FROM paper_catalog_documents").get() as
         { count: number }).count;
-      return { count, rebuiltAt };
+      return { count, rebuiltAt, blocked: true };
+    }
+    let invalid: {
+      targetId: string | null;
+      targetKind: "paper" | "topic";
+      relativePath: string;
+      actualHash: string;
+      errorCode: string;
+    } | null = null;
+    const topics = topicPaths.flatMap((path) => {
+      try { return [this.readTopic(path)]; }
+      catch (error) {
+        const relativePath = relative(this.layout.vaultRoot, path);
+        invalid = {
+          targetId: knownHashes.get(relativePath)?.targetId ?? null,
+          targetKind: "topic",
+          relativePath,
+          actualHash: hashFile(path),
+          errorCode: error instanceof Error ? error.message : "direction-markdown-invalid",
+        };
+        return [];
+      }
+    });
+    const papers = invalid ? [] : paperPaths.flatMap((path) => {
+      try { return [this.readPaper(path)]; }
+      catch (error) {
+        const relativePath = relative(this.layout.vaultRoot, path);
+        invalid = {
+          targetId: knownHashes.get(relativePath)?.targetId ?? null,
+          targetKind: "paper",
+          relativePath,
+          actualHash: hashFile(path),
+          errorCode: error instanceof Error ? error.message : "paper-markdown-invalid",
+        };
+        return [];
+      }
+    });
+    if (invalid) {
+      const detail = invalid as {
+        targetId: string | null;
+        targetKind: "paper" | "topic";
+        relativePath: string;
+        actualHash: string;
+        errorCode: string;
+      };
+      const proposalId = `proposal:reconciliation:invalid:${hashKey(`${detail.relativePath}:${detail.actualHash}`)}`;
+      this.database.prepare(`INSERT OR IGNORE INTO proposals
+        (id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
+        VALUES (?,'reconciliation',?,?,'pending',0,?)`).run(proposalId,
+          detail.targetKind === "paper" ? detail.targetId : null,
+          JSON.stringify({
+            targetKind: detail.targetKind,
+            targetId: detail.targetId,
+            targetPath: detail.relativePath,
+            expectedHash: knownHashes.get(detail.relativePath)?.hash ?? null,
+            actualHash: detail.actualHash,
+            source: "invalid-markdown-rebuild",
+            validationError: detail.errorCode,
+          }), rebuiltAt);
+      const count = (this.database.prepare("SELECT count(*) count FROM paper_catalog_documents").get() as
+        { count: number }).count;
+      return { count, rebuiltAt, blocked: true };
     }
     const topicIds = new Set(topics.map((topic) => topic.id));
     const topicsById = new Map(topics.map((topic) => [topic.id, topic]));
@@ -411,7 +589,12 @@ export class PaperOrganizationStore {
         visited.add(current);
         const topic = topicsById.get(current);
         if (!topic) throw new PaperOrganizationStoreError("paper-direction-not-usable", 409);
-        if (!topic.supersededBy) return current;
+        if (!topic.supersededBy) {
+          if (topic.lifecycleStatus !== "active" || topic.reviewStatus !== "confirmed") {
+            throw new PaperOrganizationStoreError("paper-direction-not-usable", 409);
+          }
+          return current;
+        }
         current = topic.supersededBy;
       }
     };
@@ -461,10 +644,10 @@ export class PaperOrganizationStore {
           ...paper.authors, ...paper.externalIdentities, ...assignedTopics.flatMap((topic) =>
             [topic.title, ...topic.aliases, topic.scope])].join("\n");
         this.database.prepare(`INSERT INTO paper_catalog_documents
-          (paper_id,canonical_title,preferred_alias,authors_json,publication_year,search_text,updated_at)
-          VALUES (?,?,?,?,?,?,?)`).run(paper.id, paper.title,
+          (paper_id,canonical_title,preferred_alias,authors_json,external_identities_json,publication_year,search_text,updated_at)
+          VALUES (?,?,?,?,?,?,?,?)`).run(paper.id, paper.title,
             paper.organization.aliases.find((alias) => alias.preferred)?.name ?? null,
-            JSON.stringify(paper.authors), paper.year, searchText, paper.updatedAt);
+            JSON.stringify(paper.authors), JSON.stringify(paper.externalIdentities), paper.year, searchText, paper.updatedAt);
         this.database.prepare("INSERT INTO paper_catalog_fts(paper_id,search_text) VALUES (?,?)")
           .run(paper.id, searchText);
       }
@@ -488,9 +671,80 @@ export class PaperOrganizationStore {
   }
 
   private replay(idempotencyKey: string): unknown | null {
-    const row = this.database.prepare("SELECT result_json FROM review_decisions WHERE idempotency_key=? OR idempotency_key LIKE ? LIMIT 1")
-      .get(idempotencyKey, `${idempotencyKey}:%`) as { result_json: string } | undefined;
+    const row = this.database.prepare(`SELECT d.result_json FROM review_decisions d
+      WHERE (d.idempotency_key=? OR d.idempotency_key LIKE ?)
+        AND EXISTS (
+          SELECT 1 FROM knowledge_write_requests w
+          WHERE json_extract(w.payload_json,'$.idempotencyKey')=? AND w.phase='complete'
+        )
+      LIMIT 1`).get(idempotencyKey, `${idempotencyKey}:%`, idempotencyKey) as
+      { result_json: string } | undefined;
     return row ? JSON.parse(row.result_json) as unknown : null;
+  }
+
+  private hasRetryableWrite(idempotencyKey: string): boolean {
+    return Boolean(this.database.prepare(`SELECT 1 FROM knowledge_write_requests
+      WHERE request_type IN ('paper-organization','direction-taxonomy')
+        AND phase IN ('failed','conflicted')
+        AND json_extract(payload_json,'$.idempotencyKey')=?
+      LIMIT 1`).get(idempotencyKey));
+  }
+
+  private hasUnfinishedWrite(idempotencyKey: string): boolean {
+    return Boolean(this.database.prepare(`SELECT 1 FROM knowledge_write_requests
+      WHERE request_type IN ('paper-organization','direction-taxonomy')
+        AND phase NOT IN ('complete','failed','conflicted')
+        AND json_extract(payload_json,'$.idempotencyKey')=?
+      LIMIT 1`).get(idempotencyKey));
+  }
+
+  private writePayload(idempotencyKey: string): { response?: unknown } | null {
+    const row = this.database.prepare(`SELECT payload_json FROM knowledge_write_requests
+      WHERE request_type IN ('paper-organization','direction-taxonomy')
+        AND json_extract(payload_json,'$.idempotencyKey')=?
+      LIMIT 1`).get(idempotencyKey) as { payload_json: string } | undefined;
+    return row ? JSON.parse(row.payload_json) as { response?: unknown } : null;
+  }
+
+  validateReconciliationTarget(input: {
+    targetKind: "paper" | "topic";
+    targetPath: string;
+    actualHash: string | null;
+  }): void {
+    const candidates = input.targetKind === "topic"
+      ? this.readMarkdownFiles(join(this.layout.vaultRoot, "knowledge", "topics"))
+      : this.readMarkdownFiles(join(this.layout.vaultRoot, "library", "papers"))
+        .filter((path) => path.endsWith(`${join("", "paper.md")}`));
+    const path = candidates.find((candidate) => relative(this.layout.vaultRoot, candidate) === input.targetPath);
+    if (input.actualHash === null) {
+      if (path) throw new PaperOrganizationStoreError("reconciliation-target-changed", 409);
+      return;
+    }
+    if (!path || hashFile(path) !== input.actualHash) {
+      throw new PaperOrganizationStoreError("reconciliation-target-changed", 409);
+    }
+    if (input.targetKind === "topic") this.readTopic(path);
+    else {
+      const paper = this.readPaper(path);
+      if (!this.database.prepare("SELECT 1 FROM papers WHERE id=?").get(paper.id)) {
+        throw new PaperOrganizationStoreError("reconciliation-paper-identity-missing", 409);
+      }
+    }
+  }
+
+  private projectedOrganization(paperId: string): PaperOrganizationInput {
+    const aliases = (this.database.prepare(`SELECT name,alias_kind,preferred FROM paper_aliases
+      WHERE paper_id=? ORDER BY ordinal`).all(paperId) as Array<{
+        name: string;
+        alias_kind: PaperAlias["kind"];
+        preferred: number;
+      }>).map((alias) => ({ name: alias.name, kind: alias.alias_kind, preferred: alias.preferred === 1 }));
+    const directions = (this.database.prepare(`SELECT topic_id,assignment_role FROM paper_direction_assignments
+      WHERE paper_id=? ORDER BY ordinal`).all(paperId) as Array<{
+        topic_id: string;
+        assignment_role: "primary" | "secondary";
+      }>).map((direction) => ({ topicId: direction.topic_id, role: direction.assignment_role }));
+    return { aliases, directions };
   }
 
   private organizationResponse(paperId: string, organization: PaperOrganizationInput): {
@@ -713,8 +967,16 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function hashFile(path: string): string {
+  return sha256(readFileSync(path, "utf8"));
+}
+
 function hashKey(value: string): string {
   return sha256(value).slice(0, 24);
+}
+
+function reconciliationKey(targetPath: string, actualHash: string | null): string {
+  return `${targetPath}\u0000${actualHash ?? "<deleted>"}`;
 }
 
 function escapeRegex(value: string): string {

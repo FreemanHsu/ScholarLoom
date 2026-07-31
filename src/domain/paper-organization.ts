@@ -19,9 +19,11 @@ export class PaperOrganizationValidationError extends Error {
 }
 
 export function normalizePaperLookup(value: string): string {
-  return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase("und")
-    .replaceAll("ß", "ss")
-    .replaceAll("\u03c2", "\u03c3");
+  return value.normalize("NFKC").trim().replace(/\s+/gu, " ")
+    .toLowerCase()
+    .toUpperCase()
+    .toLowerCase()
+    .normalize("NFKC");
 }
 
 export function validatePaperOrganization(input: unknown): PaperOrganizationInput {
