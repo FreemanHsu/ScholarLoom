@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { paperHref, readBrowserRoute } from "../src/web/browser-navigation.js";
+import { paperHref, papersHref, readBrowserRoute } from "../src/web/browser-navigation.js";
 
 describe("browser navigation", () => {
   it("restores a Paper reading view from a direct URL", () => {
@@ -45,10 +45,38 @@ describe("browser navigation", () => {
 
   it("recognizes every top-level destination and rejects unknown paths", () => {
     expect(readBrowserRoute({ pathname: "/", search: "" })).toEqual({ name: "home" });
-    expect(readBrowserRoute({ pathname: "/papers", search: "" })).toEqual({ name: "papers" });
+    expect(readBrowserRoute({ pathname: "/papers", search: "" })).toEqual({
+      name: "papers",
+      view: "all",
+      direction: null,
+      relation: "all",
+      pending: false,
+      query: "",
+    });
     expect(readBrowserRoute({ pathname: "/reviews", search: "" })).toEqual({ name: "reviews" });
     expect(readBrowserRoute({ pathname: "/settings", search: "" })).toEqual({ name: "settings" });
     expect(readBrowserRoute({ pathname: "/missing", search: "" })).toEqual({ name: "not-found" });
+  });
+
+  it("restores Paper Library organization filters from the URL", () => {
+    expect(readBrowserRoute({
+      pathname: "/papers",
+      search: "?view=unclassified&direction=topic%3Avideo-generation&relation=primary&pending=true&q=GenCeption",
+    })).toEqual({
+      name: "papers",
+      view: "unclassified",
+      direction: "topic:video-generation",
+      relation: "primary",
+      pending: true,
+      query: "GenCeption",
+    });
+    expect(papersHref({
+      view: "all",
+      direction: "topic:video-generation",
+      relation: "all",
+      pending: false,
+      query: "",
+    })).toBe("/papers?direction=topic%3Avideo-generation");
   });
 
   it("creates a stable encoded URL for a selected Evidence Anchor", () => {

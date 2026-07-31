@@ -6,6 +6,7 @@
 - Scope: single-Paper deep-reading MVP
 - Vocabulary: [`CONTEXT.md`](../CONTEXT.md)
 - SQLite design: [`sqlite-schema.sql`](sqlite-schema.sql)
+- Accepted extension: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
 
 ## 1. Purpose
 

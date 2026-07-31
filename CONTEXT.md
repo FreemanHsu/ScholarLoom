@@ -18,6 +18,43 @@ _Avoid_: Paper revision, current paper
 A Paper known through a citation or discovery result but not yet ingested for reading.
 _Avoid_: Paper stub, fake Paper
 
+**Paper Alias**:
+A human-friendly alternate name used to refer to and find a Paper without replacing
+its canonical title or asserting an external scholarly identity. A model or method
+name qualifies only when it can refer to the Paper as a whole.
+_Avoid_: Paper title, External Identity, model entity
+
+**Preferred Paper Alias**:
+The single Paper Alias chosen as the Paper's primary human-friendly display name;
+a Paper may have many aliases but at most one preferred alias.
+_Avoid_: Paper title, canonical title
+
+**Research Direction**:
+A confirmed Topic used to organize Papers by the core research problem they address
+or the contribution they make. A technique, model family, arXiv category, or title
+keyword alone does not determine a Research Direction.
+_Avoid_: Tag, Concept, arXiv category, implementation technique
+
+**Classification-only Topic Revision**:
+A confirmed Topic Revision whose title and Scope are sufficient for organizing Papers
+but which is not approved as a source for global knowledge answers.
+_Avoid_: Draft Topic, unconfirmed Topic, developed Topic
+
+**Knowledge-ready Topic Revision**:
+A confirmed Topic Revision containing substantive reusable knowledge and explicitly
+approved as a source for global knowledge answers.
+_Avoid_: Complete Topic, mature Topic, developed Topic
+
+**Primary Research Direction**:
+The single Research Direction that best represents a Paper's core research problem
+or contribution and determines where it is grouped in the Paper Library.
+_Avoid_: Primary category, first Topic
+
+**Secondary Research Direction**:
+One of up to three additional Research Directions to which a Paper makes a material
+contribution; merely using a direction's technique does not qualify.
+_Avoid_: Tag, technique used, incidental Topic
+
 **Code Repository**:
 A source-code project associated with one or more Papers.
 _Avoid_: Paper code, code attachment

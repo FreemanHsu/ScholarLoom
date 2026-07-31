@@ -1,4 +1,14 @@
-export type BrowserRoute = { name: "home" | "papers" | "reviews" | "settings" | "not-found" } | {
+export type PaperLibraryViewState = {
+  view: "all" | "unclassified";
+  direction: string | null;
+  relation: "all" | "primary";
+  pending: boolean;
+  query: string;
+};
+
+export type BrowserRoute = { name: "home" | "reviews" | "settings" | "not-found" } | ({
+  name: "papers";
+} & PaperLibraryViewState) | {
   name: "paper";
   paperId: string;
   mode: "reading" | "discussion" | "knowledge";
@@ -33,9 +43,30 @@ export function paperHref(paperId: string, view: PaperViewState = { pdfOpen: fal
   return `${path}${search ? `?${search}` : ""}`;
 }
 
+export function papersHref(view: PaperLibraryViewState): string {
+  const query = new URLSearchParams();
+  if (view.view === "unclassified") query.set("view", "unclassified");
+  if (view.direction) query.set("direction", view.direction);
+  if (view.relation === "primary") query.set("relation", "primary");
+  if (view.pending) query.set("pending", "true");
+  if (view.query.trim()) query.set("q", view.query.trim());
+  const search = query.toString();
+  return `/papers${search ? `?${search}` : ""}`;
+}
+
 export function readBrowserRoute(location: BrowserLocation): BrowserRoute {
   if (location.pathname === "/") return { name: "home" };
-  if (location.pathname === "/papers") return { name: "papers" };
+  if (location.pathname === "/papers") {
+    const query = new URLSearchParams(location.search);
+    return {
+      name: "papers",
+      view: query.get("view") === "unclassified" ? "unclassified" : "all",
+      direction: query.get("direction") || null,
+      relation: query.get("relation") === "primary" ? "primary" : "all",
+      pending: query.get("pending") === "true",
+      query: query.get("q") ?? "",
+    };
+  }
   if (location.pathname === "/reviews") return { name: "reviews" };
   if (location.pathname === "/settings") return { name: "settings" };
   const match = /^\/papers\/([^/]+)(?:\/conversations\/([^/]+))?$/.exec(location.pathname);

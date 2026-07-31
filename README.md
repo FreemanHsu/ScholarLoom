@@ -29,6 +29,9 @@ v1 数据层级、不变量和生命周期见 [`docs/data-model.md`](docs/data-m
 [`docs/implementation-slice-001.md`](docs/implementation-slice-001.md)，外部设计评审记录见
 [`docs/fable-review-2026-07-19.md`](docs/fable-review-2026-07-19.md)。
 
+Paper Alias、Research Direction、Paper Catalog 与组织建议的正式功能设计见
+[`docs/paper-organization-feature-design.md`](docs/paper-organization-feature-design.md)。
+
 开发分支、回主线门槛和紧急修复规则见
 [`docs/development-workflow.md`](docs/development-workflow.md)。
 

@@ -9,6 +9,9 @@ const store = ImportStore.open(layout);
 try {
   if (command === "migrate") console.log(JSON.stringify({ migrated: true, diagnostics: store.diagnostics() }, null, 2));
   else if (command === "diagnostics") console.log(JSON.stringify(store.diagnostics(), null, 2));
-  else if (command === "rebuild-index") console.log(JSON.stringify(store.rebuildCuratedProjection(), null, 2));
+  else if (command === "rebuild-index") console.log(JSON.stringify({
+    curated: store.rebuildCuratedProjection(),
+    paperCatalog: store.rebuildPaperCatalog(),
+  }, null, 2));
   else { console.error("Usage: tsx src/cli.ts <migrate|diagnostics|rebuild-index>"); process.exitCode = 2; }
 } finally { store.close(); releaseRuntimeLock(); }

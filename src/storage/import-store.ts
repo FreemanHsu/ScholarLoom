@@ -31,6 +31,7 @@ import {
   validateEntryOutput,
   type EntryAnswerStatus,
 } from "../agent/output-contracts.js";
+import { PaperOrganizationStore } from "./paper-organization-store.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -50,6 +51,11 @@ export type StoredPaper = {
   summaryStatus?: "ready" | "processing" | "failed";
   codeStatus?: "ready" | "failed" | "not-linked";
   pendingReviewCount?: number;
+  aliases?: import("../domain/paper-organization.js").PaperAlias[];
+  preferredAlias?: string | null;
+  directions?: import("./paper-organization-store.js").CatalogDirection[];
+  pendingOrganizationCount?: number;
+  matchedBy?: { kind: "preferred-alias" | "alias" | "canonical-title" | "catalog"; value: string; exact: boolean };
 };
 export type StoredImportRequest = { id: string; paperId: string; status: "resolved" };
 
@@ -105,6 +111,7 @@ export class ImportStore {
   readonly #conversations: ConversationStore;
   readonly #knowledgeWriter: KnowledgeWriter;
   readonly #repositoryAssociations: RepositoryAssociations;
+  readonly #paperOrganization: PaperOrganizationStore;
   readonly #agentExecutionMetadata: AgentExecutionMetadataProvider | undefined;
 
   static open(layout: StorageLayout, failurePoint: "staged" | "renamed" | "metadata-committed" | null = null,
@@ -136,6 +143,7 @@ export class ImportStore {
       schedule: repositoryRuntime.schedule,
       now: this.#now,
     });
+    this.#paperOrganization = new PaperOrganizationStore(this.#database, layout, this.#now);
     recoverInterruptedRuns(this.#database, this.#now().toISOString());
     this.#knowledgeWriter = new KnowledgeWriter(this.#database, {
       now: this.#now,
@@ -150,6 +158,7 @@ export class ImportStore {
         this.#createWriteConflict(writeId, paperId, targetPath, expectedHash, actualHash),
     });
     this.#knowledgeWriter.recover();
+    this.#paperOrganization.rebuildCatalog();
     const archiveBefore = new Date(this.#now().getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
     this.#database.prepare(`UPDATE proposals SET review_status='archived',archived_at=?
       WHERE proposal_type='reconciliation' AND review_status='pending' AND created_at < ?`).run(this.#now().toISOString(), archiveBefore);
@@ -375,7 +384,7 @@ export class ImportStore {
       { identity_type: string; normalized_value: string; metadata_json: string };
     const metadata = JSON.parse(identity.metadata_json) as { authors: string[]; year: number };
     const summaryPath = this.#database.prepare("SELECT markdown_path FROM summary_revisions WHERE id=?").pluck().get(summaryId) as string;
-    const markdown = `---\nid: "${paperId}"\ntype: paper\ntitle: "${title}"\nauthors: ${JSON.stringify(metadata.authors)}\nyear: ${metadata.year}\nvenue: null\nexternal_identities:\n  ${identity.identity_type}: "${identity.normalized_value}"\nacquisition_status: ingested\norigin: manual-import\ncurrent_version_id: "${versionId}"\ncurrent_summary_revision_id: "${summaryId}"\npaper_code_links: []\nread_status: read\nstatus: active\ntopics: []\nconcepts: []\ntags: []\ncreated: ${now.slice(0, 10)}\nupdated: ${now.slice(0, 10)}\n---\n\n# ${title}\n\n## Current reading\n\n- Current Paper Version: ${versionId}\n- Active Paper Summary: [[${summaryPath.replace(/\.md$/, "")}]]\n\n## Confirmed Takeaways\n\n| Takeaway | Active revision | Evidence | Status |\n|---|---|---|---|\n`;
+    const markdown = `---\nid: "${paperId}"\ntype: paper\ntitle: "${title}"\nauthors: ${JSON.stringify(metadata.authors)}\nyear: ${metadata.year}\nvenue: null\nexternal_identities:\n  ${identity.identity_type}: "${identity.normalized_value}"\nacquisition_status: ingested\norigin: manual-import\ncurrent_version_id: "${versionId}"\ncurrent_summary_revision_id: "${summaryId}"\npaper_code_links: []\nread_status: read\nstatus: active\naliases: []\ndirections: []\ntopics: []\nconcepts: []\ntags: []\ncreated: ${now.slice(0, 10)}\nupdated: ${now.slice(0, 10)}\n---\n\n# ${title}\n\n## Current reading\n\n- Current Paper Version: ${versionId}\n- Active Paper Summary: [[${summaryPath.replace(/\.md$/, "")}]]\n\n## Confirmed Takeaways\n\n| Takeaway | Active revision | Evidence | Status |\n|---|---|---|---|\n`;
     const hash = createHash("sha256").update(markdown).digest("hex");
     const writeId = `knowledge-write:paper-manifest:${paperId}`;
     this.#database.prepare(`INSERT INTO knowledge_write_requests(id,request_type,target_path,staged_path,result_hash,phase,created_at,updated_at,payload_json)
@@ -387,6 +396,7 @@ export class ImportStore {
     writeFileSync(`${target}.staged`, markdown, "utf8");
     this.#database.prepare("UPDATE knowledge_write_requests SET phase='staged',updated_at=? WHERE id=?").run(now, writeId);
     this.#advanceManifestWrite(writeId);
+    this.#paperOrganization.rebuildCatalog();
   }
 
   #advanceManifestWrite(writeId: string): void {
@@ -1427,8 +1437,14 @@ export class ImportStore {
       .run(scope, type, JSON.stringify(data), new Date().toISOString());
   }
 
-  listPapers(): StoredPaper[] {
-    return (this.#database.prepare(`SELECT p.id,p.title,p.updated_at,v.id version_id,v.source_type,
+  listPapers(filters: {
+    q?: string;
+    view?: "all" | "unclassified";
+    direction?: string;
+    relation?: "all" | "primary";
+    pending?: boolean;
+  } = {}): StoredPaper[] {
+    const papers = (this.#database.prepare(`SELECT p.id,p.title,p.updated_at,v.id version_id,v.source_type,
       CASE WHEN v.source_type='direct-pdf' THEN COALESCE((SELECT normalized_value FROM paper_external_identities
         WHERE paper_id=p.id AND identity_type='direct-pdf-url' ORDER BY created_at LIMIT 1),v.source_url) ELSE v.source_url END source_url,
       v.source_version,
@@ -1447,7 +1463,8 @@ export class ImportStore {
         WHEN EXISTS (SELECT 1 FROM proposals pr WHERE pr.paper_id=p.id AND pr.proposal_type='repository-retry'
           AND pr.review_status='pending') THEN 'failed'
         ELSE 'not-linked' END code_status,
-      (SELECT count(*) FROM proposals pr WHERE pr.paper_id=p.id AND pr.review_status='pending') pending_review_count
+      (SELECT count(*) FROM proposals pr WHERE pr.paper_id=p.id AND pr.review_status='pending'
+        AND pr.proposal_type<>'paper-organization') pending_review_count
       FROM papers p
       JOIN paper_versions v ON v.id=p.current_version_id ORDER BY p.updated_at DESC,p.id`).all() as
       Array<{ id: string; title: string; updated_at: string; version_id: string; source_type: "arxiv" | "direct-pdf";
@@ -1467,6 +1484,23 @@ export class ImportStore {
         codeStatus: row.code_status,
         pendingReviewCount: row.pending_review_count,
       }));
+    return this.#paperOrganization.decoratePapers(papers, filters);
+  }
+
+  listResearchDirections(): ReturnType<PaperOrganizationStore["listDirections"]> {
+    return this.#paperOrganization.listDirections();
+  }
+
+  createResearchDirection(input: unknown, idempotencyKey: string): unknown {
+    return this.#paperOrganization.createDirection(input, idempotencyKey);
+  }
+
+  savePaperOrganization(paperId: string, input: unknown, idempotencyKey: string): unknown {
+    return this.#paperOrganization.savePaperOrganization(paperId, input, idempotencyKey);
+  }
+
+  rebuildPaperCatalog(): { count: number; rebuiltAt: string } {
+    return this.#paperOrganization.rebuildCatalog();
   }
 
   findFrozenArxiv(arxivId: string): StoredPaper | null {

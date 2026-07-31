@@ -15,6 +15,8 @@ current_summary_revision_id: null
 paper_code_links: []
 read_status: unread # unread | abstract | skimmed | read
 status: active # active | archived | purged
+aliases: []
+directions: []
 topics: []
 concepts: []
 tags: []

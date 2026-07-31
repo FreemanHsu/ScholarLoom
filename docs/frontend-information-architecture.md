@@ -6,6 +6,7 @@
 - Product contract: [`PRD.md`](PRD.md)
 - Data contract: [`data-model.md`](data-model.md)
 - System architecture: [`architecture.md`](architecture.md)
+- Accepted extension: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
 
 ## 1. Purpose
 
