@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -44,6 +44,27 @@ describe("Paper organization", () => {
     const storageLayout = initializeDataRoot(join(root, "data"));
     await writeFile(join(storageLayout.vaultRoot, "knowledge", "topics", "README.md"),
       "# Topics\n\n主题笔记是领域地图，使用 `templates/topic.md`。\n", "utf8");
+    const nestedTopicDirectory = join(storageLayout.vaultRoot, "knowledge", "topics", "vision");
+    await mkdir(nestedTopicDirectory, { recursive: true });
+    await writeFile(join(nestedTopicDirectory, "README.md"), `---
+id: topic:vision-representation-learning
+type: topic
+title: Vision Representation Learning
+aliases: []
+revision_id: topic:vision-representation-learning:r1
+revision: 1
+review_status: confirmed
+usage_level: classification
+created: 2026-07-31
+updated: 2026-07-31
+---
+
+# Vision Representation Learning
+
+## Scope
+
+学习可迁移的视觉表征。
+`, "utf8");
     const app = await createApp({
       storageLayout,
       paperSource: { async resolve() { throw new Error("unused"); } },
@@ -52,6 +73,8 @@ describe("Paper organization", () => {
     expect(rebuilt.statusCode).toBe(200);
     expect(rebuilt.json()).toMatchObject({ count: 0 });
     expect(rebuilt.json()).not.toHaveProperty("blocked");
+    expect((await app.inject({ method: "GET", url: "/api/directions" })).json().directions)
+      .toContainEqual(expect.objectContaining({ id: "topic:vision-representation-learning" }));
     const database = new Database(storageLayout.databasePath, { readonly: true });
     expect(database.prepare(`SELECT count(*) FROM proposals
       WHERE proposal_type='reconciliation' AND review_status='pending'

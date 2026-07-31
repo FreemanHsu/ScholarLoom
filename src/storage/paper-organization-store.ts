@@ -4,7 +4,7 @@ import {
   readFileSync,
   readdirSync,
 } from "node:fs";
-import { basename, join, relative } from "node:path";
+import { join, relative } from "node:path";
 
 import type Database from "better-sqlite3";
 import { parseDocument } from "yaml";
@@ -430,8 +430,9 @@ export class PaperOrganizationStore {
   } {
     const rebuiltAt = this.now().toISOString();
     const allTopicPaths = this.readMarkdownFiles(join(this.layout.vaultRoot, "knowledge", "topics"));
-    const ignoredTopicPaths = allTopicPaths.filter((path) => basename(path).toLocaleLowerCase("en-US") === "readme.md");
-    const topicPaths = allTopicPaths.filter((path) => basename(path).toLocaleLowerCase("en-US") !== "readme.md");
+    const topicsReadmePath = join(this.layout.vaultRoot, "knowledge", "topics", "README.md");
+    const ignoredTopicPaths = allTopicPaths.filter((path) => path === topicsReadmePath);
+    const topicPaths = allTopicPaths.filter((path) => path !== topicsReadmePath);
     if (ignoredTopicPaths.length > 0) {
       const supersede = this.database.prepare(`UPDATE proposals
         SET review_status='superseded',decided_at=?
