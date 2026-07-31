@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 import { parse } from "yaml";
 
 import { createApp } from "../src/app.js";
+import { normalizePaperLookup } from "../src/domain/paper-organization.js";
 import { initializeDataRoot } from "../src/storage/layout.js";
 
 async function fixturePdf(): Promise<Uint8Array> {
@@ -32,6 +33,87 @@ async function waitForImport(app: FastifyInstance, id: string): Promise<void> {
 }
 
 describe("Paper organization", () => {
+  it("uses deterministic Unicode case folding for lookup keys", () => {
+    expect(normalizePaperLookup("  Straẞe  ")).toBe(normalizePaperLookup("STRASSE"));
+  });
+
+  it("recovers direction writes from every durable KWR phase", async () => {
+    for (const phase of ["staged", "renamed", "metadata-committed"] as const) {
+      const root = await mkdtemp(join(tmpdir(), `scholarloom-direction-recovery-${phase}-`));
+      const storageLayout = initializeDataRoot(join(root, "data"));
+      const options = {
+        storageLayout,
+        paperSource: { async resolve() { throw new Error("unused"); } },
+      };
+      const interrupted = await createApp({ ...options, knowledgeWriteFailurePoint: phase });
+      const response = await interrupted.inject({
+        method: "POST",
+        url: "/api/directions",
+        headers: { "idempotency-key": `recover-${phase}` },
+        payload: {
+          id: `topic:recover-${phase}`,
+          title: `Recover ${phase}`,
+          scope: "验证可恢复方向写入。",
+        },
+      });
+      expect(response.statusCode).toBe(500);
+      await interrupted.close();
+
+      const resumed = await createApp(options);
+      const directions = await resumed.inject({ method: "GET", url: "/api/directions" });
+      expect(directions.json().directions).toEqual([
+        expect.objectContaining({ id: `topic:recover-${phase}`, title: `Recover ${phase}` }),
+      ]);
+      const database = new Database(storageLayout.databasePath, { readonly: true });
+      expect(database.prepare(`SELECT phase FROM knowledge_write_requests
+        WHERE request_type='direction-taxonomy'`).pluck().get()).toBe("complete");
+      database.close();
+      await resumed.close();
+    }
+  });
+
+  it("keeps an offline Topic edit non-activating until reconciliation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-direction-reconciliation-"));
+    const storageLayout = initializeDataRoot(join(root, "data"));
+    const options = {
+      storageLayout,
+      paperSource: { async resolve() { throw new Error("unused"); } },
+    };
+    const app = await createApp(options);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/directions",
+      headers: { "idempotency-key": "create-offline-edit-direction" },
+      payload: {
+        id: "topic:offline-edit",
+        title: "Original Direction",
+        scope: "原始分类范围。",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    await app.close();
+
+    const topicPath = join(storageLayout.vaultRoot, "knowledge", "topics", "offline-edit.md");
+    const original = await readFile(topicPath, "utf8");
+    await writeFile(topicPath, original.replaceAll("Original Direction", "Externally Edited Direction"), "utf8");
+
+    const reopened = await createApp(options);
+    const directions = await reopened.inject({ method: "GET", url: "/api/directions" });
+    expect(directions.json().directions).toEqual([
+      expect.objectContaining({ id: "topic:offline-edit", title: "Original Direction" }),
+    ]);
+    const database = new Database(storageLayout.databasePath, { readonly: true });
+    const reconciliation = database.prepare(`SELECT payload_json FROM proposals
+      WHERE proposal_type='reconciliation' AND review_status='pending'`).get() as { payload_json: string };
+    expect(JSON.parse(reconciliation.payload_json)).toMatchObject({
+      targetKind: "topic",
+      targetId: "topic:offline-edit",
+      source: "external-markdown-rebuild",
+    });
+    database.close();
+    await reopened.close();
+  });
+
   it("persists aliases and directions in Markdown and resolves an exact alias after restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-paper-organization-"));
     const storageLayout = initializeDataRoot(join(root, "data"));
@@ -82,6 +164,7 @@ describe("Paper organization", () => {
       {
         id: "topic:video-generation",
         title: "Video Generation",
+        aliases: ["生成式视频"],
         scope: "生成、建模和理解视频。",
       },
     ]) {
@@ -167,13 +250,26 @@ describe("Paper organization", () => {
         ],
       }),
     ]);
+    const externalIdentity = await restarted.inject({ method: "GET", url: "/api/papers?q=2501.01234" });
+    expect(externalIdentity.json().papers[0]).toMatchObject({
+      id: paperId,
+      matchedBy: { kind: "external-identity", value: "2501.01234", exact: true },
+    });
+    const directionAlias = await restarted.inject({
+      method: "GET",
+      url: `/api/papers?q=${encodeURIComponent("生成式视频")}`,
+    });
+    expect(directionAlias.json().papers[0]).toMatchObject({ id: paperId });
     await writeFile(manifestPath, `${manifest}\n<!-- external edit -->\n`, "utf8");
     const conflicted = await restarted.inject({
       method: "PUT",
       url: `/api/papers/${encodeURIComponent(paperId)}/organization`,
       headers: { "idempotency-key": "organize-after-external-edit" },
       payload: {
-        aliases: [{ name: "GenCeption", kind: "model-name", preferred: true }],
+        aliases: [
+          { name: "GenCeption", kind: "model-name", preferred: true },
+          { name: "GenCeption Paper", kind: "user-defined", preferred: false },
+        ],
         directions: [
           { topicId: "topic:vision-representation-learning", role: "primary" },
           { topicId: "topic:video-generation", role: "secondary" },
@@ -183,6 +279,12 @@ describe("Paper organization", () => {
     expect(conflicted.statusCode).toBe(409);
     expect(conflicted.json()).toEqual({ code: "paper-organization-conflicted" });
     expect(await readFile(manifestPath, "utf8")).toContain("external edit");
+    const conflictedDatabase = new Database(storageLayout.databasePath, { readonly: true });
+    expect(conflictedDatabase.prepare(`SELECT count(*) FROM knowledge_write_requests
+      WHERE request_type='paper-organization' AND phase='conflicted'`).pluck().get()).toBe(1);
+    expect(conflictedDatabase.prepare(`SELECT count(*) FROM proposals
+      WHERE proposal_type='paper-organization' AND review_status='pending'`).pluck().get()).toBe(1);
+    conflictedDatabase.close();
     await restarted.close();
   });
 });

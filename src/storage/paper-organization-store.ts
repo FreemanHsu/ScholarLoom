@@ -1,13 +1,10 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
-  mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
-  writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { join, relative } from "node:path";
 
 import type Database from "better-sqlite3";
 import { parseDocument } from "yaml";
@@ -20,6 +17,7 @@ import {
   type PaperOrganizationInput,
 } from "../domain/paper-organization.js";
 import type { StorageLayout } from "./layout.js";
+import type { KnowledgeWriter } from "./knowledge-writer.js";
 
 type BasePaper = {
   id: string;
@@ -42,18 +40,12 @@ export type CatalogPaper<T extends BasePaper = BasePaper> = T & {
   preferredAlias: string | null;
   directions: CatalogDirection[];
   pendingOrganizationCount: number;
-  matchedBy?: { kind: "preferred-alias" | "alias" | "canonical-title" | "catalog"; value: string; exact: boolean };
-};
-
-type WritePayload = {
-  kind: "paper-organization" | "direction-taxonomy";
-  paperId?: string;
-  topicId?: string;
-  targetPath: string;
-  expectedHash: string | null;
-  proposalIds: string[];
-  idempotencyKey: string;
-  response: unknown;
+  aliasCollision: boolean;
+  matchedBy?: {
+    kind: "external-identity" | "preferred-alias" | "alias" | "canonical-title" | "prefix" | "catalog";
+    value: string;
+    exact: boolean;
+  };
 };
 
 export class PaperOrganizationStoreError extends Error {
@@ -67,8 +59,8 @@ export class PaperOrganizationStore {
     private readonly database: Database.Database,
     private readonly layout: StorageLayout,
     private readonly now: () => Date,
+    private readonly knowledgeWriter: KnowledgeWriter,
   ) {
-    this.recover();
     this.rebuildCatalog();
   }
 
@@ -81,25 +73,25 @@ export class PaperOrganizationStore {
     primaryCount: number;
     secondaryCount: number;
   }> {
-    return (this.database.prepare(`SELECT n.id,r.title,r.usage_level,r.structured_json,
-      (SELECT count(*) FROM paper_direction_assignments a WHERE a.topic_id=n.id AND a.assignment_role='primary') primary_count,
-      (SELECT count(*) FROM paper_direction_assignments a WHERE a.topic_id=n.id AND a.assignment_role='secondary') secondary_count
-      FROM knowledge_nodes n JOIN knowledge_revisions r ON r.id=n.active_revision_id
-      WHERE n.node_type='topic' AND n.lifecycle_status='active' AND r.review_status='confirmed'
-      ORDER BY r.title COLLATE NOCASE,n.id`).all() as Array<{
-        id: string;
+    return (this.database.prepare(`SELECT d.topic_id,d.title,d.usage_level,d.aliases_json,d.scope,
+      (SELECT count(*) FROM paper_direction_assignments a WHERE a.topic_id=d.topic_id AND a.assignment_role='primary') primary_count,
+      (SELECT count(*) FROM paper_direction_assignments a WHERE a.topic_id=d.topic_id AND a.assignment_role='secondary') secondary_count
+      FROM direction_catalog d
+      WHERE d.lifecycle_status='active' AND d.review_status='confirmed'
+      ORDER BY d.title COLLATE NOCASE,d.topic_id`).all() as Array<{
+        topic_id: string;
         title: string;
         usage_level: "classification" | "knowledge-ready";
-        structured_json: string;
+        aliases_json: string;
+        scope: string;
         primary_count: number;
         secondary_count: number;
       }>).map((row) => {
-        const structured = JSON.parse(row.structured_json) as { aliases: string[]; scope: string };
         return {
-          id: row.id,
+          id: row.topic_id,
           title: row.title,
-          aliases: structured.aliases,
-          scope: structured.scope,
+          aliases: JSON.parse(row.aliases_json) as string[],
+          scope: row.scope,
           usageLevel: row.usage_level,
           primaryCount: row.primary_count,
           secondaryCount: row.secondary_count,
@@ -120,7 +112,7 @@ export class PaperOrganizationStore {
         !Array.isArray(aliases) || aliases.some((alias) => typeof alias !== "string" || !alias.trim())) {
       throw new PaperOrganizationStoreError("direction-invalid");
     }
-    if (this.database.prepare("SELECT 1 FROM knowledge_nodes WHERE id=?").get(id)) {
+    if (this.database.prepare("SELECT 1 FROM direction_catalog WHERE topic_id=?").get(id)) {
       throw new PaperOrganizationStoreError("direction-already-exists", 409);
     }
     const uniqueAliases = [...new Map((aliases as string[]).map((alias) => [normalizePaperLookup(alias), alias.trim()])).values()];
@@ -162,19 +154,15 @@ export class PaperOrganizationStore {
         usageLevel: "classification",
         rationale: "用户直接创建 Research Direction。",
       }), now);
-    this.commitMarkdown({
+    this.commitOrganization({
       requestType: "direction-taxonomy",
       targetPath: relativePath,
       markdown,
-      payload: {
-        kind: "direction-taxonomy",
-        topicId: id,
-        targetPath: relativePath,
-        expectedHash: null,
-        proposalIds: [proposalId],
-        idempotencyKey,
-        response,
-      },
+      topicId: id,
+      expectedHash: null,
+      proposalIds: [proposalId],
+      idempotencyKey,
+      response,
     });
     return response;
   }
@@ -189,10 +177,6 @@ export class PaperOrganizationStore {
     const target = join(this.layout.vaultRoot, manifest.markdown_path);
     if (!existsSync(target)) throw new PaperOrganizationStoreError("paper-manifest-missing", 409);
     const currentMarkdown = readFileSync(target, "utf8");
-    const currentHash = sha256(currentMarkdown);
-    if (currentHash !== manifest.markdown_hash) {
-      throw new PaperOrganizationStoreError("paper-organization-conflicted", 409);
-    }
     const parsed = parseFrontmatter(currentMarkdown);
     const canonicalTitle = String(parsed.data.title ?? "");
     if (organization.aliases.some((alias) =>
@@ -257,19 +241,15 @@ export class PaperOrganizationStore {
       return proposalId;
     });
     const response = { organization: this.organizationResponse(paperId, organization) };
-    this.commitMarkdown({
+    this.commitOrganization({
       requestType: "paper-organization",
       targetPath: manifest.markdown_path,
       markdown,
-      payload: {
-        kind: "paper-organization",
-        paperId,
-        targetPath: manifest.markdown_path,
-        expectedHash: currentHash,
-        proposalIds,
-        idempotencyKey,
-        response,
-      },
+      paperId,
+      expectedHash: manifest.markdown_hash,
+      proposalIds,
+      idempotencyKey,
+      response,
     });
     return response;
   }
@@ -288,8 +268,8 @@ export class PaperOrganizationStore {
           alias_kind: PaperAlias["kind"];
           preferred: number;
         }>).map((alias) => ({ name: alias.name, kind: alias.alias_kind, preferred: Boolean(alias.preferred) }));
-      const directions = (this.database.prepare(`SELECT a.topic_id,r.title,a.assignment_role FROM paper_direction_assignments a
-        JOIN knowledge_nodes n ON n.id=a.topic_id JOIN knowledge_revisions r ON r.id=n.active_revision_id
+      const directions = (this.database.prepare(`SELECT a.topic_id,d.title,a.assignment_role FROM paper_direction_assignments a
+        JOIN direction_catalog d ON d.topic_id=a.topic_id
         WHERE a.paper_id=? ORDER BY CASE a.assignment_role WHEN 'primary' THEN 0 ELSE 1 END,a.ordinal`)
         .all(paper.id) as Array<{ topic_id: string; title: string; assignment_role: "primary" | "secondary" }>)
         .map((direction) => ({
@@ -300,12 +280,15 @@ export class PaperOrganizationStore {
       const pendingOrganizationCount = (this.database.prepare(`SELECT count(*) count FROM proposals
         WHERE paper_id=? AND proposal_type='paper-organization' AND review_status='pending'`)
         .get(paper.id) as { count: number }).count;
+      const aliasCollision = aliases.some((alias) => (this.database.prepare(`SELECT count(DISTINCT paper_id) count
+        FROM paper_aliases WHERE normalized_name=?`).get(normalizePaperLookup(alias.name)) as { count: number }).count > 1);
       return {
         ...paper,
         aliases,
         preferredAlias: aliases.find((alias) => alias.preferred)?.name ?? null,
         directions,
         pendingOrganizationCount,
+        aliasCollision,
       } satisfies CatalogPaper<T>;
     });
 
@@ -325,6 +308,15 @@ export class PaperOrganizationStore {
     const ftsIds = this.ftsPaperIds(query);
     const matched: CatalogPaper<T>[] = [];
     for (const paper of result) {
+      const externalIdentities = [
+        paper.arxivId,
+        typeof paper.sourceUrl === "string" ? paper.sourceUrl : undefined,
+      ].filter((value): value is string => Boolean(value));
+      const external = externalIdentities.find((identity) => normalizePaperLookup(identity) === normalized);
+      if (external) {
+        matched.push({ ...paper, matchedBy: { kind: "external-identity", value: external, exact: true } });
+        continue;
+      }
       const preferred = paper.aliases.find((alias) => alias.preferred &&
         normalizePaperLookup(alias.name) === normalized);
       if (preferred) {
@@ -350,7 +342,11 @@ export class PaperOrganizationStore {
         ...paper.authors,
         ...paper.directions.map((direction) => direction.title),
       ].join(" "));
-      if (searchable.startsWith(normalized) || searchable.includes(normalized) || ftsIds.has(paper.id)) {
+      const prefix = [paper.title, ...paper.aliases.map((candidate) => candidate.name)]
+        .some((value) => normalizePaperLookup(value).startsWith(normalized));
+      if (prefix) {
+        matched.push({ ...paper, matchedBy: { kind: "prefix", value: query, exact: false } });
+      } else if (searchable.includes(normalized) || ftsIds.has(paper.id)) {
         matched.push({ ...paper, matchedBy: { kind: "catalog", value: query, exact: false } });
       }
     }
@@ -359,15 +355,79 @@ export class PaperOrganizationStore {
       left.id.localeCompare(right.id));
   }
 
-  rebuildCatalog(): { count: number; rebuiltAt: string } {
+  rebuildCatalog(trustedWrite?: { targetPath: string; resultHash: string }): { count: number; rebuiltAt: string } {
     const rebuiltAt = this.now().toISOString();
     const topics = this.readMarkdownFiles(join(this.layout.vaultRoot, "knowledge", "topics"))
       .map((path) => this.readTopic(path));
     const papers = this.readMarkdownFiles(join(this.layout.vaultRoot, "library", "papers"))
       .filter((path) => path.endsWith(`${join("", "paper.md")}`))
       .map((path) => this.readPaper(path));
+    const knownHashes = new Map<string, { hash: string; targetId: string; targetKind: "paper" | "topic" }>([
+      ...(this.database.prepare("SELECT markdown_path,markdown_hash,paper_id FROM paper_manifests").all() as
+        Array<{ markdown_path: string; markdown_hash: string; paper_id: string }>).map((row) =>
+        [row.markdown_path, { hash: row.markdown_hash, targetId: row.paper_id, targetKind: "paper" as const }] as const),
+      ...(this.database.prepare("SELECT markdown_path,markdown_hash,topic_id FROM direction_catalog").all() as
+        Array<{ markdown_path: string; markdown_hash: string; topic_id: string }>).map((row) =>
+        [row.markdown_path, { hash: row.markdown_hash, targetId: row.topic_id, targetKind: "topic" as const }] as const),
+    ]);
+    const conflicts = [
+      ...topics.map((topic) => ({ ...topic, targetId: topic.id, targetKind: "topic" as const })),
+      ...papers.map((paper) => ({ ...paper, targetId: paper.id, targetKind: "paper" as const })),
+    ].filter((item) => {
+      const known = knownHashes.get(item.relativePath);
+      if (!known || known.hash === item.hash) return false;
+      return trustedWrite?.targetPath !== item.relativePath || trustedWrite.resultHash !== item.hash;
+    });
+    if (conflicts.length > 0) {
+      this.database.transaction(() => {
+        for (const conflict of conflicts) {
+          const known = knownHashes.get(conflict.relativePath)!;
+          const proposalId = `proposal:reconciliation:catalog:${hashKey(`${conflict.relativePath}:${conflict.hash}`)}`;
+          this.database.prepare(`INSERT OR IGNORE INTO proposals
+            (id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
+            VALUES (?,'reconciliation',?,?,'pending',0,?)`).run(proposalId,
+              conflict.targetKind === "paper" ? conflict.targetId : null,
+              JSON.stringify({
+                targetKind: conflict.targetKind,
+                targetId: conflict.targetId,
+                targetPath: conflict.relativePath,
+                expectedHash: known.hash,
+                actualHash: conflict.hash,
+                source: "external-markdown-rebuild",
+              }), rebuiltAt);
+        }
+      })();
+      const count = (this.database.prepare("SELECT count(*) count FROM paper_catalog_documents").get() as
+        { count: number }).count;
+      return { count, rebuiltAt };
+    }
     const topicIds = new Set(topics.map((topic) => topic.id));
-    for (const paper of papers) {
+    const topicsById = new Map(topics.map((topic) => [topic.id, topic]));
+    const resolveTopic = (topicId: string): string => {
+      const visited = new Set<string>();
+      let current = topicId;
+      while (true) {
+        if (visited.has(current)) throw new PaperOrganizationStoreError("direction-redirect-loop", 409);
+        visited.add(current);
+        const topic = topicsById.get(current);
+        if (!topic) throw new PaperOrganizationStoreError("paper-direction-not-usable", 409);
+        if (!topic.supersededBy) return current;
+        current = topic.supersededBy;
+      }
+    };
+    const projectedPapers = papers.map((paper) => {
+      const assignments = new Map<string, PaperDirectionInput>();
+      for (const assignment of paper.organization.directions) {
+        const topicId = resolveTopic(assignment.topicId);
+        const existing = assignments.get(topicId);
+        if (!existing || assignment.role === "primary") assignments.set(topicId, { topicId, role: assignment.role });
+      }
+      return { ...paper, organization: validatePaperOrganization({
+        aliases: paper.organization.aliases,
+        directions: [...assignments.values()],
+      }) };
+    });
+    for (const paper of projectedPapers) {
       for (const direction of paper.organization.directions) {
         if (!topicIds.has(direction.topicId)) throw new PaperOrganizationStoreError("paper-direction-not-usable", 409);
       }
@@ -378,21 +438,16 @@ export class PaperOrganizationStore {
         DELETE FROM paper_direction_assignments;
         DELETE FROM paper_catalog_documents;
         DELETE FROM paper_manifests;
-        DELETE FROM knowledge_revisions;
-        DELETE FROM knowledge_nodes;`);
+        DELETE FROM direction_catalog;`);
       for (const topic of topics) {
-        this.database.prepare(`INSERT INTO knowledge_nodes
-          (id,node_type,active_revision_id,lifecycle_status,created_at,updated_at)
-          VALUES (?,'topic',?,'active',?,?)`).run(topic.id, topic.revisionId, topic.createdAt, topic.updatedAt);
-        this.database.prepare(`INSERT INTO knowledge_revisions
-          (id,knowledge_node_id,revision_number,title,review_status,usage_level,markdown_path,markdown_hash,
-           structured_json,confirmed_at,created_at)
-          VALUES (?,?,1,?,'confirmed',?,?,?,?,?,?)`).run(topic.revisionId, topic.id, topic.title,
-            topic.usageLevel, topic.relativePath, topic.hash,
-            JSON.stringify({ aliases: topic.aliases, scope: topic.scope }), topic.updatedAt, topic.createdAt);
+        this.database.prepare(`INSERT INTO direction_catalog
+          (topic_id,title,aliases_json,scope,usage_level,lifecycle_status,superseded_by,revision_id,
+           revision_number,review_status,markdown_path,markdown_hash,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(topic.id, topic.title, JSON.stringify(topic.aliases),
+            topic.scope, topic.usageLevel, topic.lifecycleStatus, topic.supersededBy, topic.revisionId,
+            topic.revisionNumber, topic.reviewStatus, topic.relativePath, topic.hash, topic.createdAt, topic.updatedAt);
       }
-      const topicTitle = new Map(topics.map((topic) => [topic.id, topic.title]));
-      for (const paper of papers) {
+      for (const paper of projectedPapers) {
         this.database.prepare(`INSERT INTO paper_manifests(paper_id,markdown_path,markdown_hash,updated_at)
           VALUES (?,?,?,?)`).run(paper.id, paper.relativePath, paper.hash, paper.updatedAt);
         paper.organization.aliases.forEach((alias, ordinal) => this.database.prepare(`INSERT INTO paper_aliases
@@ -401,9 +456,10 @@ export class PaperOrganizationStore {
         paper.organization.directions.forEach((direction, ordinal) => this.database.prepare(`INSERT INTO paper_direction_assignments
           (paper_id,topic_id,assignment_role,ordinal) VALUES (?,?,?,?)`)
           .run(paper.id, direction.topicId, direction.role, ordinal));
-        const directionNames = paper.organization.directions.map((direction) => topicTitle.get(direction.topicId)!);
+        const assignedTopics = paper.organization.directions.map((direction) => topicsById.get(direction.topicId)!);
         const searchText = [paper.title, ...paper.organization.aliases.map((alias) => alias.name),
-          ...paper.authors, ...directionNames].join("\n");
+          ...paper.authors, ...paper.externalIdentities, ...assignedTopics.flatMap((topic) =>
+            [topic.title, ...topic.aliases, topic.scope])].join("\n");
         this.database.prepare(`INSERT INTO paper_catalog_documents
           (paper_id,canonical_title,preferred_alias,authors_json,publication_year,search_text,updated_at)
           VALUES (?,?,?,?,?,?,?)`).run(paper.id, paper.title,
@@ -415,133 +471,20 @@ export class PaperOrganizationStore {
       this.database.prepare(`UPDATE projection_state SET last_successful_at=?,rebuilt_at=?,updated_at=?
         WHERE projection='paper-catalog'`).run(rebuiltAt, rebuiltAt, rebuiltAt);
     })();
-    return { count: papers.length, rebuiltAt };
+    return { count: projectedPapers.length, rebuiltAt };
   }
 
-  private commitMarkdown(input: {
-    requestType: "paper-organization" | "direction-taxonomy";
-    targetPath: string;
-    markdown: string;
-    payload: WritePayload;
-  }): void {
-    const hash = sha256(input.markdown);
-    const writeId = `knowledge-write:${input.requestType}:${hashKey(input.payload.idempotencyKey)}`;
-    const stagedPath = `${input.targetPath}.${hash.slice(0, 12)}.staged`;
-    const now = this.now().toISOString();
-    const active = this.database.prepare(`SELECT id FROM knowledge_write_requests
-      WHERE target_path=? AND phase NOT IN ('complete','failed','conflicted')`).get(input.targetPath) as { id: string } | undefined;
-    if (active && active.id !== writeId) throw new PaperOrganizationStoreError("organization-write-in-progress", 409);
-    this.database.prepare(`INSERT INTO knowledge_write_requests
-      (id,request_type,target_path,staged_path,result_hash,phase,created_at,updated_at,payload_json)
-      VALUES (?,?,?,?,?,'reserved',?,?,?) ON CONFLICT(id) DO NOTHING`)
-      .run(writeId, input.requestType, input.targetPath, stagedPath, hash, now, now, JSON.stringify(input.payload));
-    const staged = join(this.layout.vaultRoot, stagedPath);
-    mkdirSync(dirname(staged), { recursive: true });
-    writeFileSync(staged, input.markdown, "utf8");
-    this.database.prepare("UPDATE knowledge_write_requests SET phase='staged',updated_at=? WHERE id=? AND phase='reserved'")
-      .run(now, writeId);
-    this.advance(writeId);
-    const phase = (this.database.prepare("SELECT phase FROM knowledge_write_requests WHERE id=?").get(writeId) as
-      { phase: string }).phase;
-    if (phase === "conflicted") throw new PaperOrganizationStoreError("paper-organization-conflicted", 409);
-    if (phase !== "complete") throw new PaperOrganizationStoreError("paper-organization-write-failed", 409);
-  }
-
-  private recover(): void {
-    const writes = this.database.prepare(`SELECT id FROM knowledge_write_requests
-      WHERE request_type IN ('paper-organization','direction-taxonomy')
-        AND phase NOT IN ('complete','failed','conflicted') ORDER BY created_at,id`).all() as Array<{ id: string }>;
-    for (const write of writes) this.advance(write.id);
-  }
-
-  private advance(writeId: string): void {
-    const row = this.database.prepare(`SELECT target_path,staged_path,result_hash,phase,payload_json
-      FROM knowledge_write_requests WHERE id=?`).get(writeId) as {
-        target_path: string;
-        staged_path: string;
-        result_hash: string;
-        phase: string;
-        payload_json: string;
-      };
-    const payload = JSON.parse(row.payload_json) as WritePayload;
-    const target = join(this.layout.vaultRoot, row.target_path);
-    const staged = join(this.layout.vaultRoot, row.staged_path);
-    let phase = row.phase;
-    if (phase === "reserved" || phase === "staged") {
-      if (!existsSync(staged)) {
-        if (existsSync(target) && sha256(readFileSync(target, "utf8")) === row.result_hash) phase = "renamed";
-        else {
-          this.failWrite(writeId, "staged-file-missing");
-          return;
-        }
-      } else if (sha256(readFileSync(staged, "utf8")) !== row.result_hash) {
-        this.failWrite(writeId, "staged-hash-mismatch");
-        return;
-      } else {
-        const actualHash = existsSync(target) ? sha256(readFileSync(target, "utf8")) : null;
-        if (actualHash !== payload.expectedHash && actualHash !== row.result_hash) {
-          this.conflictWrite(writeId, payload, actualHash);
-          return;
-        }
-        mkdirSync(dirname(target), { recursive: true });
-        renameSync(staged, target);
-        phase = "renamed";
+  private commitOrganization(command: Parameters<KnowledgeWriter["commitOrganization"]>[0]): void {
+    try {
+      this.knowledgeWriter.commitOrganization(command);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "paper-organization-write-failed";
+      if (code === "paper-organization-conflicted" || code === "organization-write-in-progress" ||
+          code === "paper-organization-write-failed") {
+        throw new PaperOrganizationStoreError(code, 409);
       }
-      this.database.prepare("UPDATE knowledge_write_requests SET phase='renamed',updated_at=? WHERE id=?")
-        .run(this.now().toISOString(), writeId);
+      throw error;
     }
-    if (phase === "renamed") {
-      if (!existsSync(target) || sha256(readFileSync(target, "utf8")) !== row.result_hash) {
-        this.conflictWrite(writeId, payload, existsSync(target) ? sha256(readFileSync(target, "utf8")) : null);
-        return;
-      }
-      const now = this.now().toISOString();
-      this.database.transaction(() => {
-        payload.proposalIds.forEach((proposalId, ordinal) => {
-          const decisionId = `review-decision:${hashKey(`${payload.idempotencyKey}:${ordinal}`)}`;
-          this.database.prepare(`UPDATE proposals SET review_status='accepted',decided_at=?
-            WHERE id=? AND review_status='pending'`).run(now, proposalId);
-          this.database.prepare(`INSERT OR IGNORE INTO review_decisions
-            (id,proposal_id,action,idempotency_key,result_json,created_at) VALUES (?,?,'accept',?,?,?)`)
-            .run(decisionId, proposalId, `${payload.idempotencyKey}:${ordinal}`, JSON.stringify(payload.response), now);
-        });
-        this.database.prepare(`INSERT INTO index_outbox(projection,source_id,operation,state,created_at)
-          VALUES ('paper-catalog',?,'upsert','pending',?)`)
-          .run(payload.paperId ?? payload.topicId, now);
-        this.database.prepare(`UPDATE knowledge_write_requests SET phase='metadata-committed',updated_at=?
-          WHERE id=?`).run(now, writeId);
-      })();
-      phase = "metadata-committed";
-    }
-    if (phase === "metadata-committed" || phase === "indexed") {
-      this.rebuildCatalog();
-      const now = this.now().toISOString();
-      this.database.transaction(() => {
-        this.database.prepare(`UPDATE index_outbox SET state='complete',completed_at=?
-          WHERE projection='paper-catalog' AND source_id=? AND state='pending'`)
-          .run(now, payload.paperId ?? payload.topicId);
-        this.database.prepare(`UPDATE knowledge_write_requests SET phase='complete',updated_at=?,error_code=NULL
-          WHERE id=?`).run(now, writeId);
-      })();
-    }
-  }
-
-  private failWrite(writeId: string, code: string): void {
-    this.database.prepare(`UPDATE knowledge_write_requests SET phase='failed',error_code=?,updated_at=? WHERE id=?`)
-      .run(code, this.now().toISOString(), writeId);
-  }
-
-  private conflictWrite(writeId: string, payload: WritePayload, actualHash: string | null): void {
-    const now = this.now().toISOString();
-    this.database.transaction(() => {
-      this.database.prepare(`UPDATE knowledge_write_requests
-        SET phase='conflicted',error_code='external-edit',updated_at=? WHERE id=?`).run(now, writeId);
-      if (payload.paperId) this.database.prepare(`INSERT OR IGNORE INTO proposals
-        (id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
-        VALUES (?,'reconciliation',?,?,'pending',0,?)`)
-        .run(`proposal:reconciliation:${writeId}`, payload.paperId,
-          JSON.stringify({ writeId, targetPath: payload.targetPath, expectedHash: payload.expectedHash, actualHash }), now);
-    })();
   }
 
   private replay(idempotencyKey: string): unknown | null {
@@ -570,9 +513,8 @@ export class PaperOrganizationStore {
   }
 
   private requireDirection(topicId: string): void {
-    const usable = this.database.prepare(`SELECT 1 FROM knowledge_nodes n JOIN knowledge_revisions r
-      ON r.id=n.active_revision_id WHERE n.id=? AND n.node_type='topic' AND n.lifecycle_status='active'
-      AND r.review_status='confirmed'`).get(topicId);
+    const usable = this.database.prepare(`SELECT 1 FROM direction_catalog
+      WHERE topic_id=? AND lifecycle_status='active' AND review_status='confirmed'`).get(topicId);
     if (!usable) throw new PaperOrganizationStoreError("paper-direction-not-usable", 409);
   }
 
@@ -608,6 +550,10 @@ export class PaperOrganizationStore {
     aliases: string[];
     scope: string;
     usageLevel: "classification" | "knowledge-ready";
+    lifecycleStatus: "active" | "superseded" | "deleted";
+    supersededBy: string | null;
+    reviewStatus: "confirmed" | "needs-review" | "superseded" | "provenance-missing";
+    revisionNumber: number;
     relativePath: string;
     hash: string;
     createdAt: string;
@@ -620,8 +566,16 @@ export class PaperOrganizationStore {
     const title = String(data.title ?? "").trim();
     const aliases = Array.isArray(data.aliases) ? data.aliases.filter((alias): alias is string => typeof alias === "string") : [];
     const usageLevel = data.usage_level === "knowledge-ready" ? "knowledge-ready" : "classification";
+    const reviewStatus = ["confirmed", "needs-review", "superseded", "provenance-missing"].includes(String(data.review_status))
+      ? data.review_status as "confirmed" | "needs-review" | "superseded" | "provenance-missing"
+      : "needs-review";
+    const supersededBy = typeof data.superseded_by === "string" && data.superseded_by.startsWith("topic:")
+      ? data.superseded_by : null;
+    const lifecycleStatus = data.lifecycle_status === "deleted" ? "deleted"
+      : reviewStatus === "superseded" || supersededBy ? "superseded" : "active";
+    const revisionNumber = Number.isInteger(data.revision) && Number(data.revision) > 0 ? Number(data.revision) : 1;
     const scope = markdownSection(parsed.body, "Scope");
-    if (!id.startsWith("topic:") || !title || !scope || data.review_status !== "confirmed") {
+    if (!id.startsWith("topic:") || !title || !scope) {
       throw new PaperOrganizationStoreError("direction-markdown-invalid", 409);
     }
     return {
@@ -631,6 +585,10 @@ export class PaperOrganizationStore {
       aliases,
       scope,
       usageLevel,
+      lifecycleStatus,
+      supersededBy,
+      reviewStatus,
+      revisionNumber,
       relativePath: relative(this.layout.vaultRoot, path),
       hash: sha256(markdown),
       createdAt: String(data.created ?? this.now().toISOString()),
@@ -643,6 +601,7 @@ export class PaperOrganizationStore {
     title: string;
     authors: string[];
     year: number;
+    externalIdentities: string[];
     organization: PaperOrganizationInput;
     relativePath: string;
     hash: string;
@@ -657,6 +616,10 @@ export class PaperOrganizationStore {
       title: String(data.title),
       authors: Array.isArray(data.authors) ? data.authors.filter((author): author is string => typeof author === "string") : [],
       year: Number(data.year),
+      externalIdentities: data.external_identities && typeof data.external_identities === "object"
+        ? Object.values(data.external_identities as Record<string, unknown>)
+          .filter((identity): identity is string => typeof identity === "string")
+        : [],
       organization: validatePaperOrganization(organization),
       relativePath: relative(this.layout.vaultRoot, path),
       hash: sha256(markdown),
@@ -760,9 +723,11 @@ function escapeRegex(value: string): string {
 
 function matchRank(paper: CatalogPaper): number {
   switch (paper.matchedBy?.kind) {
+    case "external-identity": return 1;
     case "preferred-alias": return 2;
     case "alias": return 3;
     case "canonical-title": return 4;
+    case "prefix": return 5;
     default: return 6;
   }
 }

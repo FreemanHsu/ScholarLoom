@@ -55,7 +55,12 @@ export type StoredPaper = {
   preferredAlias?: string | null;
   directions?: import("./paper-organization-store.js").CatalogDirection[];
   pendingOrganizationCount?: number;
-  matchedBy?: { kind: "preferred-alias" | "alias" | "canonical-title" | "catalog"; value: string; exact: boolean };
+  aliasCollision?: boolean;
+  matchedBy?: {
+    kind: "external-identity" | "preferred-alias" | "alias" | "canonical-title" | "prefix" | "catalog";
+    value: string;
+    exact: boolean;
+  };
 };
 export type StoredImportRequest = { id: string; paperId: string; status: "resolved" };
 
@@ -143,12 +148,12 @@ export class ImportStore {
       schedule: repositoryRuntime.schedule,
       now: this.#now,
     });
-    this.#paperOrganization = new PaperOrganizationStore(this.#database, layout, this.#now);
     recoverInterruptedRuns(this.#database, this.#now().toISOString());
     this.#knowledgeWriter = new KnowledgeWriter(this.#database, {
       now: this.#now,
       stagedFileExists: (relativePath) => existsSync(this.#knowledgePath(relativePath)),
       afterTakeawayPhase: (phase) => this.#maybeFail(phase),
+      afterOrganizationPhase: (phase) => this.#maybeFail(phase),
       advanceSummary: (id) => this.#advanceSummaryWrite(id),
       advancePaperManifest: (id) => this.#advanceManifestWrite(id),
       knowledgePath: (relativePath) => this.#knowledgePath(relativePath),
@@ -156,7 +161,9 @@ export class ImportStore {
         this.#storeArtifact(id, "takeaway", bytes, "md", "user", reviewDecisionId, parentArtifactId),
       createWriteConflict: (writeId, paperId, targetPath, expectedHash, actualHash) =>
         this.#createWriteConflict(writeId, paperId, targetPath, expectedHash, actualHash),
+      rebuildPaperCatalog: (trustedWrite) => this.#paperOrganization.rebuildCatalog(trustedWrite),
     });
+    this.#paperOrganization = new PaperOrganizationStore(this.#database, layout, this.#now, this.#knowledgeWriter);
     this.#knowledgeWriter.recover();
     this.#paperOrganization.rebuildCatalog();
     const archiveBefore = new Date(this.#now().getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();

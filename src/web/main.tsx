@@ -39,6 +39,7 @@ type Paper = {
   preferredAlias: string | null;
   directions: Array<{ topicId: string; title: string; role: "primary" | "secondary" }>;
   pendingOrganizationCount: number;
+  aliasCollision: boolean;
   matchedBy?: { kind: string; value: string; exact: boolean };
 };
 type ResearchDirection = {
@@ -603,7 +604,8 @@ function App() {
     }
   }
 
-  const pendingReviews = reviewProposals.filter((proposal) => proposal.reviewStatus === "pending" && !proposal.archivedAt);
+  const pendingReviews = reviewProposals.filter((proposal) => proposal.reviewStatus === "pending" &&
+    !proposal.archivedAt && !isLightweightOrganizationProposal(proposal));
   const processingPapers = papers.filter((paper) => paper.processing && !isTerminalImportJobState(paper.processing.state));
   const attentionPapers = papers.filter((paper) => paper.processing?.needsAttention);
 
@@ -668,10 +670,10 @@ function App() {
             `/api/papers/${encodeURIComponent(route.paperId)}/repositories/${encodeURIComponent(associationId)}/retry`, "POST")}
           onRemoveRepository={(associationId) => repositoryCommand(
             `/api/papers/${encodeURIComponent(route.paperId)}/repositories/${encodeURIComponent(associationId)}/remove`, "POST")}
-          onSaveOrganization={async (organization) => {
+          onSaveOrganization={async (organization, idempotencyKey) => {
             const response = await fetch(`/api/papers/${encodeURIComponent(route.paperId)}/organization`, {
               method: "PUT",
-              headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+              headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
               body: JSON.stringify(organization),
             });
             if (!response.ok) {
@@ -758,6 +760,7 @@ function PaperLibrary(props: {
   const { route } = props;
   const [query, setQuery] = useState(route.query);
   const [catalogMatches, setCatalogMatches] = useState<Paper[] | null>(null);
+  const [directionNavOpen, setDirectionNavOpen] = useState(false);
   useEffect(() => setQuery(route.query), [route.query]);
   useEffect(() => {
     let active = true;
@@ -773,6 +776,7 @@ function PaperLibrary(props: {
     return () => { active = false; };
   }, [route.query]);
   const selectedDirection = props.directions.find((direction) => direction.id === route.direction) ?? null;
+  const invalidDirection = Boolean(route.direction && !selectedDirection);
   const normalizedQuery = route.query.trim().normalize("NFKC").toLocaleLowerCase();
   const visible = (catalogMatches ?? props.papers).filter((paper) => {
     if (route.view === "unclassified" && paper.directions.some((direction) => direction.role === "primary")) return false;
@@ -792,7 +796,26 @@ function PaperLibrary(props: {
     ? visible.filter((paper) => paper.directions.some((direction) =>
       direction.topicId === selectedDirection.id && direction.role === "secondary"))
     : [];
+  const libraryGroups = route.view === "unclassified"
+    ? [{ id: "unclassified", title: "未分类", papers: visible }]
+    : [
+      ...props.directions.map((direction) => ({
+        id: direction.id,
+        title: direction.title,
+        papers: visible.filter((paper) => paper.directions.some((assignment) =>
+          assignment.topicId === direction.id && assignment.role === "primary")),
+      })).filter((group) => group.papers.length > 0),
+      {
+        id: "unclassified",
+        title: "未分类",
+        papers: visible.filter((paper) => !paper.directions.some((direction) => direction.role === "primary")),
+      },
+    ].filter((group) => group.papers.length > 0);
   const href = (next: Partial<PaperLibraryViewState>) => papersHref({ ...route, ...next });
+  const navigateLibrary = (nextHref: string) => {
+    setDirectionNavOpen(false);
+    props.onNavigate(nextHref);
+  };
   return <main className="app page library-page">
     <header className="page-header library-header"><div><span className="eyebrow">LIBRARY</span><h1>论文库</h1>
       <p>按核心研究问题和贡献组织 Paper，也可以用模型名、方法名或缩写检索。</p></div>
@@ -806,31 +829,38 @@ function PaperLibrary(props: {
       <button>搜索</button>
       {route.query && <button type="button" className="ghost" onClick={() => props.onNavigate(href({ query: "" }))}>清除</button>}
     </form>
+    <button type="button" className="direction-drawer-trigger" aria-expanded={directionNavOpen}
+      onClick={() => setDirectionNavOpen(true)}>选择论文分组</button>
     <div className="paper-library-layout">
-      <aside className="direction-sidebar" aria-label="论文库分类">
+      {directionNavOpen && <button type="button" className="direction-drawer-backdrop" aria-label="关闭论文分组"
+        onClick={() => setDirectionNavOpen(false)} />}
+      <aside className={`direction-sidebar${directionNavOpen ? " open" : ""}`} aria-label="论文库分类">
+        <button type="button" className="direction-drawer-close" onClick={() => setDirectionNavOpen(false)}>关闭</button>
         <a href={href({ view: "all", direction: null, relation: "all", pending: false })}
           aria-current={route.view === "all" && !route.direction && !route.pending ? "page" : undefined}
-          onClick={(event) => { event.preventDefault(); props.onNavigate(event.currentTarget.href.replace(window.location.origin, "")); }}>
+          onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
           <span>全部</span><b>{props.papers.length}</b></a>
         <a href={href({ view: "unclassified", direction: null, relation: "all", pending: false })}
           aria-current={route.view === "unclassified" && !route.pending ? "page" : undefined}
-          onClick={(event) => { event.preventDefault(); props.onNavigate(event.currentTarget.href.replace(window.location.origin, "")); }}>
+          onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
           <span>未分类</span><b>{props.papers.filter((paper) => !paper.directions.some((direction) => direction.role === "primary")).length}</b></a>
         <a href={href({ view: "all", direction: null, relation: "all", pending: true })}
           aria-current={route.pending ? "page" : undefined}
-          onClick={(event) => { event.preventDefault(); props.onNavigate(event.currentTarget.href.replace(window.location.origin, "")); }}>
+          onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
           <span>待确认</span><b>{props.papers.filter((paper) => paper.pendingOrganizationCount > 0).length}</b></a>
         <div className="direction-sidebar-heading"><span>研究方向</span><small>Primary</small></div>
         {props.directions.map((direction) => <a key={direction.id}
           href={href({ view: "all", direction: direction.id, relation: "all", pending: false })}
           aria-current={route.direction === direction.id ? "page" : undefined}
-          onClick={(event) => { event.preventDefault(); props.onNavigate(event.currentTarget.href.replace(window.location.origin, "")); }}>
+          onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
           <span>{direction.title}</span><b>{direction.primaryCount}</b></a>)}
         <DirectionCreator onCreated={props.onDirectionsChanged} />
       </aside>
       <section className="library">
         {props.error && props.papers.length > 0 && <p className="inline-alert">{props.error}，正在显示上次成功载入的列表。</p>}
-        {props.error && props.papers.length === 0 ? <p className="error-block">{props.error}</p>
+        {invalidDirection ? <div className="error-block"><p>这个 Research Direction 不存在、已被删除，或尚未完成重定向。</p>
+          <button onClick={() => props.onNavigate(papersHref({ ...route, direction: null }))}>返回全部论文</button></div>
+          : props.error && props.papers.length === 0 ? <p className="error-block">{props.error}</p>
           : props.papers.length === 0 ? <div className="empty"><p>还没有论文。粘贴 arXiv 链接或公开 PDF 直链开始。</p>
             <button onClick={props.onImport}>导入论文</button></div>
             : visible.length === 0 ? <div className="empty"><p>当前筛选条件下没有 Paper。</p></div>
@@ -842,13 +872,18 @@ function PaperLibrary(props: {
                   <span className="eyebrow">SECONDARY ONLY</span><h2>相关方向</h2></div><strong>{secondaryOnly.length}</strong></div>
                   {secondaryOnly.length === 0 ? <p className="empty">还没有仅以此方向为 Secondary 的 Paper。</p>
                     : secondaryOnly.map((paper) => <PaperCard key={paper.id} paper={paper} onNavigate={props.onNavigate} />)}</>}
-              </> : visible.map((paper) => <PaperCard key={paper.id} paper={paper} onNavigate={props.onNavigate} />)}
+              </> : libraryGroups.map((group) => <section className="paper-direction-group" key={group.id}>
+                <div className="library-section-heading"><div><span className="eyebrow">PRIMARY GROUP</span>
+                  <h2>{group.title}</h2></div><strong>{group.papers.length}</strong></div>
+                {group.papers.map((paper) => <PaperCard key={paper.id} paper={paper} onNavigate={props.onNavigate} />)}
+              </section>)}
       </section>
     </div>
   </main>;
 }
 
 function DirectionCreator({ onCreated }: { onCreated(): Promise<void> }) {
+  const idempotencyKey = useRef(crypto.randomUUID());
   const [id, setId] = useState("");
   const [title, setTitle] = useState("");
   const [scope, setScope] = useState("");
@@ -859,7 +894,7 @@ function DirectionCreator({ onCreated }: { onCreated(): Promise<void> }) {
       setStatus("正在保存…");
       const response = await fetch("/api/directions", {
         method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey.current },
         body: JSON.stringify({ id, title, scope }),
       });
       if (!response.ok) {
@@ -867,6 +902,7 @@ function DirectionCreator({ onCreated }: { onCreated(): Promise<void> }) {
         return;
       }
       setId(""); setTitle(""); setScope(""); setStatus("已保存");
+      idempotencyKey.current = crypto.randomUUID();
       await onCreated();
     }}>
       <label>方向名称<input value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
@@ -888,10 +924,12 @@ function PaperCard({ paper, onNavigate }: { paper: Paper; onNavigate(href: strin
     event.preventDefault(); onNavigate(href); } }}><span>{paper.sourceType === "arxiv" ? `v${paper.version}` : "PDF"}</span><div>
       <h3>{paper.preferredAlias ?? paper.title}</h3>
       {paper.preferredAlias && <p className="paper-canonical-title">{paper.title}</p>}
+      <p className="paper-authors">{paper.authors.join(", ")} · {paper.year}</p>
       <p className="paper-source">{sourceLabel}</p>
       {paper.directions.length > 0 && <div className="direction-chips">{paper.directions.map((direction) =>
         <small key={direction.topicId} className={direction.role}>{direction.title}</small>)}</div>}
       {paper.matchedBy && <p className="paper-match">匹配：{paper.matchedBy.value}</p>}
+      {paper.aliasCollision && <p className="alias-collision">同名 Alias：请结合作者、年份和 Primary 方向确认。</p>}
       <div className="paper-badges"><small>{processingLabel}</small><small>{codeLabel}</small>
         {Boolean(paper.pendingOrganizationCount) && <small>方向待确认 {paper.pendingOrganizationCount}</small>}
         {Boolean(paper.pendingReviewCount) && <small>待审核 {paper.pendingReviewCount}</small>}</div>
@@ -915,7 +953,8 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
   onNavigate(href: string): void; onRefresh(): Promise<void> }) {
   const [opened, setOpened] = useState<Set<string>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
-  const pending = proposals.filter((proposal) => proposal.reviewStatus === "pending" && !proposal.archivedAt);
+  const pending = proposals.filter((proposal) => proposal.reviewStatus === "pending" &&
+    !proposal.archivedAt && !isLightweightOrganizationProposal(proposal));
   const openCandidate = async (proposal: ReviewProposal) => {
     const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/open-source`, { method: "POST" });
     if (!response.ok) { setActionError("无法打开候选 PDF，请稍后重试。"); return; }
@@ -977,6 +1016,10 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
   </main>;
 }
 
+function isLightweightOrganizationProposal(proposal: Pick<ReviewProposal, "proposalType">): boolean {
+  return proposal.proposalType === "paper-organization" || proposal.proposalType === "direction-taxonomy";
+}
+
 function PaperOrganizationEditor(props: {
   paper: Paper;
   directions: ResearchDirection[];
@@ -984,8 +1027,9 @@ function PaperOrganizationEditor(props: {
   onSave(input: {
     aliases: Paper["aliases"];
     directions: Array<{ topicId: string; role: "primary" | "secondary" }>;
-  }): Promise<void>;
+  }, idempotencyKey: string): Promise<void>;
 }) {
+  const idempotencyKey = useRef(crypto.randomUUID());
   const [aliases, setAliases] = useState<Paper["aliases"]>(() => props.paper.aliases.map((alias) => ({ ...alias })));
   const [primary, setPrimary] = useState(() =>
     props.paper.directions.find((direction) => direction.role === "primary")?.topicId ?? "");
@@ -1022,7 +1066,7 @@ function PaperOrganizationEditor(props: {
               ...[...secondary].filter((topicId) => topicId !== primary)
                 .map((topicId) => ({ topicId, role: "secondary" as const })),
             ],
-          });
+          }, idempotencyKey.current);
         } catch (cause) {
           setError(cause instanceof Error ? cause.message : "保存失败。");
         } finally {
@@ -1119,7 +1163,7 @@ function PaperWorkspace(props: {
   onSaveOrganization(input: {
     aliases: Paper["aliases"];
     directions: Array<{ topicId: string; role: "primary" | "secondary" }>;
-  }): Promise<void>;
+  }, idempotencyKey: string): Promise<void>;
 }) {
   const { workspace, route } = props;
   const [showArchivedConversations, setShowArchivedConversations] = useState(false);
@@ -1181,8 +1225,8 @@ function PaperWorkspace(props: {
           onClick={() => props.onNavigate(repositoryHref(!route.repositoriesOpen))}>{codeStatus}</button></div>
     </header>
     {organizationOpen && <PaperOrganizationEditor paper={workspace.paper} directions={props.directions}
-      onClose={() => setOrganizationOpen(false)} onSave={async (input) => {
-        await props.onSaveOrganization(input);
+      onClose={() => setOrganizationOpen(false)} onSave={async (input, idempotencyKey) => {
+        await props.onSaveOrganization(input, idempotencyKey);
         setOrganizationOpen(false);
       }} />}
     {route.repositoriesOpen && <RepositoryPanel repositories={workspace.repositories} busy={props.repositoryBusy}

@@ -438,6 +438,11 @@ Merge 采用 source → target：
 
 ## 10. Implementation sequence
 
+Implementation status (2026-07-31): Slice 1 is implemented in the application.
+Slices 2–4 remain intentionally deferred; in particular, `/papers/organize`, Agent taxonomy
+bootstrap/backfill, batch decisions, Topic rename/merge commands, production legacy migration,
+and auto-accept are not part of the first implementation commit.
+
 ### Slice 1 — Manual organization foundation
 
 - minimal Topic/Topic revision runtime with `classification` usage level；
