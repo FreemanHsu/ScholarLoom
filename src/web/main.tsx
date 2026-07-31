@@ -646,7 +646,7 @@ function App() {
       attentionPapers={attentionPapers} pendingReviews={pendingReviews} entryQuestion={entryQuestion} entryAnswer={entryAnswer}
       onEntryQuestion={setEntryQuestion} onAskEntry={askEntry} onNavigate={navigate} onImport={() => setImportOpen(true)} />}
     {route.name === "papers" && <PaperLibrary papers={papers} directions={directions} route={route}
-      error={papersError} onNavigate={navigate} onImport={() => setImportOpen(true)}
+      error={papersError} onNavigate={navigate}
       onDirectionsChanged={async () => { await refreshDirections(); await refreshPapers(); }} />}
     {route.name === "reviews" && <ReviewCenter proposals={reviewProposals} error={reviewsError} onNavigate={navigate}
       onRefresh={async () => {
@@ -765,7 +765,6 @@ function PaperLibrary(props: {
   route: Extract<BrowserRoute, { name: "papers" }>;
   error: string | null;
   onNavigate(href: string): void;
-  onImport(): void;
   onDirectionsChanged(): Promise<void>;
 }) {
   const { route } = props;
@@ -829,14 +828,13 @@ function PaperLibrary(props: {
   };
   return <main className="app page library-page">
     <header className="page-header library-header"><div><span className="eyebrow">LIBRARY</span><h1>论文库</h1>
-      <p>按核心研究问题和贡献组织 Paper，也可以用模型名、方法名或缩写检索。</p></div>
-      <button onClick={props.onImport}>导入论文</button></header>
+      <p>按核心研究问题和贡献组织 Paper，也可以用模型名、方法名或缩写检索。</p></div></header>
     <form className="paper-catalog-search" onSubmit={(event) => {
       event.preventDefault();
       props.onNavigate(href({ query }));
     }}>
       <input aria-label="搜索论文标题、别名、作者或方向" value={query}
-        onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题、GenCeption、作者或方向…" />
+        onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题、alias、作者或方向" />
       <button>搜索</button>
       {route.query && <button type="button" className="ghost" onClick={() => props.onNavigate(href({ query: "" }))}>清除</button>}
     </form>
@@ -872,8 +870,7 @@ function PaperLibrary(props: {
         {invalidDirection ? <div className="error-block"><p>这个 Research Direction 不存在、已被删除，或尚未完成重定向。</p>
           <button onClick={() => props.onNavigate(papersHref({ ...route, direction: null }))}>返回全部论文</button></div>
           : props.error && props.papers.length === 0 ? <p className="error-block">{props.error}</p>
-          : props.papers.length === 0 ? <div className="empty"><p>还没有论文。粘贴 arXiv 链接或公开 PDF 直链开始。</p>
-            <button onClick={props.onImport}>导入论文</button></div>
+          : props.papers.length === 0 ? <div className="empty"><p>还没有论文。使用顶部的“导入论文”粘贴 arXiv 链接或公开 PDF 直链。</p></div>
             : visible.length === 0 ? <div className="empty"><p>当前筛选条件下没有 Paper。</p></div>
               : selectedDirection ? <>
                 <div className="library-section-heading"><div><span className="eyebrow">PRIMARY</span>
@@ -935,7 +932,8 @@ function PaperCard({ paper, onNavigate }: { paper: Paper; onNavigate(href: strin
     event.preventDefault(); onNavigate(href); } }}><span>{paper.sourceType === "arxiv" ? `v${paper.version}` : "PDF"}</span><div>
       <h3>{paper.preferredAlias ?? paper.title}</h3>
       {paper.preferredAlias && <p className="paper-canonical-title">{paper.title}</p>}
-      <p className="paper-authors">{paper.authors.join(", ")} · {paper.year}</p>
+      <p className="paper-authors" title={`${paper.authors.join(", ")} · ${paper.year}`}>
+        <span>{paper.authors.join(", ")}</span><span className="paper-year"> · {paper.year}</span></p>
       <p className="paper-source">{sourceLabel}</p>
       {paper.directions.length > 0 && <div className="direction-chips">{paper.directions.map((direction) =>
         <small key={direction.topicId} className={direction.role}>{direction.title}</small>)}</div>}
