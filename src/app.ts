@@ -91,6 +91,7 @@ const directPdfErrorDetail: Record<string, string> = {
   "paper-source-dns-failed": "无法解析 PDF 来源域名，请检查地址或稍后重试。",
   "paper-source-timeout": "PDF 来源响应超时，请稍后重试。",
   "paper-source-http-error": "PDF 来源返回了不可用的 HTTP 状态。",
+  "paper-source-transport-error": "无法通过直连或已配置的代理连接 PDF 来源。",
   "paper-source-redirect-invalid": "PDF 来源的重定向不安全、无效或次数过多。",
   "paper-source-too-large": "PDF 超过允许的最大大小。",
   "paper-source-not-pdf": "该地址没有直接返回有效 PDF。",

@@ -5,13 +5,13 @@ import { ArxivPaperSource } from "./adapters/arxiv.js";
 import { DirectPdfSource } from "./adapters/direct-pdf.js";
 import { CodexCliRunner } from "./adapters/codex-cli.js";
 import { existsSync } from "node:fs";
-import { parsePort, requireLoopbackHost } from "./runtime-config.js";
+import { parsePort, requireLoopbackHost, resolvePdfProxyConfiguration } from "./runtime-config.js";
 import { assertDataRootWritable, DATA_MANIFEST_NAME, defaultDataRoot, initializeDataRoot, openDataRoot } from "./storage/layout.js";
 import { acquireRuntimeLock } from "./storage/runtime-lock.js";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { PaperSourceError } from "./adapters/safe-pdf-downloader.js";
+import { HttpConnectPdfTransport, PaperSourceError, SafePdfDownloader } from "./adapters/safe-pdf-downloader.js";
 import type { AgenticEvidenceRunner } from "./agent/agentic-evidence-runner.js";
 import type { TakeawaySelectionRunner } from "./agent/takeaway-distillation.js";
 import Database from "better-sqlite3";
@@ -96,6 +96,7 @@ const paperSource: PaperSource = fixture ? {
   async resolve(arxivId) { return { arxivId, latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
   async fetchPdf() { return createFixturePdf(); },
 } : new ArxivPaperSource();
+const pdfProxy = fixture ? null : resolvePdfProxyConfiguration(process.env);
 const directPdfSource = fixture ? {
   async prepare(reference: import("./domain/paper-import-reference.js").DirectPdfReference) {
     if (reference.normalizedUrl.includes("not-a-pdf")) throw new PaperSourceError("paper-source-not-pdf");
@@ -106,7 +107,9 @@ const directPdfSource = fixture ? {
       byteSize: bytes.byteLength, mediaType: "application/pdf",
       metadata: { title: "Locate Anything Fixture", authors: ["Ada Fixture"], year: 2025 } };
   },
-} : new DirectPdfSource();
+} : new DirectPdfSource(new SafePdfDownloader({
+  ...(pdfProxy ? { proxyTransport: new HttpConnectPdfTransport(pdfProxy.url) } : {}),
+}));
 
 const host = requireLoopbackHost(process.env.SCHOLARLOOM_HOST ?? "127.0.0.1");
 const port = parsePort(process.env.SCHOLARLOOM_PORT ?? "3000");
@@ -124,6 +127,17 @@ try {
     entryResolverMode,
     settingsRuntime: {
       host, port, startedAt, fixture, takeawayQualityReleased,
+      pdfNetwork: pdfProxy ? {
+        strategy: "direct-first-proxy-fallback",
+        proxyConfigured: true,
+        proxySource: pdfProxy.source,
+        proxyScope: "loopback-http-connect",
+      } : {
+        strategy: "direct-only",
+        proxyConfigured: false,
+        proxySource: null,
+        proxyScope: null,
+      },
       codexRuntimeStatus: () => productionCodex?.runtimeStatus() ?? {
         installedVersion: null, minimumVersion: MINIMUM_CODEX_VERSION, versionStatus: "unavailable",
         capabilityStatus: "not-run",

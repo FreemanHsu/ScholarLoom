@@ -11,6 +11,77 @@ const expectCode = async (promise: Promise<unknown>, code: string) => {
 };
 
 describe("SafePdfDownloader", () => {
+  it("falls back to the configured proxy after direct transport connectivity fails", async () => {
+    const attempts: string[] = [];
+    const downloader = new SafePdfDownloader({
+      resolve: async () => ["203.0.113.10"],
+      transport: { async request() {
+        attempts.push("direct");
+        throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+      } },
+      proxyTransport: { async request() {
+        attempts.push("proxy");
+        return response();
+      } },
+    });
+
+    await expect(downloader.download("https://papers.example.test/paper.pdf")).resolves.toMatchObject({
+      mediaType: "application/pdf",
+      byteSize: 9,
+    });
+    expect(attempts).toEqual(["direct", "proxy"]);
+  });
+
+  it("restarts the download through the proxy when the direct response body resets", async () => {
+    const attempts: string[] = [];
+    const downloader = new SafePdfDownloader({
+      resolve: async () => ["203.0.113.10"],
+      transport: { async request() {
+        attempts.push("direct");
+        return response({ body: (async function* () {
+          yield new TextEncoder().encode("%PDF-");
+          throw Object.assign(new Error("body reset"), { code: "ECONNRESET" });
+        })() });
+      } },
+      proxyTransport: { async request() {
+        attempts.push("proxy");
+        return response();
+      } },
+    });
+
+    await expect(downloader.download("https://papers.example.test/paper.pdf")).resolves.toMatchObject({
+      mediaType: "application/pdf",
+      byteSize: 9,
+    });
+    expect(attempts).toEqual(["direct", "proxy"]);
+  });
+
+  it("does not use the proxy after receiving an HTTP response", async () => {
+    let proxyAttempts = 0;
+    const downloader = new SafePdfDownloader({
+      resolve: async () => ["203.0.113.10"],
+      transport: { async request() { return response({ status: 503 }); } },
+      proxyTransport: { async request() { proxyAttempts += 1; return response(); } },
+    });
+
+    await expectCode(downloader.download("https://papers.example.test/paper.pdf"), "paper-source-http-error");
+    expect(proxyAttempts).toBe(0);
+  });
+
+  it("does not use the proxy after a non-connectivity TLS failure", async () => {
+    let proxyAttempts = 0;
+    const downloader = new SafePdfDownloader({
+      resolve: async () => ["203.0.113.10"],
+      transport: { async request() {
+        throw Object.assign(new Error("certificate expired"), { code: "CERT_HAS_EXPIRED" });
+      } },
+      proxyTransport: { async request() { proxyAttempts += 1; return response(); } },
+    });
+
+    await expectCode(downloader.download("https://papers.example.test/paper.pdf"), "paper-source-transport-error");
+    expect(proxyAttempts).toBe(0);
+  });
+
   it("downloads a verified public PDF through the injected DNS and transport seams", async () => {
     const downloader = new SafePdfDownloader({
       resolve: async () => ["203.0.113.10"],

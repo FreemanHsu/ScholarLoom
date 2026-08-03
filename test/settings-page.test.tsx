@@ -64,7 +64,9 @@ describe("SettingsPage", () => {
           knowledgeAuthority: "vault-markdown-yaml", operationalAuthority: "sqlite",
           originals: "immutable-content-addressed", rebuildable: ["derived", "cache"], missingRoot: "fail-closed",
         },
-        ingestion: { pdf: { maxRedirects: 5, maxBytes: 104857600, connectTimeoutMs: 10000, totalTimeoutMs: 60000 } },
+        ingestion: { pdf: { maxRedirects: 5, maxBytes: 104857600, connectTimeoutMs: 10000, totalTimeoutMs: 60000,
+          network: { strategy: "direct-first-proxy-fallback", proxyConfigured: true,
+            proxySource: "all_proxy", proxyScope: "loopback-http-connect" } } },
         execution: {
           maximumConcurrency: 2, maximumTimeoutMs: 600000, network: "denied",
           environment: "core-scrubbed",
@@ -99,5 +101,8 @@ describe("SettingsPage", () => {
     expect(html).toContain("agent-configuration.v5");
     expect(html).toContain("job:summary");
     expect(html).toContain("环境变量最小化");
+    expect(html).toContain("Direct first → Proxy fallback");
+    expect(html).toContain("all_proxy");
+    expect(html).toContain("Loopback HTTP CONNECT");
   });
 });

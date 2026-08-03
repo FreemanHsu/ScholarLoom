@@ -162,6 +162,11 @@ read models expose the latest error rather than collapsing it to a generic faile
 Direct PDF submission persists the pending Import Request before network acquisition.
 Once download validation succeeds, its content-addressed Artifact and hash remain frozen
 even if metadata extraction fails, so later recovery cannot drift with remote content.
+The acquisition implementation owns a direct-first transport strategy. A safely configured
+loopback HTTP CONNECT adapter is attempted only after retryable direct connectivity failures,
+using the already validated target IP as the CONNECT authority and the original hostname for
+TLS authentication. Semantic HTTP, redirect, size, certificate, and PDF validation failures
+never trigger a second network path.
 
 ### 4.2 PaperLibrary
 
@@ -503,7 +508,9 @@ listens and marks dead paper-chat runs interrupted without silently dispatching 
 New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
 compatibility input. Direct PDF acquisition validates DNS and every redirect before
 connection, pins transport to a validated address, limits redirects/time/bytes, and
-requires an allowed media type plus PDF magic and parser validation.
+requires an allowed media type plus PDF magic and parser validation. When enabled, the
+loopback proxy remains an internal transport adapter behind the same acquisition interface;
+callers and durable import identity do not depend on the selected network path.
 
 ## 8. Transaction and consistency model
 

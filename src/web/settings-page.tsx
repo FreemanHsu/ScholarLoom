@@ -59,6 +59,11 @@ export function SettingsPage({ snapshot, error }: { snapshot: SettingsSnapshot |
         <small>只展示应用白名单内的配置</small></div>
       <div className="system-config-grid">
         <SystemCard title="PDF 获取">
+          <ConfigRow label="网络策略" value={pdfNetworkStrategyLabel(system.ingestion.pdf.network.strategy)} />
+          <ConfigRow label="代理回退" value={system.ingestion.pdf.network.proxyConfigured
+            ? `已配置 · ${system.ingestion.pdf.network.proxySource ?? "来源未知"}` : "未配置"} />
+          <ConfigRow label="代理范围" value={system.ingestion.pdf.network.proxyScope === "loopback-http-connect"
+            ? "Loopback HTTP CONNECT" : "—"} />
           <ConfigRow label="最大文件" value={formatBytes(system.ingestion.pdf.maxBytes)} />
           <ConfigRow label="最大重定向" value={`${system.ingestion.pdf.maxRedirects} 次`} />
           <ConfigRow label="连接超时" value={formatDuration(system.ingestion.pdf.connectTimeoutMs)} />
@@ -183,4 +188,8 @@ function formatDuration(milliseconds: number): string {
 
 function formatBytes(bytes: number): string {
   return bytes >= 1024 * 1024 ? `${Math.round(bytes / 1024 / 1024)} MiB` : `${bytes} B`;
+}
+
+function pdfNetworkStrategyLabel(strategy: string): string {
+  return strategy === "direct-first-proxy-fallback" ? "Direct first → Proxy fallback" : "Direct only";
 }

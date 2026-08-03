@@ -96,6 +96,18 @@ npm start
 `data:init` 默认创建 `$HOME/ScholarLoomData`。生产启动不会静默创建数据目录，
 也不会退回仓库内的 `.scholarloom/`。可用 `SCHOLARLOOM_DATA_ROOT` 显式选择另一已初始化根目录。
 
+公开 PDF 获取默认采用 direct-first。可显式配置无凭据的 loopback HTTP CONNECT proxy：
+
+```bash
+SCHOLARLOOM_PDF_PROXY=http://127.0.0.1:7890 npm start
+```
+
+未设置时，应用只会继承同样满足安全约束的 `ALL_PROXY`/`all_proxy`。代理仅在直连发生
+`ECONNRESET`、网络不可达、连接拒绝、连接超时或下载中途 reset 时作为一次 fallback；
+HTTP 状态、TLS 证书、redirect、大小和 PDF 校验错误不会改走代理。CONNECT authority
+使用已经过公网校验并固定的目标 IP，TLS SNI 仍使用原域名。`/settings` 展示 effective
+策略与配置来源，但不会显示代理地址或凭据。
+
 应用只监听 `127.0.0.1:3000`。本地 fixture 旅程不访问 arXiv 或 Codex，仍使用真实
 SQLite、filesystem、PDF.js 和 Git：
 

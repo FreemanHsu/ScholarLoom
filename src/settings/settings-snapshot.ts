@@ -30,8 +30,23 @@ export type SettingsRuntime = {
   takeawayQualityReleased: boolean;
   agentMessageTimeoutMs?: number;
   entryResolverMode?: PaperResolverMode;
+  pdfNetwork?: PdfNetworkSettings;
   now?: () => Date;
   codexRuntimeStatus(): CodexRuntimeStatus;
+};
+
+export type PdfNetworkSettings = {
+  strategy: "direct-only" | "direct-first-proxy-fallback";
+  proxyConfigured: boolean;
+  proxySource: "SCHOLARLOOM_PDF_PROXY" | "ALL_PROXY" | "all_proxy" | null;
+  proxyScope: "loopback-http-connect" | null;
+};
+
+const DIRECT_ONLY_PDF_NETWORK: PdfNetworkSettings = {
+  strategy: "direct-only",
+  proxyConfigured: false,
+  proxySource: null,
+  proxyScope: null,
 };
 
 const applicationVersion = (JSON.parse(
@@ -108,7 +123,8 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
         rebuildable: ["derived", "cache"],
         missingRoot: "fail-closed",
       },
-      ingestion: { pdf: SAFE_PDF_DOWNLOADER_DEFAULTS },
+      ingestion: { pdf: { ...SAFE_PDF_DOWNLOADER_DEFAULTS,
+        network: runtime.pdfNetwork ?? DIRECT_ONLY_PDF_NETWORK } },
       execution: {
         maximumConcurrency: Math.max(...effectiveExecutions.map((entry) => entry.execution.concurrency ?? 1)),
         maximumTimeoutMs: Math.max(...effectiveExecutions.map((entry) => entry.execution.timeoutMs)),

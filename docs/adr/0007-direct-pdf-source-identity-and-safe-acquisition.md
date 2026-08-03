@@ -20,6 +20,16 @@ userinfo, pins the connection to a validated address, enforces time and size lim
 and checks media type, `%PDF-` magic bytes, and PDF parseability. Resolver and transport
 adapters are injectable so tests do not weaken production SSRF policy.
 
+When a credential-free loopback HTTP CONNECT proxy is explicitly configured, or safely
+inherited from `ALL_PROXY`/`all_proxy`, acquisition remains direct-first. Only retryable
+connectivity failures may fall back once to the proxy; HTTP responses, TLS certificate
+failures, unsafe redirects, size failures, and document validation failures do not.
+The CONNECT authority is the already validated and pinned target IP rather than the
+submitted hostname, while end-to-end TLS continues to authenticate the submitted host.
+Every redirect restarts DNS validation and the direct-first strategy. Runtime settings
+expose only the effective strategy, proxy presence, configuration source, and loopback
+scope, never the proxy endpoint or credentials.
+
 Direct PDF metadata comes from embedded metadata and conservative first-page structure.
 Missing title, authors, or year produces a durable `paper-metadata-incomplete` failure;
 filenames and URL paths are never promoted to scholarly metadata. The Import Request is

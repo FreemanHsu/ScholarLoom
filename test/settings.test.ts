@@ -23,6 +23,12 @@ describe("read-only Settings", () => {
         now: () => new Date("2026-07-30T08:05:00.000Z"),
         fixture: false,
         takeawayQualityReleased: false,
+        pdfNetwork: {
+          strategy: "direct-first-proxy-fallback",
+          proxyConfigured: true,
+          proxySource: "all_proxy",
+          proxyScope: "loopback-http-connect",
+        },
         codexRuntimeStatus: () => ({
           installedVersion: "0.145.0",
           minimumVersion: "0.144.6",
@@ -79,10 +85,17 @@ describe("read-only Settings", () => {
         { taskKind: "paper-chat", status: "legacy",
           configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
       ],
+      system: { ingestion: { pdf: { network: {
+        strategy: "direct-first-proxy-fallback",
+        proxyConfigured: true,
+        proxySource: "all_proxy",
+        proxyScope: "loopback-http-connect",
+      } } } },
     });
     expect(response.body).not.toContain("process.env");
     expect(response.body).not.toContain("TOKEN");
     expect(response.body).not.toContain("SECRET");
+    expect(response.body).not.toContain("127.0.0.1:7890");
     await app.close();
   });
 
@@ -138,7 +151,8 @@ describe("read-only Settings", () => {
         missingRoot: "fail-closed",
       },
       ingestion: { pdf: { maxBytes: 100 * 1024 * 1024, maxRedirects: 5, connectTimeoutMs: 10_000,
-        totalTimeoutMs: 60_000 } },
+        totalTimeoutMs: 60_000, network: { strategy: "direct-only", proxyConfigured: false,
+          proxySource: null, proxyScope: null } } },
       execution: {
         maximumConcurrency: 2,
         maximumTimeoutMs: 600_000,

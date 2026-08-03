@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { Agent as HttpAgent, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { isIP } from "node:net";
+import { connect as netConnect, isIP } from "node:net";
+import type { Duplex } from "node:stream";
+import { connect as tlsConnect, type ConnectionOptions, type TLSSocket } from "node:tls";
 
 export type PdfTransportResponse = {
   status: number;
@@ -35,6 +38,7 @@ export const SAFE_PDF_DOWNLOADER_DEFAULTS = {
 type SafePdfDownloaderOptions = {
   resolve?: (hostname: string) => Promise<string[]>;
   transport?: PdfTransport;
+  proxyTransport?: PdfTransport;
   maxRedirects?: number;
   maxBytes?: number;
   connectTimeoutMs?: number;
@@ -44,6 +48,7 @@ type SafePdfDownloaderOptions = {
 export class SafePdfDownloader {
   readonly #resolve: (hostname: string) => Promise<string[]>;
   readonly #transport: PdfTransport;
+  readonly #proxyTransport: PdfTransport | undefined;
   readonly #maxRedirects: number;
   readonly #maxBytes: number;
   readonly #connectTimeoutMs: number;
@@ -52,6 +57,7 @@ export class SafePdfDownloader {
   constructor(options: SafePdfDownloaderOptions = {}) {
     this.#resolve = options.resolve ?? resolvePublicAddresses;
     this.#transport = options.transport ?? new HttpsPdfTransport();
+    this.#proxyTransport = options.proxyTransport;
     this.#maxRedirects = options.maxRedirects ?? SAFE_PDF_DOWNLOADER_DEFAULTS.maxRedirects;
     this.#maxBytes = options.maxBytes ?? SAFE_PDF_DOWNLOADER_DEFAULTS.maxBytes;
     this.#connectTimeoutMs = options.connectTimeoutMs ?? SAFE_PDF_DOWNLOADER_DEFAULTS.connectTimeoutMs;
@@ -71,52 +77,80 @@ export class SafePdfDownloader {
           throw new PaperSourceError("paper-source-dns-failed");
         }
         if (!addresses.length || addresses.some((address) => !isPublicAddress(address))) throw new PaperSourceError("unsafe-source-url");
-        let response: PdfTransportResponse | undefined;
-        let lastTransportError: unknown;
-        for (const address of addresses) {
-          try {
-            response = await this.#transport.request({ url, address, connectTimeoutMs: this.#connectTimeoutMs, signal: controller.signal });
-            break;
-          } catch (error) {
-            if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) throw new PaperSourceError("paper-source-timeout");
-            if (error instanceof PaperSourceError && ["unsafe-source-url", "paper-source-timeout"].includes(error.code)) throw error;
-            lastTransportError = error;
-          }
-        }
-        if (!response) {
-          if (lastTransportError instanceof PaperSourceError) throw lastTransportError;
-          throw new PaperSourceError("paper-source-http-error");
-        }
-        if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const outcome = await this.#requestHop(url, addresses, controller);
+        if (outcome.kind === "redirect") {
           if (redirect === this.#maxRedirects) throw new PaperSourceError("paper-source-redirect-invalid");
-          const location = response.headers.location;
-          if (!location) throw new PaperSourceError("paper-source-redirect-invalid");
-          try { url = parseSafeUrl(new URL(location, url).toString()); }
+          try { url = parseSafeUrl(new URL(outcome.location, url).toString()); }
           catch { throw new PaperSourceError("paper-source-redirect-invalid"); }
           continue;
         }
-        if (response.status < 200 || response.status >= 300) throw new PaperSourceError("paper-source-http-error");
-        const declaredLength = Number(response.headers["content-length"] ?? "0");
-        if (Number.isFinite(declaredLength) && declaredLength > this.#maxBytes) throw new PaperSourceError("paper-source-too-large");
-        const chunks: Uint8Array[] = [];
-        let size = 0;
-        for await (const chunk of response.body) {
-          size += chunk.byteLength;
-          if (size > this.#maxBytes) { controller.abort(); throw new PaperSourceError("paper-source-too-large"); }
-          chunks.push(chunk);
-        }
-        const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
-        const mediaType = (response.headers["content-type"] ?? "").split(";", 1)[0]!.trim().toLowerCase();
-        if (mediaType !== "application/pdf" && mediaType !== "application/octet-stream") throw new PaperSourceError("paper-source-not-pdf");
-        if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new PaperSourceError("paper-source-not-pdf");
-        return { bytes, contentHash: createHash("sha256").update(bytes).digest("hex"), byteSize: bytes.byteLength,
-          canonicalUrl: url.toString(), mediaType };
+        return { ...outcome.downloaded, canonicalUrl: url.toString() };
       }
       throw new PaperSourceError("paper-source-redirect-invalid");
     } finally {
       clearTimeout(timeout);
     }
   }
+
+  async #requestHop(url: URL, addresses: string[], controller: AbortController): Promise<{
+    kind: "redirect";
+    location: string;
+  } | {
+    kind: "downloaded";
+    downloaded: Omit<DownloadedPdf, "canonicalUrl">;
+  }> {
+    const transports = [this.#transport, ...(this.#proxyTransport ? [this.#proxyTransport] : [])];
+    let lastTransportError: unknown;
+    for (const [transportIndex, transport] of transports.entries()) {
+      for (const address of addresses) {
+        try {
+          const response = await transport.request({ url, address,
+            connectTimeoutMs: this.#connectTimeoutMs, signal: controller.signal });
+          if ([301, 302, 303, 307, 308].includes(response.status)) {
+            const location = response.headers.location;
+            if (!location) throw new PaperSourceError("paper-source-redirect-invalid");
+            return { kind: "redirect", location };
+          }
+          if (response.status < 200 || response.status >= 300) throw new PaperSourceError("paper-source-http-error");
+          const declaredLength = Number(response.headers["content-length"] ?? "0");
+          if (Number.isFinite(declaredLength) && declaredLength > this.#maxBytes) throw new PaperSourceError("paper-source-too-large");
+          const chunks: Uint8Array[] = [];
+          let size = 0;
+          for await (const chunk of response.body) {
+            size += chunk.byteLength;
+            if (size > this.#maxBytes) { controller.abort(); throw new PaperSourceError("paper-source-too-large"); }
+            chunks.push(chunk);
+          }
+          const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+          const mediaType = (response.headers["content-type"] ?? "").split(";", 1)[0]!.trim().toLowerCase();
+          if (mediaType !== "application/pdf" && mediaType !== "application/octet-stream") throw new PaperSourceError("paper-source-not-pdf");
+          if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new PaperSourceError("paper-source-not-pdf");
+          return { kind: "downloaded", downloaded: { bytes,
+            contentHash: createHash("sha256").update(bytes).digest("hex"), byteSize: bytes.byteLength, mediaType } };
+        } catch (error) {
+          if (error instanceof PaperSourceError) throw error;
+          if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+            throw new PaperSourceError("paper-source-timeout");
+          }
+          if (!isRetryableConnectivityError(error)) throw new PaperSourceError("paper-source-transport-error");
+          lastTransportError = error;
+        }
+      }
+      if (transportIndex === 0 && this.#proxyTransport && isRetryableConnectivityError(lastTransportError)) continue;
+      break;
+    }
+    if (transportErrorCode(lastTransportError) === "ETIMEDOUT") throw new PaperSourceError("paper-source-timeout");
+    throw new PaperSourceError("paper-source-transport-error");
+  }
+}
+
+function isRetryableConnectivityError(error: unknown): boolean {
+  const code = transportErrorCode(error);
+  return ["ECONNRESET", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT", "EPIPE"].includes(code);
+}
+
+function transportErrorCode(error: unknown): string {
+  return error instanceof Error && "code" in error ? String(error.code) : "";
 }
 
 function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -186,9 +220,121 @@ class HttpsPdfTransport implements PdfTransport {
         for (const [key, value] of Object.entries(response.headers)) headers[key] = Array.isArray(value) ? value.join(", ") : value;
         resolve({ status: response.statusCode ?? 0, headers, body: response });
       });
-      request.setTimeout(input.connectTimeoutMs, () => request.destroy(new PaperSourceError("paper-source-timeout")));
+      request.setTimeout(input.connectTimeoutMs, () => request.destroy(transportError("ETIMEDOUT", "direct connection timeout")));
       request.once("error", reject);
       request.end();
     });
   }
+}
+
+export class HttpConnectPdfTransport implements PdfTransport {
+  constructor(readonly proxyUrl: URL, readonly options: { ca?: ConnectionOptions["ca"] } = {}) {}
+
+  async request(input: { url: URL; address: string; connectTimeoutMs: number;
+    signal: AbortSignal }): Promise<PdfTransportResponse> {
+    const tunnel = await this.#openTunnel(input);
+    const tlsSocket = await this.#openTls(tunnel, input);
+    return new Promise((resolve, reject) => {
+      const agent = new HttpAgent({ keepAlive: false });
+      agent.createConnection = (_options, callback) => {
+        callback?.(null, tlsSocket);
+        return tlsSocket;
+      };
+      const request = httpRequest({
+        protocol: "http:",
+        hostname: input.url.hostname,
+        port: input.url.port || "443",
+        path: `${input.url.pathname}${input.url.search}`,
+        method: "GET",
+        headers: { "user-agent": "ScholarLoom/0.1 (personal research ingestion)",
+          accept: "application/pdf, application/octet-stream;q=0.8", host: input.url.host, connection: "close" },
+        agent,
+        signal: input.signal,
+      }, (response) => {
+        const headers: Record<string, string | undefined> = {};
+        for (const [key, value] of Object.entries(response.headers)) {
+          headers[key] = Array.isArray(value) ? value.join(", ") : value;
+        }
+        resolve({ status: response.statusCode ?? 0, headers, body: response });
+      });
+      request.setTimeout(input.connectTimeoutMs, () => request.destroy(transportError("ETIMEDOUT", "proxy origin timeout")));
+      request.once("error", reject);
+      request.end();
+    });
+  }
+
+  #openTunnel(input: { url: URL; address: string; connectTimeoutMs: number; signal: AbortSignal }): Promise<Duplex> {
+    const port = input.url.port || "443";
+    const authority = `${input.address.includes(":") ? `[${input.address}]` : input.address}:${port}`;
+    return new Promise((resolve, reject) => {
+      if (input.signal.aborted) { reject(new DOMException("Aborted", "AbortError")); return; }
+      const proxyHost = this.proxyUrl.hostname.replace(/^\[|\]$/g, "");
+      const socket = netConnect({ host: proxyHost, port: Number(this.proxyUrl.port || "80") });
+      let received = Buffer.alloc(0);
+      let settled = false;
+      const cleanup = () => {
+        socket.setTimeout(0);
+        socket.removeListener("data", onData);
+        socket.removeListener("error", fail);
+        socket.removeListener("end", onEnd);
+        socket.removeListener("close", onClose);
+        input.signal.removeEventListener("abort", abort);
+      };
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        socket.destroy();
+        reject(error);
+      };
+      const abort = () => fail(new DOMException("Aborted", "AbortError"));
+      const incompleteResponse = () => transportError("EPROXYCONNECT", "proxy closed before completing CONNECT response");
+      const onEnd = () => fail(incompleteResponse());
+      const onClose = () => fail(incompleteResponse());
+      const onData = (chunk: Buffer) => {
+        received = Buffer.concat([received, chunk]);
+        if (received.byteLength > 16 * 1024) { fail(transportError("EPROXYCONNECT", "proxy CONNECT response headers too large")); return; }
+        const headerEnd = received.indexOf("\r\n\r\n");
+        if (headerEnd < 0) return;
+        const status = received.subarray(0, headerEnd).toString("latin1").match(/^HTTP\/1\.[01] (\d{3})(?: |\r?$)/m)?.[1];
+        if (status !== "200") { fail(transportError("EPROXYCONNECT", `proxy CONNECT returned ${status ?? 0}`)); return; }
+        settled = true;
+        cleanup();
+        const head = received.subarray(headerEnd + 4);
+        if (head.byteLength) socket.unshift(head);
+        resolve(socket);
+      };
+      input.signal.addEventListener("abort", abort, { once: true });
+      socket.setTimeout(input.connectTimeoutMs, () => fail(transportError("ETIMEDOUT", "proxy connect timeout")));
+      socket.once("error", fail);
+      socket.once("end", onEnd);
+      socket.once("close", onClose);
+      socket.on("data", onData);
+      socket.once("connect", () => socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\nProxy-Connection: Keep-Alive\r\n\r\n`));
+    });
+  }
+
+  #openTls(tunnel: Duplex, input: { url: URL; connectTimeoutMs: number; signal: AbortSignal }): Promise<TLSSocket> {
+    return new Promise((resolve, reject) => {
+      if (input.signal.aborted) {
+        tunnel.destroy();
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      const socket = tlsConnect({ socket: tunnel, servername: input.url.hostname, ...this.options });
+      const abort = () => socket.destroy(new DOMException("Aborted", "AbortError"));
+      input.signal.addEventListener("abort", abort, { once: true });
+      socket.setTimeout(input.connectTimeoutMs, () => socket.destroy(transportError("ETIMEDOUT", "proxy TLS timeout")));
+      socket.once("secureConnect", () => {
+        input.signal.removeEventListener("abort", abort);
+        socket.setTimeout(0);
+        resolve(socket);
+      });
+      socket.once("error", (error) => { input.signal.removeEventListener("abort", abort); reject(error); });
+    });
+  }
+}
+
+function transportError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
 }
