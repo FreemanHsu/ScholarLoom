@@ -18,6 +18,7 @@ import {
   type CodexRuntimeStatus,
 } from "../agent/agent-configuration.js";
 import { renderAgentPrompt } from "../agent/agent-prompts.js";
+import { codexOutputSchema } from "../agent/codex-output-schema.js";
 import {
   agenticEvidenceSchema,
   createChatSchema,
@@ -27,7 +28,20 @@ import {
   validateSummaryOutput,
 } from "../agent/output-contracts.js";
 import { takeawaySelectionSchema, type TakeawaySelectionRunner } from "../agent/takeaway-distillation.js";
+import {
+  createPaperOrganizationSchema,
+  normalizePaperOrganizationAgentResult,
+  validatePaperOrganizationAgentResult,
+  type PaperOrganizationAgentResult,
+  type PaperOrganizationRunner,
+} from "../agent/paper-organization.js";
 import type { StorageLayout } from "../storage/layout.js";
+import {
+  createPaperTaxonomySchema,
+  validatePaperTaxonomyResult,
+  type PaperTaxonomyResult,
+  type PaperTaxonomyRunner,
+} from "../agent/paper-taxonomy.js";
 
 const Ajv = createRequire(import.meta.url)("ajv") as new (options: { allErrors: boolean }) => {
   compile(schema: object): ((value: unknown) => boolean) & { errors?: unknown };
@@ -41,8 +55,11 @@ function agentExecutionArgs(taskKind: AgentTaskKind): string[] {
   return ["--model", configuration.model, "-c", `model_reasoning_effort="${configuration.reasoningEffort}"`];
 }
 
-export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, TakeawaySelectionRunner {
+export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, TakeawaySelectionRunner,
+  PaperOrganizationRunner, PaperTaxonomyRunner {
   readonly #skill = readFileSync(join(process.cwd(), "skills/paper-reading/SKILL.md"), "utf8");
+  readonly #organizationSkill = readFileSync(join(process.cwd(), "skills/paper-organization/SKILL.md"), "utf8");
+  readonly #taxonomySkill = readFileSync(join(process.cwd(), "skills/paper-taxonomy/SKILL.md"), "utf8");
   readonly #canaries: boolean;
   readonly #runtimeRoot: string | undefined;
   readonly #storageLayout: StorageLayout | undefined;
@@ -88,10 +105,37 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
     return result;
   }
 
+  async analyze(input: Parameters<PaperOrganizationRunner["analyze"]>[0]): Promise<PaperOrganizationAgentResult> {
+    input.onActivity({ type: "organization", text: "正在分析 Paper 的 Alias 与核心研究方向" });
+    const topicIds = input.directions.map((direction) => direction.topicId);
+    const schema = createPaperOrganizationSchema(input.context, topicIds);
+    const rawResult = await this.#run<PaperOrganizationAgentResult>("paper-organization", schema,
+      renderAgentPrompt("paper-organization", {
+        context: { manifest: input.context, directions: input.directions },
+        skillContent: this.#organizationSkill,
+      }), input.signal);
+    const result = normalizePaperOrganizationAgentResult(rawResult);
+    validatePaperOrganizationAgentResult(result, input.context, input.directions);
+    return result;
+  }
+
+  async propose(input: Parameters<PaperTaxonomyRunner["propose"]>[0]): Promise<PaperTaxonomyResult> {
+    input.onActivity({ type: "taxonomy", text: "正在从 Paper cohort 归纳候选 Research Directions" });
+    const schema = createPaperTaxonomySchema(input.context);
+    const result = await this.#run<PaperTaxonomyResult>("paper-taxonomy", schema,
+      renderAgentPrompt("paper-taxonomy", {
+        context: input.context,
+        skillContent: this.#taxonomySkill,
+      }), input.signal);
+    validatePaperTaxonomyResult(result, input.context);
+    return result;
+  }
+
   select(input: Parameters<TakeawaySelectionRunner["select"]>[0]): ReturnType<TakeawaySelectionRunner["select"]> {
     input.onActivity({ type: "selection", text: "正在判断回答中是否存在值得长期保留的单一结论" });
     return this.#run("takeaway-distillation", takeawaySelectionSchema,
-      renderAgentPrompt("takeaway-distillation", { context: { context: input.context, material: input.material } }));
+      renderAgentPrompt("takeaway-distillation", { context: { context: input.context, material: input.material } }),
+      input.signal);
   }
 
   async run(input: Parameters<AgenticEvidenceRunner["run"]>[0]): Promise<AgenticEvidenceResult> {
@@ -102,7 +146,7 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
     try {
       const schemaPath = join(directory, "schema.json");
       const outputPath = join(directory, "output.json");
-      writeFileSync(schemaPath, JSON.stringify(agenticEvidenceSchema), "utf8");
+      writeFileSync(schemaPath, JSON.stringify(codexOutputSchema(agenticEvidenceSchema)), "utf8");
       const codexExecutable = resolveExecutable("codex");
       if (this.#canaries) {
         try {
@@ -182,7 +226,7 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
     }
   }
 
-  async #run<T>(task: AgentTaskKind, schema: object, prompt: string): Promise<T> {
+  async #run<T>(task: AgentTaskKind, schema: object, prompt: string, signal?: AbortSignal): Promise<T> {
     const configuration = getAgentConfiguration(task);
     const executionRoot = this.#runtimeRoot ?? tmpdir();
     if (this.#canaries && this.#runtimeRoot) assertPrivateRuntimeRoot(this.#runtimeRoot);
@@ -190,7 +234,7 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
     const workspace = mkdtempSync(join(executionRoot, "structured-workspace-"));
     const schemaPath = join(directory, "schema.json");
     const outputPath = join(directory, "output.json");
-    writeFileSync(schemaPath, JSON.stringify(schema), "utf8");
+    writeFileSync(schemaPath, JSON.stringify(codexOutputSchema(schema)), "utf8");
     writeFileSync(join(workspace, "CANARY"), "readable", "utf8");
     try {
       const codexExecutable = resolveExecutable("codex");
@@ -216,11 +260,19 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
           "--output-schema", schemaPath, "--output-last-message", outputPath, "--color", "never"], { stdio: ["pipe", "pipe", "pipe"] });
         let error = "";
         let events = "";
-        const timeout = setTimeout(() => child.kill("SIGTERM"), configuration.execution.timeoutMs);
+        const terminate = () => child.kill("SIGTERM");
+        const timeout = setTimeout(terminate, configuration.execution.timeoutMs);
+        signal?.addEventListener("abort", terminate, { once: true });
         child.stdout.on("data", (chunk: Buffer) => { events += chunk.toString(); if (events.length > 2_000_000) events = events.slice(-2_000_000); });
         child.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
-        child.on("error", (cause) => { clearTimeout(timeout); reject(cause); });
-        child.on("close", (code) => { clearTimeout(timeout); code === 0 ? resolve() : reject(new Error(`${task} Codex failed (${code}): ${error.slice(-1200)} ${events.slice(-800)}`)); });
+        child.on("error", (cause) => { clearTimeout(timeout); signal?.removeEventListener("abort", terminate); reject(cause); });
+        child.on("close", (code) => {
+          clearTimeout(timeout);
+          signal?.removeEventListener("abort", terminate);
+          if (signal?.aborted) reject(signal.reason ?? new Error(`${task}-aborted`));
+          else if (code === 0) resolve();
+          else reject(new Error(`${task} Codex failed (${code}): ${error.slice(-1200)} ${events.slice(-800)}`));
+        });
         child.stdin.end(prompt);
       });
       const result = JSON.parse(readFileSync(outputPath, "utf8")) as T;

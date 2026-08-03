@@ -11,6 +11,7 @@ export type PaperAlias = { name: string; kind: PaperAliasKind; preferred: boolea
 export type DirectionRole = "primary" | "secondary";
 export type PaperDirectionInput = { topicId: string; role: DirectionRole };
 export type PaperOrganizationInput = { aliases: PaperAlias[]; directions: PaperDirectionInput[] };
+export const PAPER_LOOKUP_NORMALIZATION_VERSION = "paper-lookup-v1";
 
 export class PaperOrganizationValidationError extends Error {
   constructor(readonly code: string) {

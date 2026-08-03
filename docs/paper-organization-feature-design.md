@@ -8,6 +8,8 @@
 - Frontend baseline: [`frontend-information-architecture.md`](frontend-information-architecture.md)
 - Vocabulary: [`../CONTEXT.md`](../CONTEXT.md)
 - External review: [`fable-review-2026-07-31-paper-organization.md`](fable-review-2026-07-31-paper-organization.md)
+- Implementation: Slices 1–4D complete as of 2026-08-01; per-slice designs and
+  Fable reviews are recorded in `implementation-slice-004` through `012`.
 
 ## 1. Purpose
 
@@ -475,6 +477,10 @@ and auto-accept are not part of the first implementation commit.
 - Entry Agent Alias resolver；
 - knowledge-ready Topic KnowledgeRevision indexing；
 - optional Domain → Direction hierarchy。
+
+Implemented as four independently reviewed slices: calibrated auto-accept (4A),
+Entry Alias resolver (4B), knowledge-ready Topic revisions (4C), and the optional
+exactly two-level Domain → Direction navigation hierarchy (4D)。
 
 ## 11. Acceptance and verification
 

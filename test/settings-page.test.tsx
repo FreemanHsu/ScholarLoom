@@ -12,7 +12,7 @@ describe("SettingsPage", () => {
       loadedAt: "2026-07-30T08:00:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v3",
+      configurationVersion: "agent-configuration.v5",
         startedAt: "2026-07-30T08:00:00.000Z",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: "$HOME/ScholarLoomData",
@@ -75,6 +75,14 @@ describe("SettingsPage", () => {
           settings: { scale: 2, dpi: 144, background: "#ffffff", intent: "display", annotations: "disabled",
             systemFonts: false, eval: false, format: "image/png" } },
         diagnostics: { command: "npm run diagnostics", browserDetailAvailable: false },
+        entryPaperResolver: { mode: "enabled", resolverVersion: "paper-resolver.v1",
+          normalizationVersion: "paper-lookup-v1", killSwitchAvailable: true },
+        aliasAutomation: {
+          scope: "alias-only",
+          gates: { minimumLabels: 75, maturityDays: 30, wilsonLower: 0.95,
+            holdoutRate: 0.1, dailyCap: 10 },
+          policyCounts: {}, latestPolicy: null, lastEvaluationAt: null,
+        },
       },
     } as SettingsSnapshot} error={null} />);
 
@@ -88,7 +96,7 @@ describe("SettingsPage", () => {
     expect(html).toContain("0.1.0");
     expect(html).toContain("Takeaway Quality V2");
     expect(html).toContain("vault-markdown-yaml");
-    expect(html).toContain("agent-configuration.v3");
+    expect(html).toContain("agent-configuration.v5");
     expect(html).toContain("job:summary");
     expect(html).toContain("环境变量最小化");
   });

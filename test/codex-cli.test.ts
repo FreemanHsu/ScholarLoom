@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { assertDiscussionCapability, CodexCliRunner } from "../src/adapters/codex-cli.js";
+import type { PaperOrganizationManifest } from "../src/agent/paper-organization.js";
 import { initializeDataRoot } from "../src/storage/layout.js";
 
 describe("CodexCliRunner Paper Summary contract", () => {
@@ -64,6 +65,85 @@ process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
         title: "Model ID",
         pages: [{ handle: "pdf-page:1", page: 1, text: "evidence" }],
       })).resolves.toMatchObject({ readStatus: "read" });
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("sends Paper Organization through the Codex-supported strict schema subset", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-organization-schema-"));
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--version") { process.stdout.write("codex-cli 0.145.0\\n"); process.exit(0); }
+const schema = JSON.parse(fs.readFileSync(args[args.indexOf("--output-schema") + 1], "utf8"));
+if (JSON.stringify(schema).includes('"uniqueItems"')) {
+  process.stderr.write("Invalid schema for response_format 'codex_output_schema': 'uniqueItems' is not permitted.");
+  process.exit(1);
+}
+const hasEmptyEnum = (value) => value && typeof value === "object" &&
+  ((Array.isArray(value.enum) && value.enum.length === 0) ||
+    Object.values(value).some(hasEmptyEnum));
+if (hasEmptyEnum(schema)) {
+  process.stderr.write("schema is invalid: enum must NOT have fewer than 1 items");
+  process.exit(1);
+}
+const recommendedSchemas = schema.properties.primary.properties.recommendedTopicId.anyOf ?? [];
+const recommendedTopicId = recommendedSchemas.flatMap((candidate) => candidate.enum ?? [])[0] ?? null;
+const outputPath = args[args.indexOf("--output-last-message") + 1];
+process.stdin.resume();
+process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
+  coreProblem: "学习可迁移视觉表征。",
+  mainContribution: "证明生成式预训练可迁移。",
+  primary: {
+    outcome: recommendedTopicId ? "proposal" : "no-fit",
+    recommendedTopicId,
+    rationale: recommendedTopicId ? "核心问题属于视觉表征学习。" : "当前没有可用 Research Direction。",
+    alternatives: []
+  },
+  secondary: { outcome: "not-needed", candidates: [] },
+  usage: { status: "unavailable", inputTokens: null, cachedInputTokens: null,
+    outputTokens: null, totalTokens: null }
+})));
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    const direction = {
+      topicId: "topic:vision-learning", title: "Vision Learning", aliases: [],
+      scope: "研究视觉表征学习。", revisionId: "topic:vision-learning:r1",
+      markdownHash: "direction-hash", semanticHash: "semantic-hash",
+    };
+    const context: PaperOrganizationManifest = {
+      contractVersion: "paper-organization.v1", scope: "all",
+      requestedSections: ["primary", "secondary"],
+      paper: { id: "paper:fixture", versionId: "paper-version:fixture:v1",
+        title: "Video Models Learn Vision", authors: ["Ada Fixture"],
+        externalIdentities: ["arxiv:2601.00001"] },
+      summary: { revisionId: "summary:fixture:r1", markdownHash: "summary-hash",
+        sections: [{ key: "overview", title: "概述", body: "视觉表征学习。" }] },
+      organization: { aliases: [], directions: [] },
+      paperManifest: { path: "library/papers/fixture/paper.md", hash: "paper-hash" },
+      catalogSnapshotId: "catalog:fixture", catalogHash: "catalog-hash",
+      promptHash: "prompt-hash", schemaHash: "schema-hash", skillHash: "skill-hash",
+      lockedPrimaryTopicId: null,
+    };
+    try {
+      await expect(new CodexCliRunner({ canaries: false }).analyze({
+        context,
+        directions: [direction], signal: new AbortController().signal, onActivity() {},
+      })).resolves.toMatchObject({
+        primary: { recommendedTopicId: direction.topicId },
+        secondary: { outcome: "not-needed" },
+      });
+      await expect(new CodexCliRunner({ canaries: false }).analyze({
+        context: { ...context, catalogSnapshotId: "catalog:empty", catalogHash: "catalog-empty" },
+        directions: [], signal: new AbortController().signal, onActivity() {},
+      })).resolves.toMatchObject({
+        primary: { outcome: "no-fit", recommendedTopicId: null, alternatives: [] },
+        secondary: { outcome: "not-needed", candidates: [] },
+      });
     } finally {
       process.env.PATH = originalPath;
     }

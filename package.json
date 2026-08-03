@@ -11,6 +11,7 @@
     "data:init": "tsx src/data-cli.ts init",
     "data:migrate": "tsx src/data-cli.ts migrate-legacy",
     "data:repair-permissions": "tsx src/data-cli.ts repair-permissions",
+    "data:paper-topics": "tsx src/data-cli.ts paper-topics",
     "backup": "tsx src/data-cli.ts snapshot",
     "backup:verify": "tsx src/data-cli.ts verify",
     "restore": "tsx src/data-cli.ts restore",

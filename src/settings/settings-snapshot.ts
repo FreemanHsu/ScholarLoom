@@ -12,10 +12,15 @@ import {
 import { AGENT_PROMPT_TEMPLATES } from "../agent/agent-prompts.js";
 import { agenticEvidenceSchema, chatSchema, createSummarySchema, entrySchema } from "../agent/output-contracts.js";
 import { takeawaySelectionSchema } from "../agent/takeaway-distillation.js";
+import { createPaperOrganizationSchema } from "../agent/paper-organization.js";
+import { codexOutputSchema } from "../agent/codex-output-schema.js";
+import { createPaperTaxonomySchema } from "../agent/paper-taxonomy.js";
 import { SAFE_PDF_DOWNLOADER_DEFAULTS } from "../adapters/safe-pdf-downloader.js";
 import type { StorageLayout } from "../storage/layout.js";
 import { PDF_RENDERER_LIMITS, PDF_RENDER_SETTINGS } from "../storage/pdf-page-renderer.js";
 import { VISUAL_EVIDENCE_LIMITS } from "../storage/visual-evidence-shim.js";
+import { PAPER_RESOLVER_VERSION, type PaperResolverMode } from "../storage/paper-resolver.js";
+import { PAPER_LOOKUP_NORMALIZATION_VERSION } from "../domain/paper-organization.js";
 
 export type SettingsRuntime = {
   host: "127.0.0.1" | "::1";
@@ -24,6 +29,7 @@ export type SettingsRuntime = {
   fixture: boolean;
   takeawayQualityReleased: boolean;
   agentMessageTimeoutMs?: number;
+  entryResolverMode?: PaperResolverMode;
   now?: () => Date;
   codexRuntimeStatus(): CodexRuntimeStatus;
 };
@@ -34,6 +40,7 @@ const applicationVersion = (JSON.parse(
 
 export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRuntime) {
   const observed = latestAgentExecutions(layout);
+  const aliasAutomation = readAliasAutomationSettings(layout);
   const latestAgentActivity = [...observed.entries()]
     .sort((left, right) => right[1].completedAt.localeCompare(left[1].completedAt))[0] ?? null;
   const configurations = listAgentConfigurations();
@@ -78,9 +85,13 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
           sourcePath: "src/agent/agent-prompts.ts",
           template: AGENT_PROMPT_TEMPLATES[configuration.taskKind],
         },
-        skill: configuration.taskKind === "paper-summary" ? {
-          sourcePath: "skills/paper-reading/SKILL.md",
-          content: readFileSync(join(process.cwd(), "skills/paper-reading/SKILL.md"), "utf8"),
+        skill: ["paper-summary", "paper-organization", "paper-taxonomy"].includes(configuration.taskKind) ? {
+          sourcePath: configuration.taskKind === "paper-summary"
+            ? "skills/paper-reading/SKILL.md" : configuration.taskKind === "paper-organization"
+              ? "skills/paper-organization/SKILL.md" : "skills/paper-taxonomy/SKILL.md",
+          content: readFileSync(join(process.cwd(), configuration.taskKind === "paper-summary"
+            ? "skills/paper-reading/SKILL.md" : configuration.taskKind === "paper-organization"
+              ? "skills/paper-organization/SKILL.md" : "skills/paper-taxonomy/SKILL.md"), "utf8"),
         } : null,
         outputSchema: {
           sourcePath: configuration.taskKind === "takeaway-distillation"
@@ -115,8 +126,37 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
         settings: PDF_RENDER_SETTINGS,
       },
       diagnostics: { command: "npm run diagnostics", browserDetailAvailable: false },
+      entryPaperResolver: {
+        mode: runtime.entryResolverMode ?? "enabled",
+        resolverVersion: PAPER_RESOLVER_VERSION,
+        normalizationVersion: PAPER_LOOKUP_NORMALIZATION_VERSION,
+        killSwitchAvailable: true,
+      },
+      aliasAutomation,
     },
   } as const;
+}
+
+function readAliasAutomationSettings(layout: StorageLayout) {
+  const database = new Database(layout.databasePath, { readonly: true });
+  try {
+    const policies = database.prepare(`SELECT status,count(*) count FROM paper_organization_auto_policies
+      GROUP BY status`).all() as Array<{ status: string; count: number }>;
+    const latest = database.prepare(`SELECT version,status,created_at FROM paper_organization_auto_policies
+      ORDER BY version DESC LIMIT 1`).get() as { version: number; status: string; created_at: string } | undefined;
+    const evaluatedAt = database.prepare(`SELECT created_at FROM paper_organization_policy_evaluations
+      ORDER BY created_at DESC,id DESC LIMIT 1`).pluck().get() as string | undefined;
+    return {
+      scope: "alias-only",
+      gates: { minimumLabels: 75, maturityDays: 30, wilsonLower: .95,
+        holdoutRate: .1, dailyCap: 10 },
+      policyCounts: Object.fromEntries(policies.map((row) => [row.status, row.count])),
+      latestPolicy: latest ? { version: latest.version, status: latest.status, createdAt: latest.created_at } : null,
+      lastEvaluationAt: evaluatedAt ?? null,
+    } as const;
+  } finally {
+    database.close();
+  }
 }
 
 export type SettingsSnapshot = ReturnType<typeof buildSettingsSnapshot>;
@@ -162,9 +202,17 @@ function normalizeRecordedTaskKind(taskKind: string, runnerKind: string | null):
 }
 
 function outputSchema(taskKind: ReturnType<typeof listAgentConfigurations>[number]["taskKind"]): object {
-  if (taskKind === "paper-summary") return createSummarySchema(null);
-  if (taskKind === "agentic-evidence") return agenticEvidenceSchema;
-  if (taskKind === "entry-answer") return entrySchema;
-  if (taskKind === "paper-chat") return chatSchema;
-  return takeawaySelectionSchema;
+  let schema: object;
+  if (taskKind === "paper-summary") schema = createSummarySchema(null);
+  else if (taskKind === "agentic-evidence") schema = agenticEvidenceSchema;
+  else if (taskKind === "entry-answer") schema = entrySchema;
+  else if (taskKind === "paper-organization") {
+    schema = createPaperOrganizationSchema({ requestedSections: ["alias", "primary", "secondary"] }, null);
+  }
+  else if (taskKind === "paper-taxonomy") {
+    schema = createPaperTaxonomySchema({ papers: [], directions: [] });
+  }
+  else if (taskKind === "paper-chat") schema = chatSchema;
+  else schema = takeawaySelectionSchema;
+  return codexOutputSchema(schema);
 }

@@ -1,14 +1,24 @@
 export type PaperLibraryViewState = {
   view: "all" | "unclassified";
   direction: string | null;
+  domain?: string | null;
   relation: "all" | "primary";
   pending: boolean;
+  query: string;
+};
+export type PaperOrganizationViewState = {
+  view: "pending" | "attention" | "all";
+  section: "alias" | "primary" | "secondary" | null;
+  direction: string | null;
+  unclassified: boolean;
   query: string;
 };
 
 export type BrowserRoute = { name: "home" | "reviews" | "settings" | "not-found" } | ({
   name: "papers";
 } & PaperLibraryViewState) | {
+  name: "paper-organization";
+} & PaperOrganizationViewState | {
   name: "paper";
   paperId: string;
   mode: "reading" | "discussion" | "knowledge";
@@ -18,6 +28,7 @@ export type BrowserRoute = { name: "home" | "reviews" | "settings" | "not-found"
   anchor: string | null;
   evidenceReceiptId: string | null;
   repositoriesOpen: boolean;
+  returnTo: string | null;
 };
 
 type BrowserLocation = Pick<Location, "pathname" | "search">;
@@ -26,6 +37,7 @@ export type PaperViewState = Pick<Extract<BrowserRoute, { name: "paper" }>, "pdf
   conversationId?: string | null;
   evidenceReceiptId?: string | null;
   repositoriesOpen?: boolean;
+  returnTo?: string | null;
 };
 
 export function paperHref(paperId: string, view: PaperViewState = { pdfOpen: false, page: 1, anchor: null }): string {
@@ -36,6 +48,7 @@ export function paperHref(paperId: string, view: PaperViewState = { pdfOpen: fal
   if (view.pdfOpen && view.anchor) query.set("anchor", view.anchor);
   if (view.evidenceReceiptId) query.set("evidence", view.evidenceReceiptId);
   if (view.repositoriesOpen) query.set("repositories", "open");
+  if (view.returnTo?.startsWith("/papers/organize")) query.set("return", view.returnTo);
   const search = query.toString();
   const path = view.conversationId
     ? `/papers/${encodeURIComponent(paperId)}/conversations/${encodeURIComponent(view.conversationId)}`
@@ -47,11 +60,23 @@ export function papersHref(view: PaperLibraryViewState): string {
   const query = new URLSearchParams();
   if (view.view === "unclassified") query.set("view", "unclassified");
   if (view.direction) query.set("direction", view.direction);
+  if (view.domain) query.set("domain", view.domain);
   if (view.relation === "primary") query.set("relation", "primary");
   if (view.pending) query.set("pending", "true");
   if (view.query.trim()) query.set("q", view.query.trim());
   const search = query.toString();
   return `/papers${search ? `?${search}` : ""}`;
+}
+
+export function paperOrganizationHref(view: PaperOrganizationViewState): string {
+  const query = new URLSearchParams();
+  if (view.view !== "pending") query.set("view", view.view);
+  if (view.section) query.set("section", view.section);
+  if (view.direction) query.set("direction", view.direction);
+  if (view.unclassified) query.set("unclassified", "true");
+  if (view.query.trim()) query.set("q", view.query.trim());
+  const search = query.toString();
+  return `/papers/organize${search ? `?${search}` : ""}`;
 }
 
 export function readBrowserRoute(location: BrowserLocation): BrowserRoute {
@@ -62,8 +87,22 @@ export function readBrowserRoute(location: BrowserLocation): BrowserRoute {
       name: "papers",
       view: query.get("view") === "unclassified" ? "unclassified" : "all",
       direction: query.get("direction") || null,
+      domain: query.get("domain") || null,
       relation: query.get("relation") === "primary" ? "primary" : "all",
       pending: query.get("pending") === "true",
+      query: query.get("q") ?? "",
+    };
+  }
+  if (location.pathname === "/papers/organize") {
+    const query = new URLSearchParams(location.search);
+    const section = query.get("section");
+    const view = query.get("view");
+    return {
+      name: "paper-organization",
+      view: view === "attention" || view === "all" ? view : "pending",
+      section: section === "alias" || section === "primary" || section === "secondary" ? section : null,
+      direction: query.get("direction") || null,
+      unclassified: query.get("unclassified") === "true",
       query: query.get("q") ?? "",
     };
   }
@@ -84,5 +123,6 @@ export function readBrowserRoute(location: BrowserLocation): BrowserRoute {
     anchor: query.get("anchor") || null,
     evidenceReceiptId: query.get("evidence") || null,
     repositoriesOpen: query.get("repositories") === "open",
+    returnTo: query.get("return")?.startsWith("/papers/organize") ? query.get("return") : null,
   };
 }

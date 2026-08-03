@@ -23,6 +23,9 @@ import { MINIMUM_CODEX_VERSION } from "./agent/agent-configuration.js";
 
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
 const takeawayQualityReleased = process.env.SCHOLARLOOM_TAKEAWAY_V2_RELEASED === "1";
+const entryResolverMode = ["off", "shadow", "enabled"].includes(
+  process.env.SCHOLARLOOM_ENTRY_RESOLVER_MODE ?? "enabled",
+) ? (process.env.SCHOLARLOOM_ENTRY_RESOLVER_MODE ?? "enabled") as "off" | "shadow" | "enabled" : "enabled";
 const fixtureChatFailures = new Set<string>();
 function fixtureAgenticRunner(layout: StorageLayout): AgenticEvidenceRunner { return {
   async run(input) {
@@ -118,6 +121,7 @@ try {
   const fixtureRepository = fixture ? prepareFixtureRepository(layout.tmpRoot) : null;
   const productionCodex = fixture ? null : new CodexCliRunner({ runtimeRoot: layout.tmpRoot, storageLayout: layout });
   const app = await createApp({ paperSource, directPdfSource, storageLayout: layout,
+    entryResolverMode,
     settingsRuntime: {
       host, port, startedAt, fixture, takeawayQualityReleased,
       codexRuntimeStatus: () => productionCodex?.runtimeStatus() ?? {
@@ -156,8 +160,49 @@ try {
           sourceHandles: context.sources.map((source) => source.handle), uncertainty: null }; },
       },
       agenticEvidenceRunner: fixtureAgenticRunner(layout), takeawaySelectionRunner: fixtureSelectionRunner,
+      paperOrganizationRunner: {
+        async analyze(input) {
+          const firstDirection = input.directions[0]?.topicId ?? null;
+          return {
+            coreProblem: "Fixture Paper 的核心研究问题。",
+            mainContribution: "Fixture Summary 中记录的主要贡献。",
+            ...(input.context.requestedSections.includes("alias")
+              ? { alias: { outcome: "not-needed" as const, candidates: [] } } : {}),
+            ...(input.context.requestedSections.includes("primary")
+              ? { primary: firstDirection
+                ? { outcome: "proposal" as const, recommendedTopicId: firstDirection,
+                  rationale: "Fixture 方向与核心问题匹配。", alternatives: [] }
+                : { outcome: "no-fit" as const, recommendedTopicId: null,
+                  rationale: "当前没有可用 Fixture 方向。", alternatives: [] } } : {}),
+            ...(input.context.requestedSections.includes("secondary")
+              ? { secondary: { outcome: "not-needed" as const, candidates: [] } } : {}),
+            usage: { status: "reported" as const, inputTokens: 1, cachedInputTokens: 0,
+              outputTokens: 1, totalTokens: 2 },
+          };
+        },
+      },
+      paperTaxonomyRunner: {
+        async propose(input) {
+          const representative = input.context.papers[0]?.paperId;
+          return {
+            candidates: representative ? [{
+              suggestedTopicId: "topic:fixture-research",
+              title: "Fixture Research",
+              aliases: [],
+              scope: "研究可验证、可追溯的 fixture 工作流。",
+              exclusions: ["仅使用 fixture 技术但不研究可追溯性的工作。"],
+              representativePaperIds: [representative],
+              rationale: "冻结 cohort 中的核心问题与可验证研究工作流一致。",
+              overlaps: [],
+            }] : [],
+            usage: { status: "reported" as const, inputTokens: 1, cachedInputTokens: 0,
+              outputTokens: 1, totalTokens: 2 },
+          };
+        },
+      },
     } : { repositoryAdapter: new GitRepositoryAdapter(), codexRunner: productionCodex!,
-      agenticEvidenceRunner: productionCodex!,
+      agenticEvidenceRunner: productionCodex!, paperOrganizationRunner: productionCodex!,
+      paperTaxonomyRunner: productionCodex!,
       ...(takeawayQualityReleased ? { takeawaySelectionRunner: productionCodex! } : {}) }) });
   let closing = false;
   const shutdown = async () => {

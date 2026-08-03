@@ -45,7 +45,7 @@ describe("read-only Settings", () => {
       loadedAt: "2026-07-30T08:05:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v3",
+        configurationVersion: "agent-configuration.v5",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: layout.root,
         codex: {
@@ -70,6 +70,10 @@ describe("read-only Settings", () => {
           configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
         { taskKind: "entry-answer", status: "enabled",
           configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
+        { taskKind: "paper-organization", status: "enabled",
+          configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
+        { taskKind: "paper-taxonomy", status: "enabled",
+          configured: { model: "gpt-5.6-sol", reasoningEffort: "high" } },
         { taskKind: "takeaway-distillation", status: "feature-disabled",
           configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
         { taskKind: "paper-chat", status: "legacy",
@@ -225,7 +229,7 @@ describe("read-only Settings", () => {
         model: "gpt-5.6-sol",
         reasoningEffort: "high",
         codexVersion: "0.145.0",
-        configurationVersion: "agent-configuration.v3",
+        configurationVersion: "agent-configuration.v5",
       });
     await app.close();
   });

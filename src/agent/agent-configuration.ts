@@ -1,4 +1,4 @@
-export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v3";
+export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v5";
 export const MINIMUM_CODEX_VERSION = "0.144.6";
 export const CODEX_SOL_MODEL = "gpt-5.6-sol";
 
@@ -6,6 +6,8 @@ export type AgentTaskKind =
   | "paper-summary"
   | "agentic-evidence"
   | "entry-answer"
+  | "paper-organization"
+  | "paper-taxonomy"
   | "takeaway-distillation"
   | "paper-chat";
 
@@ -54,6 +56,8 @@ const configurations: readonly AgentConfiguration[] = [
   configuration("paper-summary", "Paper Summary", "high", 600_000, null),
   configuration("agentic-evidence", "Discussion / Agentic Evidence", "medium", 180_000, 2, true),
   configuration("entry-answer", "Entry Agent", "medium", 600_000, null),
+  configuration("paper-organization", "Paper Organization Agent", "medium", 180_000, 1),
+  configuration("paper-taxonomy", "Paper Taxonomy Agent", "high", 300_000, 1),
   configuration("takeaway-distillation", "Takeaway Selection", "medium", 180_000, 1),
   configuration("paper-chat", "Legacy Paper Chat", "medium", 120_000, null),
 ];

@@ -23,7 +23,7 @@ type SnapshotManifest = {
   files: SnapshotFile[];
 };
 
-type SnapshotOptions = { now?: Date; includeDerived?: boolean };
+type SnapshotOptions = { now?: Date; includeDerived?: boolean; runtimeLockHeld?: boolean };
 
 export type SnapshotVerification = {
   healthy: boolean;
@@ -36,8 +36,10 @@ export type SnapshotVerification = {
 export async function createSnapshot(layout: StorageLayout, target: string, options: SnapshotOptions = {}): Promise<void> {
   const now = options.now ?? new Date();
   let releaseSnapshotLock: (() => void) | undefined;
-  try { releaseSnapshotLock = acquireRuntimeLock(layout); }
-  catch (error) { throw new Error(`ScholarLoom is still running; stop it before creating a data snapshot: ${(error as Error).message}`); }
+  if (!options.runtimeLockHeld) {
+    try { releaseSnapshotLock = acquireRuntimeLock(layout); }
+    catch (error) { throw new Error(`ScholarLoom is still running; stop it before creating a data snapshot: ${(error as Error).message}`); }
+  }
   const absoluteTarget = resolve(target);
   let staged: string | undefined;
   try {
@@ -66,7 +68,7 @@ export async function createSnapshot(layout: StorageLayout, target: string, opti
     staged = undefined;
   } finally {
     if (staged) rmSync(staged, { recursive: true, force: true });
-    releaseSnapshotLock();
+    releaseSnapshotLock?.();
   }
 }
 

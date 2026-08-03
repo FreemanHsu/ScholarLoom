@@ -31,7 +31,24 @@ import {
   validateEntryOutput,
   type EntryAnswerStatus,
 } from "../agent/output-contracts.js";
-import { PaperOrganizationStore } from "./paper-organization-store.js";
+import { PaperOrganizationStore, PaperOrganizationStoreError } from "./paper-organization-store.js";
+import { PaperTaxonomyStore } from "./paper-taxonomy-store.js";
+import {
+  PaperOrganizationBatchStore,
+  type PaperOrganizationBatchAction,
+} from "./paper-organization-batch-store.js";
+import type { OrganizationQueueQuery } from "./paper-organization-store.js";
+import {
+  PAPER_ORGANIZATION_CONTRACT_VERSION,
+  type PaperOrganizationScope,
+} from "../agent/paper-organization.js";
+import {
+  PaperResolver,
+  PaperResolverError,
+  type PaperResolution,
+  type PaperResolverMode,
+} from "./paper-resolver.js";
+import { TopicKnowledgeStore } from "./topic-knowledge-store.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -86,6 +103,14 @@ export type EntryResult = {
   sourceHandles: string[];
   uncertainty: string | null;
 };
+export type EntryResolutionRequest = {
+  mode: PaperResolverMode;
+  resolutionMode?: "auto" | "off";
+  resolutionSelection?: {
+    snapshotHash: string;
+    groups: Record<string, string>;
+  };
+};
 export type TakeawayReviewInput = {
   edited?: Partial<{ title: string; claim: string; evidenceRationale: string; caveat: string | null;
     receiptIds: string[]; epistemicStatus: EpistemicStatus }>;
@@ -118,6 +143,10 @@ export class ImportStore {
   readonly #knowledgeWriter: KnowledgeWriter;
   readonly #repositoryAssociations: RepositoryAssociations;
   readonly #paperOrganization: PaperOrganizationStore;
+  readonly #paperTaxonomy: PaperTaxonomyStore;
+  readonly #paperOrganizationBatches: PaperOrganizationBatchStore;
+  readonly #paperResolver: PaperResolver;
+  readonly #topicKnowledge: TopicKnowledgeStore;
   readonly #agentExecutionMetadata: AgentExecutionMetadataProvider | undefined;
 
   static open(layout: StorageLayout,
@@ -167,8 +196,16 @@ export class ImportStore {
       rebuildPaperCatalog: (trustedWrite) => this.#paperOrganization.rebuildCatalog(trustedWrite),
     });
     this.#paperOrganization = new PaperOrganizationStore(this.#database, layout, this.#now, this.#knowledgeWriter);
+    this.#topicKnowledge = new TopicKnowledgeStore(this.#database, layout, this.#now,
+      (trusted) => this.#paperOrganization.rebuildCatalog(trusted));
+    this.#paperTaxonomy = new PaperTaxonomyStore(this.#database, layout, this.#now,
+      this.#knowledgeWriter, this.#paperOrganization);
+    this.#paperOrganizationBatches = new PaperOrganizationBatchStore(
+      this.#database, this.#now, this.#paperOrganization);
+    this.#paperResolver = new PaperResolver(this.#database);
     this.#knowledgeWriter.recover();
     this.#paperOrganization.rebuildCatalog();
+    this.#topicKnowledge.recover();
     const archiveBefore = new Date(this.#now().getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
     this.#database.prepare(`UPDATE proposals SET review_status='archived',archived_at=?
       WHERE proposal_type='reconciliation' AND review_status='pending' AND created_at < ?`).run(this.#now().toISOString(), archiveBefore);
@@ -386,6 +423,17 @@ export class ImportStore {
         this.#database.prepare("UPDATE paper_versions SET processing_status='available',updated_at=? WHERE id=?").run(payload.now, payload.versionId);
         if (activateVersion) this.#database.prepare("UPDATE papers SET current_version_id=?,updated_at=? WHERE id=?")
           .run(payload.versionId, payload.now, payload.paperId);
+        if (activateVersion) {
+          try {
+            this.#database.prepare(`INSERT INTO paper_organization_triggers
+              (paper_id,summary_revision_id,summary_hash,contract_version,state,created_at)
+              VALUES (?,?,?,?, 'pending',?) ON CONFLICT(paper_id,summary_revision_id,contract_version) DO NOTHING`)
+              .run(payload.paperId, payload.summaryId, payload.markdownHash,
+                PAPER_ORGANIZATION_CONTRACT_VERSION, payload.now);
+          } catch {
+            // Organization suggestions are auxiliary; they must never roll back a confirmed Summary.
+          }
+        }
       })();
       if (activateVersion) this.#writePaperManifest(payload.paperId, payload.paperTitle, payload.versionId, payload.summaryId, payload.now);
     }
@@ -1005,38 +1053,235 @@ export class ImportStore {
 
   async answerEntry(question: string, runEntry: (context: { question: string; sources: Array<{
     handle: string; sourceType: string; sourceId: string; title: string; body: string;
-  }> }) => Promise<EntryResult>): Promise<unknown> {
-    const terms = question.trim().split(/\s+/).filter((term) => term.length >= 3);
-    const byId = new Map<string, { id: string; source_type: string; source_id: string; title: string; body: string }>();
-    for (const term of terms) {
-      const rows = this.#database.prepare(`SELECT d.id,d.source_type,d.source_id,d.title,d.body FROM curated_search_fts f
-        JOIN curated_search_documents d ON d.rowid=f.rowid WHERE curated_search_fts MATCH ? ORDER BY rank LIMIT 8`).all(`"${term.replaceAll('"', '""')}"`) as
-        Array<{ id: string; source_type: string; source_id: string; title: string; body: string }>;
-      rows.forEach((row) => byId.set(row.id, row));
+  }> }) => Promise<EntryResult>, request: EntryResolutionRequest = { mode: "enabled" }): Promise<unknown> {
+    // Provenance is current-state authority. Refresh before retrieval so a source
+    // that became inactive cannot remain usable through a stale broad FTS row.
+    this.#topicKnowledge.refreshEligibility();
+    const bypassed = request.resolutionMode === "off" || request.mode === "off";
+    const resolution = this.#paperResolver.resolve(question);
+    if (bypassed) this.#paperResolver.record(question, request.mode, resolution, "bypassed");
+    else this.#paperResolver.record(question, request.mode, resolution);
+
+    let effectiveResolution: PaperResolution | null = null;
+    let paperIds: string[] | null = null;
+    if (!bypassed && request.mode === "enabled" && resolution.state !== "normalization-mismatch") {
+      if (request.resolutionSelection &&
+          request.resolutionSelection.snapshotHash !== resolution.snapshotHash) {
+        throw new PaperResolverError("entry-paper-resolution-stale");
+      }
+      if (resolution.state === "ambiguous") {
+        if (!request.resolutionSelection) return this.#entryResolutionRequired(resolution);
+        const ambiguousGroups = resolution.groups.filter((group) => group.candidates.length > 1);
+        const provided = Object.keys(request.resolutionSelection.groups).sort();
+        const expected = ambiguousGroups.map((group) => group.id).sort();
+        if (JSON.stringify(provided) !== JSON.stringify(expected)) {
+          throw new PaperResolverError("entry-paper-resolution-invalid");
+        }
+        const selected = ambiguousGroups.map((group) => {
+          const paperId = request.resolutionSelection!.groups[group.id];
+          if (!paperId || !group.candidates.some((candidate) => candidate.paperId === paperId)) {
+            throw new PaperResolverError("entry-paper-resolution-invalid");
+          }
+          return paperId;
+        });
+        paperIds = [...new Set([
+          ...resolution.groups.filter((group) => group.candidates.length === 1)
+            .map((group) => group.candidates[0]!.paperId),
+          ...selected,
+        ])].sort();
+        if (paperIds.length > 5) return this.#entryResolutionRequired({ ...resolution, state: "too-many" });
+        effectiveResolution = { ...resolution, state: "resolved", paperIds,
+          groups: resolution.groups.map((group) => group.candidates.length === 1 ? group : {
+            ...group,
+            candidates: group.candidates.filter((candidate) =>
+              candidate.paperId === request.resolutionSelection!.groups[group.id]),
+          }) };
+      } else {
+        if (request.resolutionSelection) throw new PaperResolverError("entry-paper-resolution-invalid");
+        if (resolution.state === "too-many") return this.#entryResolutionRequired(resolution);
+        if (resolution.state === "resolved") {
+          effectiveResolution = resolution;
+          paperIds = resolution.paperIds;
+        }
+      }
+    } else if (request.resolutionSelection) {
+      throw new PaperResolverError("entry-paper-resolution-invalid");
     }
-    const sources = [...byId.values()].sort((a, b) => a.source_type.localeCompare(b.source_type)).map((row) => ({
-      handle: `curated:${row.source_id}`, sourceType: row.source_type, sourceId: row.source_id, title: row.title, body: row.body,
-    }));
+
+    const sources = paperIds ? this.#scopedEntrySources(question, paperIds) : this.#broadEntrySources(question);
+    const publicResolution = effectiveResolution ? this.#publicEntryResolution(effectiveResolution) : { state: "none", matches: [] };
+    if (paperIds && sources.length === 0) {
+      return { answerStatus: "insufficient_evidence", answer: "已解析到 Paper，但当前没有可用于回答的已确认知识。",
+        uncertainty: "该 Paper 尚无 active Summary 或 confirmed knowledge。", sources: [],
+        projection: this.#entryProjectionState(), resolution: publicResolution };
+    }
     const entryContext = { question, sources };
     const output = await runEntry(entryContext);
     try { validateEntryOutput(output, sources.map((source) => source.handle)); }
     catch { throw new Error("codex-output-invalid"); }
     this.#recordAgentRun("entry-answer", null, null, entryContext, output, null);
-    const selected = output.sourceHandles.map((handle) => sources.find((source) => source.handle === handle)!).map(({ body: _body, handle, ...source }) => {
-      const paperId = source.sourceType === "summary"
-        ? (this.#database.prepare("SELECT paper_id FROM summary_revisions WHERE id=?").get(source.sourceId) as { paper_id: string }).paper_id
-        : (this.#database.prepare(`SELECT t.paper_id FROM takeaway_revisions tr JOIN takeaways t ON t.id=tr.takeaway_id WHERE tr.id=?`).get(source.sourceId) as { paper_id: string }).paper_id;
-      return { handle, ...source, paperId, href: `/papers/${encodeURIComponent(paperId)}#${source.sourceType}=${encodeURIComponent(source.sourceId)}` };
-    });
-    const state = this.#database.prepare("SELECT last_successful_at FROM projection_state WHERE projection='global-curated'").get() as
-      { last_successful_at: string | null };
-    const pending = (this.#database.prepare("SELECT count(*) count FROM index_outbox WHERE projection='global-curated' AND state='pending'").get() as { count: number }).count;
-    return { answerStatus: output.answerStatus, answer: output.answer, uncertainty: output.uncertainty, sources: selected,
-      projection: { stale: pending > 0, lastSuccessfulAt: state.last_successful_at,
-        ...(pending > 0 ? { notice: "知识索引更新中" } : {}) } };
+    const selected = output.sourceHandles.map((handle) => sources.find((source) => source.handle === handle)!)
+      .map(({ body: _body, handle, ...source }) => {
+        const paperId = this.#entrySourcePaperId(source.sourceType, source.sourceId);
+        return { handle, ...source, paperId,
+          href: source.sourceType === "topic-knowledge"
+            ? `/papers?direction=${encodeURIComponent(source.sourceId)}#topic-knowledge`
+            : `/papers/${encodeURIComponent(paperId)}#${source.sourceType}=${encodeURIComponent(source.sourceId)}` };
+      });
+    return { answerStatus: output.answerStatus, answer: output.answer, uncertainty: output.uncertainty,
+      sources: selected, projection: this.#entryProjectionState(), resolution: publicResolution };
   }
 
-  recordEntrySourceOpen(sourceType: "summary" | "takeaway", sourceId: string): boolean {
+  #broadEntrySources(question: string): Array<{
+    handle: string; sourceType: string; sourceId: string; title: string; body: string;
+  }> {
+    const terms = question.trim().split(/\s+/).filter((term) => [...term].length >= 3);
+    const byId = new Map<string, {
+      id: string; source_type: string; source_id: string; title: string; body: string;
+    }>();
+    for (const term of terms) {
+      const rows = this.#database.prepare(`SELECT d.id,d.source_type,d.source_id,d.title,d.body
+        FROM curated_search_fts f JOIN curated_search_documents d ON d.rowid=f.rowid
+        WHERE curated_search_fts MATCH ? ORDER BY rank LIMIT 8`).all(`"${term.replaceAll('"', '""')}"`) as
+        Array<{ id: string; source_type: string; source_id: string; title: string; body: string }>;
+      rows.forEach((row) => byId.set(row.id, row));
+    }
+    return [...byId.values()].sort((left, right) =>
+      left.source_type.localeCompare(right.source_type) || left.id.localeCompare(right.id))
+      .slice(0, 8).map((row) => ({ handle: `curated:${row.source_id}`,
+        sourceType: row.source_type, sourceId: row.source_id, title: row.title, body: row.body }));
+  }
+
+  #scopedEntrySources(question: string, paperIds: string[]): Array<{
+    handle: string; sourceType: string; sourceId: string; title: string; body: string;
+  }> {
+    const placeholders = paperIds.map(() => "?").join(",");
+    const rows = this.#database.prepare(`SELECT d.id,d.source_type,d.source_id,d.title,d.body,s.paper_id
+      FROM curated_search_documents d JOIN summary_revisions s ON s.id=d.source_id
+      WHERE d.source_type='summary' AND s.paper_id IN (${placeholders})
+      UNION ALL
+      SELECT d.id,d.source_type,d.source_id,d.title,d.body,t.paper_id
+      FROM curated_search_documents d JOIN takeaway_revisions tr ON tr.id=d.source_id
+      JOIN takeaways t ON t.id=tr.takeaway_id
+      WHERE d.source_type='takeaway' AND t.paper_id IN (${placeholders})`)
+      .all(...paperIds, ...paperIds) as Array<{ id: string; source_type: string; source_id: string;
+        title: string; body: string; paper_id: string }>;
+    const terms = question.toLocaleLowerCase().split(/[^\p{Letter}\p{Number}]+/u)
+      .filter((term) => [...term].length >= 2);
+    const score = (row: typeof rows[number]) => terms.reduce((total, term) => {
+      const haystack = `${row.title}\n${row.body}`.toLocaleLowerCase();
+      return total + (haystack.includes(term) ? 1 : 0);
+    }, 0);
+    const selected: typeof rows = [];
+    for (const paperId of paperIds) {
+      const summary = rows.filter((row) => row.paper_id === paperId && row.source_type === "summary")
+        .sort((left, right) => left.id.localeCompare(right.id))[0];
+      if (summary) selected.push(summary);
+    }
+    const buckets = new Map(paperIds.map((paperId) => [paperId, rows.filter((row) =>
+      row.paper_id === paperId && !selected.some((selectedRow) => selectedRow.id === row.id))
+      .sort((left, right) => score(right) - score(left) || left.source_type.localeCompare(right.source_type) ||
+        left.id.localeCompare(right.id))]));
+    while (selected.length < 8 && [...buckets.values()].some((bucket) => bucket.length > 0)) {
+      for (const paperId of paperIds) {
+        if (selected.length >= 8) break;
+        const next = buckets.get(paperId)?.shift();
+        if (next) selected.push(next);
+      }
+    }
+    const topicRows = this.#database.prepare(`SELECT DISTINCT d.id,d.source_type,d.source_id,d.title,d.body
+      FROM curated_search_documents d JOIN topic_knowledge_revisions r
+        ON d.source_type='topic-knowledge' AND d.source_id=r.topic_id
+      JOIN topic_knowledge_paper_scope ps ON ps.topic_revision_id=r.id
+      WHERE r.active=1 AND r.usage_level='knowledge-ready' AND r.eligibility_status='eligible'
+        AND ps.paper_id IN (${placeholders})
+        AND EXISTS (
+          SELECT 1 FROM topic_knowledge_provenance kp
+          WHERE kp.topic_revision_id=r.id AND (
+            (kp.source_type='summary' AND EXISTS (
+              SELECT 1 FROM summary_revisions s WHERE s.id=kp.source_id AND s.status='active' AND s.paper_id=ps.paper_id
+            )) OR
+            (kp.source_type='takeaway' AND EXISTS (
+              SELECT 1 FROM takeaway_revisions tr JOIN takeaways t ON t.active_revision_id=tr.id
+              WHERE tr.id=kp.source_id AND tr.review_status='confirmed' AND t.paper_id=ps.paper_id
+            ))
+          )
+        )`).all(...paperIds) as Array<{ id: string; source_type: string; source_id: string; title: string; body: string }>;
+    const traditional = selected.map((row) => ({ handle: `curated:${row.source_id}`,
+      sourceType: row.source_type, sourceId: row.source_id, title: row.title, body: row.body }));
+    if (traditional.length >= 8 || topicRows.length === 0) return traditional;
+    const topic = topicRows.sort((left, right) => score({ ...left, paper_id: "" }) - score({ ...right, paper_id: "" }) ||
+      left.id.localeCompare(right.id)).at(-1)!;
+    return [...traditional, { handle: `curated:${topic.source_id}`, sourceType: topic.source_type,
+      sourceId: topic.source_id, title: topic.title, body: topic.body }];
+  }
+
+  #entryResolutionRequired(resolution: PaperResolution) {
+    return {
+      answerStatus: "resolution_required",
+      answer: resolution.state === "too-many"
+        ? "识别到的 Paper 超过 5 篇，请缩小问题范围。"
+        : "同一名称可能指向多篇 Paper，请先选择要检索的 Paper。",
+      uncertainty: null,
+      sources: [],
+      projection: this.#entryProjectionState(),
+      resolution: {
+        state: "ambiguous",
+        reason: resolution.state === "too-many" ? "too-many-papers" : "collision",
+        snapshotHash: resolution.snapshotHash,
+        groups: resolution.groups.filter((group) => group.candidates.length > 1).map((group) => ({
+          id: group.id,
+          matchedText: group.matchedText,
+          candidates: group.candidates,
+        })),
+      },
+    };
+  }
+
+  #publicEntryResolution(resolution: PaperResolution) {
+    return {
+      state: "resolved",
+      matches: resolution.groups.flatMap((group) => group.candidates.slice(0, 1).map((candidate) => ({
+        text: group.matchedText,
+        paperId: candidate.paperId,
+        kind: candidate.matchKind,
+        canonicalTitle: candidate.canonicalTitle,
+      }))),
+    };
+  }
+
+  #entryProjectionState() {
+    const state = this.#database.prepare(`SELECT last_successful_at FROM projection_state
+      WHERE projection='global-curated'`).get() as { last_successful_at: string | null };
+    const pending = Number(this.#database.prepare(`SELECT count(*) FROM index_outbox
+      WHERE projection='global-curated' AND state='pending'`).pluck().get());
+    return { stale: pending > 0, lastSuccessfulAt: state.last_successful_at,
+      ...(pending > 0 ? { notice: "知识索引更新中" } : {}) };
+  }
+
+  #entrySourcePaperId(sourceType: string, sourceId: string): string {
+    if (sourceType === "summary") {
+      const row = this.#database.prepare("SELECT paper_id FROM summary_revisions WHERE id=?")
+        .get(sourceId) as { paper_id: string } | undefined;
+      if (row) return row.paper_id;
+    }
+    if (sourceType === "takeaway") {
+      const row = this.#database.prepare(`SELECT t.paper_id FROM takeaway_revisions tr
+        JOIN takeaways t ON t.id=tr.takeaway_id WHERE tr.id=?`).get(sourceId) as
+        { paper_id: string } | undefined;
+      if (row) return row.paper_id;
+    }
+    if (sourceType === "topic-knowledge") {
+      const row = this.#database.prepare(`SELECT ps.paper_id FROM topic_knowledge_revisions r
+        JOIN topic_knowledge_paper_scope ps ON ps.topic_revision_id=r.id
+        WHERE r.topic_id=? AND r.active=1 ORDER BY ps.paper_id LIMIT 1`).get(sourceId) as
+        { paper_id: string } | undefined;
+      if (row) return row.paper_id;
+    }
+    throw new Error("entry-source-paper-unavailable");
+  }
+
+  recordEntrySourceOpen(sourceType: "summary" | "takeaway" | "topic-knowledge", sourceId: string): boolean {
     const source = this.#database.prepare("SELECT 1 FROM curated_search_documents WHERE source_type=? AND source_id=?")
       .get(sourceType, sourceId);
     if (!source) return false;
@@ -1079,6 +1324,9 @@ export class ImportStore {
   }
 
   rebuildCuratedProjection(): { count: number; rebuiltAt: string } {
+    this.#paperOrganization.rebuildCatalog();
+    this.#topicKnowledge.syncObservedDirections();
+    this.#topicKnowledge.refreshEligibility();
     const now = this.#now().toISOString();
     return this.#database.transaction(() => {
       this.#database.prepare("DELETE FROM curated_search_documents").run();
@@ -1101,9 +1349,28 @@ export class ImportStore {
           VALUES (?,'takeaway',?,?,?,?)`).run(`curated:${takeaway.id}`, takeaway.id,
             projection.title, projection.body, now);
       }
+      const topics = this.#database.prepare(`SELECT d.topic_id,d.revision_id,d.markdown_path,d.markdown_hash
+        FROM direction_catalog d JOIN topic_knowledge_revisions r ON r.id=d.revision_id
+        WHERE d.lifecycle_status='active' AND d.review_status='confirmed' AND r.active=1
+          AND r.usage_level='knowledge-ready' AND r.eligibility_status='eligible'
+        ORDER BY d.topic_id`).all() as Array<{
+          topic_id: string; revision_id: string; markdown_path: string; markdown_hash: string;
+        }>;
+      let topicCount = 0;
+      for (const topic of topics) {
+        const projection = this.#topicKnowledge.validateForCurated({
+          topicId: topic.topic_id, revisionId: topic.revision_id,
+          markdownPath: topic.markdown_path, markdownHash: topic.markdown_hash,
+        });
+        if (!projection) continue;
+        this.#database.prepare(`INSERT INTO curated_search_documents(id,source_type,source_id,title,body,updated_at)
+          VALUES (?,'topic-knowledge',?,?,?,?)`).run(`curated-topic:${topic.topic_id}`, topic.topic_id,
+            projection.title, projection.body, now);
+        topicCount += 1;
+      }
       this.#database.prepare(`UPDATE projection_state SET last_successful_at=?,rebuilt_at=?,updated_at=? WHERE projection='global-curated'`).run(now, now, now);
       this.#database.prepare("UPDATE index_outbox SET state='complete',completed_at=? WHERE projection='global-curated' AND state='pending'").run(now);
-      return { count: summaries.length + takeaways.length, rebuiltAt: now };
+      return { count: summaries.length + takeaways.length + topicCount, rebuiltAt: now };
     })();
   }
 
@@ -1532,6 +1799,7 @@ export class ImportStore {
     q?: string;
     view?: "all" | "unclassified";
     direction?: string;
+    domain?: string;
     relation?: "all" | "primary";
     pending?: boolean;
   } = {}): StoredPaper[] {
@@ -1582,12 +1850,211 @@ export class ImportStore {
     return this.#paperOrganization.listDirections();
   }
 
+  researchDirectionHierarchy() { return this.#paperOrganization.hierarchy(); }
+
+  createResearchDomain(input: unknown, idempotencyKey: string): unknown {
+    return this.#paperOrganization.createDomain(input, idempotencyKey);
+  }
+
+  renameResearchDomain(topicId: string, input: unknown, idempotencyKey: string): unknown {
+    const result = this.#paperOrganization.renameDomain(topicId, input, idempotencyKey);
+    this.#topicKnowledge.syncObservedDirections();
+    return result;
+  }
+
+  setResearchDirectionDomain(topicId: string, input: unknown, idempotencyKey: string): unknown {
+    const result = this.#paperOrganization.setDirectionDomain(topicId, input, idempotencyKey);
+    this.#topicKnowledge.syncObservedDirections();
+    return result;
+  }
+
+  setTaxonomyHierarchyEnabled(enabled: boolean, idempotencyKey: string): unknown {
+    return this.#paperOrganization.setHierarchyEnabled(enabled, idempotencyKey);
+  }
+
+  resolveResearchDirection(topicId: string) {
+    return this.#paperOrganization.resolveDirection(topicId);
+  }
+
   createResearchDirection(input: unknown, idempotencyKey: string): unknown {
     return this.#paperOrganization.createDirection(input, idempotencyKey);
   }
 
+  renameResearchDirection(topicId: string, input: unknown, idempotencyKey: string): unknown {
+    const result = this.#paperOrganization.renameDirection(topicId, input, idempotencyKey);
+    this.#topicKnowledge.syncObservedDirections();
+    return result;
+  }
+
+  getTopicKnowledge(topicId: string) { return this.#topicKnowledge.get(topicId); }
+
+  listTopicKnowledgeProvenanceOptions(topicId: string) {
+    return this.#topicKnowledge.provenanceOptions(topicId);
+  }
+
+  previewTopicKnowledge(topicId: string, input: unknown) {
+    return this.#topicKnowledge.preview(topicId, input);
+  }
+
+  commitTopicKnowledge(topicId: string, input: unknown, idempotencyKey: string) {
+    return this.#topicKnowledge.commit(topicId, input, idempotencyKey);
+  }
+
+  auditTopicKnowledgeHistory() { return this.#topicKnowledge.auditHistory(); }
+
+  directionMergePreview(sourceTopicId: string, targetTopicId: string) {
+    return this.#paperOrganization.mergeDirectionPreview(sourceTopicId, targetTopicId);
+  }
+
+  reserveDirectionMerge(sourceTopicId: string, targetTopicId: string, idempotencyKey: string) {
+    return this.#paperOrganization.reserveDirectionMerge(sourceTopicId, targetTopicId, idempotencyKey);
+  }
+
+  commitDirectionMergeSource(mergeId: string): void {
+    this.#paperOrganization.commitDirectionMergeSource(mergeId);
+    this.#topicKnowledge.syncObservedDirections();
+    this.#topicKnowledge.refreshEligibility();
+  }
+
+  applyDirectionMergeMember(mergeId: string, ordinal: number): unknown {
+    return this.#paperOrganization.applyDirectionMergeMember(mergeId, ordinal);
+  }
+
+  readDirectionMerge(mergeId: string) {
+    const command = this.#database.prepare("SELECT * FROM direction_merge_commands WHERE id=?")
+      .get(mergeId) as Record<string, unknown> | undefined;
+    if (!command) throw new PaperOrganizationStoreError("direction-merge-not-found", 404);
+    const members = this.#database.prepare(`SELECT * FROM direction_merge_members
+      WHERE merge_id=? ORDER BY ordinal`).all(mergeId) as Array<Record<string, unknown>>;
+    return {
+      merge: {
+        id: String(command.id),
+        sourceTopicId: String(command.source_topic_id),
+        targetTopicId: String(command.target_topic_id),
+        state: String(command.state),
+        errorCode: command.error_code ? String(command.error_code) : null,
+        createdAt: String(command.created_at),
+        completedAt: command.completed_at ? String(command.completed_at) : null,
+      },
+      preview: JSON.parse(String(command.preview_json)),
+      members: members.map((member) => ({
+        ordinal: Number(member.ordinal),
+        paperId: String(member.paper_id),
+        state: String(member.member_state),
+        attempt: Number(member.attempt),
+        errorCode: member.error_code ? String(member.error_code) : null,
+      })),
+    };
+  }
+
+  retryDirectionMerge(mergeId: string) {
+    const command = this.#database.prepare("SELECT state FROM direction_merge_commands WHERE id=?")
+      .get(mergeId) as { state: string } | undefined;
+    if (!command || !["failed", "complete-with-exceptions"].includes(command.state)) {
+      throw new PaperOrganizationStoreError("direction-merge-not-retryable", 409);
+    }
+    const now = this.#now().toISOString();
+    if (command.state === "failed") {
+      this.#database.prepare(`UPDATE direction_merge_commands SET state='reserved',error_code=NULL,
+        completed_at=NULL,updated_at=? WHERE id=?`).run(now, mergeId);
+    } else {
+      this.#database.prepare(`UPDATE direction_merge_members SET member_state='pending',
+        error_code=NULL,updated_at=? WHERE merge_id=? AND member_state IN ('failed','conflicted')`)
+        .run(now, mergeId);
+      this.#database.prepare(`UPDATE direction_merge_commands SET state='migrating',completed_at=NULL,
+        updated_at=? WHERE id=?`).run(now, mergeId);
+    }
+    return this.readDirectionMerge(mergeId);
+  }
+
   savePaperOrganization(paperId: string, input: unknown, idempotencyKey: string): unknown {
     return this.#paperOrganization.savePaperOrganization(paperId, input, idempotencyKey);
+  }
+
+  snapshotForOrganizationAgent(paperId: string, summaryRevisionId: string,
+    scope: PaperOrganizationScope = "all") {
+    return this.#paperOrganization.snapshotForOrganizationAgent(paperId, summaryRevisionId, scope);
+  }
+
+  decidePaperOrganizationProposal(proposalId: string,
+    input: { action?: unknown; value?: unknown; automation?: unknown },
+    idempotencyKey: string) {
+    return this.#paperOrganization.decideAgentProposal(proposalId, input, idempotencyKey);
+  }
+
+  paperOrganizationProposalState(proposalId: string) {
+    return this.#paperOrganization.organizationProposalState(proposalId);
+  }
+
+  readOrganizationForPaper(paperId: string, verifyLive = true) {
+    return this.#paperOrganization.readOrganizationForPaper(paperId, verifyLive);
+  }
+
+  paperOrganizationQueue(query: OrganizationQueueQuery) {
+    return this.#paperOrganization.organizationQueue(query);
+  }
+
+  paperOrganizationStatuses(input: { jobRunIds: string[]; proposalIds: string[] }) {
+    return this.#paperOrganization.organizationStatuses(input);
+  }
+
+  paperOrganizationBatchPreview(action: PaperOrganizationBatchAction, proposalIds: string[]) {
+    return this.#paperOrganizationBatches.preview(action, proposalIds);
+  }
+
+  reservePaperOrganizationBatch(action: PaperOrganizationBatchAction, proposalIds: string[],
+    idempotencyKey: string) {
+    return this.#paperOrganizationBatches.reserve(action, proposalIds, idempotencyKey);
+  }
+
+  readPaperOrganizationBatch(batchId: string) {
+    return this.#paperOrganizationBatches.read(batchId);
+  }
+
+  retryPaperOrganizationBatch(batchId: string) {
+    return this.#paperOrganizationBatches.retry(batchId);
+  }
+
+  abandonPaperOrganizationBatch(batchId: string) {
+    return this.#paperOrganizationBatches.abandon(batchId);
+  }
+
+  paperTaxonomyPreview(mode: "next" | "regenerate" | "refresh" = "next",
+    limit = 100, priorManifestId?: string) {
+    return this.#paperTaxonomy.bootstrapPreview(mode, limit, priorManifestId);
+  }
+
+  buildPaperTaxonomyManifest(input: Parameters<PaperTaxonomyStore["buildTaxonomyManifest"]>[0]) {
+    return this.#paperTaxonomy.buildTaxonomyManifest(input);
+  }
+
+  readPaperTaxonomy() {
+    return this.#paperTaxonomy.listTaxonomy();
+  }
+
+  decideDirectionTaxonomyProposal(proposalId: string, input: { action?: unknown; value?: unknown },
+    idempotencyKey: string) {
+    return this.#paperTaxonomy.decideProposal(proposalId, input, idempotencyKey);
+  }
+
+  directionTaxonomyCollision(value: Parameters<PaperTaxonomyStore["directionCollision"]>[0]) {
+    return this.#paperTaxonomy.directionCollision(value, null);
+  }
+
+  paperOrganizationBackfillPreview(limit = 50) {
+    return this.#paperTaxonomy.backfillPreview(limit);
+  }
+
+  reservePaperOrganizationBackfill(limit: number, idempotencyKey: string) {
+    return this.#paperTaxonomy.reserveBackfill(limit, idempotencyKey);
+  }
+
+  readPaperOrganizationBackfill(campaignId: string) {
+    return this.#paperTaxonomy.backfill(campaignId);
+  }
+
+  abandonPaperOrganizationBackfill(campaignId: string) {
+    return this.#paperTaxonomy.abandonBackfill(campaignId);
   }
 
   rebuildPaperCatalog(): { count: number; rebuiltAt: string; blocked?: boolean } {

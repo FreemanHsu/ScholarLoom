@@ -51,6 +51,7 @@ URLs combine stable domain-object paths with recoverable view state:
 | Paper Conversation | `/papers/:paperId/conversations/:conversationId` |
 | Proposal detail | `/reviews/:proposalId` |
 | Read-only Settings | `/settings` |
+| Paper Library Domain filter | `/papers?domain=:topicId` |
 
 Reading is the default Paper mode. View-only state such as the selected Paper mode,
 whether PDF is open, selected page, and Evidence Anchor is represented with query
@@ -113,7 +114,8 @@ Its retrieval boundary remains `global-curated` only:
 - active confirmed Knowledge Revisions when those types are implemented.
 
 Each answer distinguishes sources and Agent inference, displays source cards and
-uncovered scope, and links back to the relevant Summary or Takeaway. A stale curated
+uncovered scope, and links back to the relevant Summary, Takeaway, or eligible
+Topic knowledge revision. A stale curated
 projection may serve the last reliable result, but the UI must disclose staleness and
 the last successful projection time. Saving a high-value answer always creates a
 Proposal; the answer itself is not confirmed knowledge.
@@ -123,15 +125,31 @@ Proposal; the answer itself is not confirmed knowledge.
 The Paper Library includes Ready, Processing, Failed, and Interrupted Papers. Failed
 or incomplete work must remain discoverable and actionable.
 
-The v1 library provides:
+The Paper Library provides:
 
 - default sort by recent activity;
-- search by title, author, and arXiv ID;
+- catalog search by canonical title, Paper Alias, author, external identity, and
+  Research Direction title/Alias;
 - filters for processing state, needs-attention state, code association, and reading
   state;
 - Paper cards showing Paper version, Summary state, code state, reading state, and
   pending-review count;
-- no multi-select or bulk lifecycle operations in the initial frontend slices.
+- a direction manager whose Topic knowledge editor shows identity, Scope, the five
+  curated sections, validated provenance, revision/index state, preview, and
+  explicit owner attestation in a responsive side sheet;
+- an owner-enabled, exactly two-level Domain → Direction rail after the taxonomy
+  has at least 15 stable Directions; Domains show Primary-only counts while the
+  default filter may also match Secondary assignments;
+- no silent promotion of classification metadata into curated knowledge.
+
+When hierarchy is disabled, the Library retains the flat Direction rail. When it
+is enabled, `domain=<topic-id>` selects every Paper assigned through a child
+Direction, while `relation=primary` narrows the relation and the main list still
+groups each Paper once by Primary Direction. `domain=ungrouped` is the reserved
+filter for Papers with any assignment to an ungrouped Direction. Domain and
+Direction query parameters are mutually exclusive; stale or wrong-role values
+produce an explicit invalid-filter recovery state. On narrow screens the complete
+tree and manager remain in the existing full-height navigation drawer.
 
 ### 5.1 Personal reading state
 

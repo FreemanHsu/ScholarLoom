@@ -1,5 +1,16 @@
 import { createSnapshot, migrateLegacyData, repairDataRootPermissions, restoreSnapshot, verifySnapshot } from "./storage/data-operations.js";
 import { defaultDataRoot, initializeDataRoot, openDataRoot } from "./storage/layout.js";
+import {
+  createPaperTopicsPlan,
+  inventoryPaperTopics,
+  migratePaperTopicsCopy,
+  openPaperTopicsDataRoot,
+  paperTopicsSchemas,
+  readInventory,
+  readMapping,
+  readPlan,
+  writeExclusiveJson,
+} from "./storage/paper-topics-migration.js";
 
 async function main(): Promise<void> {
   const [command, first, second] = process.argv.slice(2);
@@ -40,7 +51,70 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ repaired: true, dataRoot: layout.root }, null, 2));
     return;
   }
-  throw new Error("Usage: tsx src/data-cli.ts <init|snapshot|verify|restore|migrate-legacy|repair-permissions>");
+  if (command === "paper-topics") {
+    const [action, ...args] = process.argv.slice(3);
+    if (action === "inventory") {
+      const [root, report, flag] = args;
+      if (!root || !report) throw new Error("Usage: ... paper-topics inventory <data-root> <new-report.json> [--include-values]");
+      const inventory = inventoryPaperTopics(openPaperTopicsDataRoot(root), {
+        includeValues: flag === "--include-values",
+      });
+      writeExclusiveJson(report, inventory);
+      console.log(JSON.stringify({
+        created: true,
+        report,
+        rootFingerprint: inventory.rootFingerprint,
+        evidenceHash: inventory.evidenceHash,
+        counts: inventory.counts,
+        localOnly: inventory.localOnly,
+        valuesIncluded: inventory.valuesIncluded,
+      }, null, 2));
+      return;
+    }
+    if (action === "plan") {
+      const [root, inventoryPath, mappingPath, planPath] = args;
+      if (!root || !inventoryPath || !mappingPath || !planPath) {
+        throw new Error("Usage: ... paper-topics plan <data-root> <inventory.json> <mapping.json> <new-plan.json>");
+      }
+      const plan = createPaperTopicsPlan(
+        openPaperTopicsDataRoot(root),
+        readInventory(inventoryPath),
+        readMapping(mappingPath),
+      );
+      writeExclusiveJson(planPath, plan);
+      console.log(JSON.stringify({
+        created: true,
+        plan: planPath,
+        planHash: plan.planHash,
+        executable: plan.executable,
+        counts: {
+          unchanged: plan.papers.filter((paper) => paper.action === "unchanged").length,
+          canonicalize: plan.papers.filter((paper) => paper.action === "canonicalize").length,
+          unresolved: plan.papers.filter((paper) => paper.action === "unresolved").length,
+        },
+      }, null, 2));
+      if (!plan.executable) process.exitCode = 2;
+      return;
+    }
+    if (action === "migrate-copy") {
+      const [root, planPath, destination] = args;
+      if (!root || !planPath || !destination) {
+        throw new Error("Usage: ... paper-topics migrate-copy <source-data-root> <plan.json> <new-destination-root>");
+      }
+      console.log(JSON.stringify(await migratePaperTopicsCopy(
+        openPaperTopicsDataRoot(root),
+        readPlan(planPath),
+        destination,
+      ), null, 2));
+      return;
+    }
+    if (action === "schemas") {
+      console.log(JSON.stringify(paperTopicsSchemas(), null, 2));
+      return;
+    }
+    throw new Error("Usage: ... paper-topics <inventory|plan|migrate-copy|schemas>");
+  }
+  throw new Error("Usage: tsx src/data-cli.ts <init|snapshot|verify|restore|migrate-legacy|repair-permissions|paper-topics>");
 }
 
 main().catch((error: unknown) => {

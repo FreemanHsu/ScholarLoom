@@ -279,7 +279,7 @@ updated: 2026-07-31
     await afterDeletion.close();
   });
 
-  it("keeps an offline Topic edit non-activating until reconciliation", async () => {
+  it("projects offline Topic classification fields while keeping reconciliation visible", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-direction-reconciliation-"));
     const storageLayout = initializeDataRoot(join(root, "data"));
     const options = {
@@ -307,7 +307,7 @@ updated: 2026-07-31
     const reopened = await createApp(options);
     const directions = await reopened.inject({ method: "GET", url: "/api/directions" });
     expect(directions.json().directions).toEqual([
-      expect.objectContaining({ id: "topic:offline-edit", title: "Original Direction" }),
+      expect.objectContaining({ id: "topic:offline-edit", title: "Externally Edited Direction" }),
     ]);
     const database = new Database(storageLayout.databasePath, { readonly: true });
     const reconciliation = database.prepare(`SELECT payload_json FROM proposals

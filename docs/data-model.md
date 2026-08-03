@@ -361,6 +361,55 @@ is valid when explicitly marked and attributed as user-confirmed interpretation.
 Turning an Insight into a Concept creates a new node connected by `derived-from`;
 it does not mutate the node's type in place.
 
+### 9.2.1 Topic usage level and authoritative history
+
+A Topic revision has one of two usage levels. `classification` is confirmed
+navigation metadata: title, aliases, Scope, and Paper direction assignments are
+projected into Paper Catalog but never become answer evidence. `knowledge-ready`
+is an explicitly owner-attested revision with substantive Topic sections and
+current provenance to active Summary or confirmed active Takeaway revisions. Only
+the latter is eligible for `global-curated` as source kind `topic-knowledge`.
+
+The current Topic lives under `vault/knowledge/topics/`. Before it is replaced,
+its exact bytes are hash-verified into
+`vault/knowledge/topics/.revisions/<encoded-topic-id>/`; this history is
+authoritative and audit-only. `topic_knowledge_revisions` and its provenance and
+Paper-scope tables are operational projections. A knowledge-ready identity/Scope
+edit uses the same `topic-knowledge-revision` KnowledgeWriteRequest as its body so
+history retention, Paper Catalog, and curated indexing share one recoverable CAS.
+An ordinary direction rename cannot bypass that writer.
+
+Provenance eligibility is current-state. Once a source becomes inactive, the Topic
+is removed from broad and Paper-scoped retrieval, reconciliation is created, and a
+new owner-confirmed revision is required to restore eligibility. External Topic
+edits update classification projections from the authoritative file but fail closed
+for curated knowledge until explicitly reconciled.
+
+### 9.2.2 Optional Domain → Direction navigation
+
+An active confirmed classification Topic has one navigation role: `direction` or
+`domain`. Missing role metadata is interpreted as `direction` for compatibility.
+A Domain is a navigation-only parent for zero or more Directions; it is not a new
+Knowledge Node type, cannot be assigned to a Paper, and cannot be promoted to
+knowledge-ready. A Direction has at most one parent Domain. The hierarchy is
+exactly two levels and never changes Primary/Secondary assignment semantics.
+
+The child Direction Topic Markdown owns `parent_domain_id`; a Domain never stores
+an inverse child list. `topic_navigation` is the rebuildable SQLite projection.
+The local `hierarchy-enabled` and `hierarchy-ever-enabled` preferences are SQLite
+operational authority and are included in snapshot/restore. Enabling requires at
+least 15 active confirmed Directions unless the hierarchy has previously been
+enabled. Invalid external parentage or a Paper manifest that assigns a Domain
+creates reconciliation and preserves the last known good catalog rather than
+silently flattening the hierarchy.
+
+Changing a classification Direction's parent uses a recoverable
+`direction-taxonomy` KnowledgeWriteRequest. For a knowledge-ready Direction, the
+same change uses the Topic knowledge revision writer so the previous authoritative
+bytes remain in `.revisions`; it does not alter curated body or provenance. Domain
+text participates in Paper Catalog search only while hierarchy is enabled and
+never enters `global-curated`.
+
 ### 9.3 Revision lifecycle
 
 ```mermaid
@@ -492,7 +541,7 @@ Searchable by the MVP entry Agent:
 
 - active Summary Revisions, marked `generated-from-primary-source`;
 - confirmed Takeaway Revisions, marked `user-confirmed`;
-- active confirmed Knowledge Revisions, marked `user-confirmed`.
+- active confirmed knowledge-ready Topic Revisions, marked `user-confirmed`.
 
 This corpus has its own FTS projection in the same SQLite database. `EntryAgentSearch`
 is its sole query interface; it cannot query the shared working-corpus FTS. The

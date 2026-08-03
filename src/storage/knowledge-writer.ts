@@ -24,6 +24,7 @@ export type OrganizationWriteCommand = {
   markdown: string;
   expectedHash: string | null;
   proposalIds: string[];
+  supersedeProposalIds?: string[];
   idempotencyKey: string;
   response: unknown;
   paperId?: string;
@@ -160,6 +161,10 @@ export class KnowledgeWriter {
       }
       const now = this.ports.now().toISOString();
       this.database.transaction(() => {
+        for (const proposalId of payload.supersedeProposalIds ?? []) {
+          this.database.prepare(`UPDATE proposals SET review_status='superseded',decided_at=?
+            WHERE id=? AND review_status='pending'`).run(now, proposalId);
+        }
         payload.proposalIds.forEach((proposalId, ordinal) => {
           const decisionId = `review-decision:${shortHash(`${payload.idempotencyKey}:${ordinal}`)}`;
           this.database.prepare(`UPDATE proposals SET review_status='accepted',decided_at=?

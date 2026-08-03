@@ -56,7 +56,7 @@ application-owned Prompt、Skill、JSON Schema 与有界系统参数，不展示
 论文/Vault 内容、secret 或环境变量。Codex CLI `0.144.6` 是最低支持版本；更高版本在
 全部 capability canary 通过后自动接收，否则 fail closed。
 
-当前 `agent-configuration.v3` 已按五条独立 Fable 评审轨道收紧 Prompt 与输出契约，
+当前 `agent-configuration.v4` 在五条既有 Fable 评审轨道外新增 Paper Organization Agent，
 并使用 ChatGPT 账户支持的完整 Codex 模型 ID：
 Summary 使用 canonical sections，Agentic Evidence 在 verified Receipts 后复核状态，
 Entry Agent 返回机器可读 evidence status，Takeaway v2 强化 hypothesis/atomicity
@@ -144,9 +144,25 @@ npm run restore -- /path/to/new-snapshot /path/to/new-empty-data-root
 默认快照包含 `vault/`、`originals/`、SQLite Online Backup 与 SHA-256 manifest，
 排除 `derived/`、`cache/`、`logs/` 和 `tmp/`。恢复永不覆盖现有数据根。
 
+Legacy Paper `topics:` 迁移采用只读 inventory、显式 mapping 和 copy-first 执行，
+不会把旧值猜成 Primary/Secondary，也不会原地修改或清理生产 root。所有报告、mapping
+和 plan 都可能包含相对路径，只能保存在仓库外：
+
+```bash
+npm run data:paper-topics -- inventory /path/to/data-root /tmp/topics-inventory.json
+npm run data:paper-topics -- plan /path/to/data-root /tmp/topics-inventory.json \
+  /tmp/topics-mapping.json /tmp/topics-plan.json
+npm run data:paper-topics -- migrate-copy /path/to/data-root /tmp/topics-plan.json \
+  /path/to/new-empty-destination-root
+```
+
+`migrate-copy` 要求停止源服务、完整重验 inventory、创建并验证源 snapshot，再恢复到
+不存在的 destination。它不授权 cutover，也不删除 legacy `topics:` 或旧 data root。
+
 `diagnostics` 是只读的，报告 migration 版本、SQLite integrity/foreign-key check、
 中断 Job、未完成知识写入、缺失 Artifact/Markdown、不可写目录和待处理索引。`rebuild-index` 会只从
-active Paper Summary 与 confirmed Takeaway 确定性重建 `global-curated` FTS；PDF、Message
+active Paper Summary、confirmed Takeaway 与通过当前 provenance/attestation 校验的
+knowledge-ready Topic 确定性重建 `global-curated` FTS；PDF、Message
 与 Code Element 没有进入这个接口的路径。
 
 ## Tailscale Serve

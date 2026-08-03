@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { paperHref, papersHref, readBrowserRoute } from "../src/web/browser-navigation.js";
+import { paperHref, paperOrganizationHref, papersHref, readBrowserRoute } from "../src/web/browser-navigation.js";
 
 describe("browser navigation", () => {
   it("restores a Paper reading view from a direct URL", () => {
@@ -17,6 +17,7 @@ describe("browser navigation", () => {
       anchor: "evidence:claim:1",
       evidenceReceiptId: null,
       repositoriesOpen: false,
+      returnTo: null,
     });
   });
 
@@ -34,6 +35,7 @@ describe("browser navigation", () => {
       anchor: "evidence:3",
       evidenceReceiptId: null,
       repositoriesOpen: false,
+      returnTo: null,
     });
     expect(readBrowserRoute({ pathname: "/papers/paper%3Afixture", search: "?mode=knowledge" })).toMatchObject({
       mode: "knowledge",
@@ -49,6 +51,7 @@ describe("browser navigation", () => {
       name: "papers",
       view: "all",
       direction: null,
+      domain: null,
       relation: "all",
       pending: false,
       query: "",
@@ -66,6 +69,7 @@ describe("browser navigation", () => {
       name: "papers",
       view: "unclassified",
       direction: "topic:video-generation",
+      domain: null,
       relation: "primary",
       pending: true,
       query: "GenCeption",
@@ -73,10 +77,38 @@ describe("browser navigation", () => {
     expect(papersHref({
       view: "all",
       direction: "topic:video-generation",
+      domain: null,
       relation: "all",
       pending: false,
       query: "",
     })).toBe("/papers?direction=topic%3Avideo-generation");
+  });
+
+  it("round trips Domain and Ungrouped library filters", () => {
+    expect(papersHref({ view: "all", direction: null, domain: "topic:vision", relation: "all",
+      pending: false, query: "" })).toBe("/papers?domain=topic%3Avision");
+    expect(readBrowserRoute({ pathname: "/papers", search: "?domain=ungrouped&relation=primary" }))
+      .toMatchObject({ domain: "ungrouped", direction: null, relation: "primary" });
+  });
+
+  it("round trips Paper Organization filters without cursor state", () => {
+    const href = paperOrganizationHref({
+      view: "attention",
+      section: "secondary",
+      direction: "topic:视频生成",
+      unclassified: true,
+      query: "视觉 表征",
+    });
+    const url = new URL(href, "http://localhost");
+    expect(readBrowserRoute(url)).toEqual({
+      name: "paper-organization",
+      view: "attention",
+      section: "secondary",
+      direction: "topic:视频生成",
+      unclassified: true,
+      query: "视觉 表征",
+    });
+    expect(url.searchParams.has("cursor")).toBe(false);
   });
 
   it("creates a stable encoded URL for a selected Evidence Anchor", () => {
@@ -110,5 +142,23 @@ describe("browser navigation", () => {
       anchor: null,
       repositoriesOpen: true,
     })).toBe("/papers/paper%3Afixture?repositories=open");
+  });
+
+  it("preserves only an organize-workspace return URL", () => {
+    const href = paperHref("paper:fixture", {
+      pdfOpen: false,
+      page: 1,
+      anchor: null,
+      returnTo: "/papers/organize?view=attention&section=primary",
+    });
+    expect(href).toBe("/papers/paper%3Afixture?return=%2Fpapers%2Forganize%3Fview%3Dattention%26section%3Dprimary");
+    expect(readBrowserRoute({
+      pathname: "/papers/paper%3Afixture",
+      search: "?return=%2Fpapers%2Forganize%3Fview%3Dattention",
+    })).toMatchObject({ returnTo: "/papers/organize?view=attention" });
+    expect(readBrowserRoute({
+      pathname: "/papers/paper%3Afixture",
+      search: "?return=https%3A%2F%2Fevil.example",
+    })).toMatchObject({ returnTo: null });
   });
 });

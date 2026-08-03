@@ -20,6 +20,17 @@ import { buildSettingsSnapshot, type SettingsRuntime } from "./settings/settings
 import type { AgentExecutionMetadataProvider } from "./agent/agent-configuration.js";
 import { PaperOrganizationValidationError } from "./domain/paper-organization.js";
 import { PaperOrganizationStoreError } from "./storage/paper-organization-store.js";
+import type { PaperOrganizationRunner } from "./agent/paper-organization.js";
+import { PaperOrganizationCoordinator } from "./storage/paper-organization-coordinator.js";
+import type { PaperTaxonomyRunner } from "./agent/paper-taxonomy.js";
+import { PaperTaxonomyCoordinator } from "./storage/paper-taxonomy-coordinator.js";
+import { PaperOrganizationBatchCoordinator } from "./storage/paper-organization-batch-coordinator.js";
+import { DirectionMergeCoordinator } from "./storage/direction-merge-coordinator.js";
+import { PaperResolverError, type PaperResolverMode } from "./storage/paper-resolver.js";
+import {
+  PaperOrganizationAutomation,
+  PaperOrganizationAutoAcceptCoordinator,
+} from "./storage/paper-organization-automation.js";
 
 export type ResolvedPaper = {
   arxivId: string;
@@ -53,8 +64,11 @@ export type CreateAppOptions = {
   agentMessageTimeoutMs?: number;
   agenticEvidenceRunner?: AgenticEvidenceRunner;
   takeawaySelectionRunner?: TakeawaySelectionRunner;
+  paperOrganizationRunner?: PaperOrganizationRunner;
+  paperTaxonomyRunner?: PaperTaxonomyRunner;
   settingsRuntime?: SettingsRuntime;
   agentExecutionMetadata?: AgentExecutionMetadataProvider;
+  entryResolverMode?: PaperResolverMode;
 };
 
 function classifyPaperResolutionError(error: unknown): { status: 404 | 503; code: string; detail: string } {
@@ -117,6 +131,25 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       ...(options.clock ? { now: () => options.clock!.now() } : {}),
       automaticDistillation: Boolean(distillationCoordinator),
       ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}) }) : null;
+  const paperOrganizationCoordinator = options.paperOrganizationRunner
+    ? new PaperOrganizationCoordinator(options.storageLayout, options.paperOrganizationRunner, store, {
+      ...(options.agentMessageTimeoutMs !== undefined ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
+      ...(options.clock ? { now: () => options.clock!.now() } : {}),
+      ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}),
+    }) : null;
+  const paperTaxonomyCoordinator = options.paperTaxonomyRunner
+    ? new PaperTaxonomyCoordinator(options.storageLayout, options.paperTaxonomyRunner, store,
+      paperOrganizationCoordinator, {
+        ...(options.agentMessageTimeoutMs !== undefined ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
+        ...(options.clock ? { now: () => options.clock!.now() } : {}),
+        ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}),
+      }) : null;
+  const paperOrganizationBatchCoordinator = new PaperOrganizationBatchCoordinator(
+    options.storageLayout, store, now);
+  const directionMergeCoordinator = new DirectionMergeCoordinator(options.storageLayout, store, now);
+  const paperOrganizationAutoCoordinator = new PaperOrganizationAutoAcceptCoordinator(
+    new PaperOrganizationAutomation(options.storageLayout, store, now),
+  );
   const chatControllers = new Set<AbortController>();
   const settingsRuntime: SettingsRuntime = {
     ...(options.settingsRuntime ?? {
@@ -138,12 +171,18 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }),
     }),
     ...(options.agentMessageTimeoutMs !== undefined ? { agentMessageTimeoutMs: options.agentMessageTimeoutMs } : {}),
+    entryResolverMode: options.entryResolverMode ?? "enabled",
   };
   app.addHook("onClose", async () => {
     for (const controller of chatControllers) controller.abort(new Error("application-closing"));
     await Promise.allSettled(backgroundTasks);
     await agentCoordinator?.close();
     await distillationCoordinator?.close();
+    await paperTaxonomyCoordinator?.close();
+    await paperOrganizationCoordinator?.close();
+    paperOrganizationBatchCoordinator.close();
+    directionMergeCoordinator.close();
+    paperOrganizationAutoCoordinator.close();
     store.close();
   });
   const runPaperChat = (context: Parameters<NonNullable<CodexRunner["runChat"]>>[0]) => {
@@ -291,6 +330,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     q?: string;
     view?: "all" | "unclassified";
     direction?: string;
+    domain?: string;
     relation?: "all" | "primary";
     pending?: string;
   } }>("/api/papers", async (request, reply) => {
@@ -300,6 +340,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
           ...(request.query.q ? { q: request.query.q } : {}),
           ...(request.query.view ? { view: request.query.view } : {}),
           ...(request.query.direction ? { direction: request.query.direction } : {}),
+          ...(request.query.domain ? { domain: request.query.domain } : {}),
           ...(request.query.relation ? { relation: request.query.relation } : {}),
           pending: request.query.pending === "true",
         }),
@@ -313,6 +354,59 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   });
 
   app.get("/api/directions", async () => ({ directions: store.listResearchDirections() }));
+  app.get("/api/domains", async () => store.researchDirectionHierarchy());
+
+  app.post<{ Body: unknown }>("/api/domains", async (request, reply) => {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key.trim()) return reply.code(400).send({ code: "idempotency-key-required" });
+    try { return reply.code(201).send(store.createResearchDomain(request.body, key)); }
+    catch (error) {
+      if (error instanceof PaperOrganizationStoreError) return reply.code(error.status).send({ code: error.code });
+      throw error;
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/domains/:id/rename", async (request, reply) => {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key.trim()) return reply.code(400).send({ code: "idempotency-key-required" });
+    try { return store.renameResearchDomain(request.params.id, request.body, key); }
+    catch (error) {
+      if (error instanceof PaperOrganizationStoreError) return reply.code(error.status).send({ code: error.code });
+      throw error;
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/directions/:id/domain", async (request, reply) => {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key.trim()) return reply.code(400).send({ code: "idempotency-key-required" });
+    try { return store.setResearchDirectionDomain(request.params.id, request.body, key); }
+    catch (error) {
+      if (error instanceof PaperOrganizationStoreError) return reply.code(error.status).send({ code: error.code });
+      throw error;
+    }
+  });
+
+  for (const enabled of [true, false]) app.post(`/api/taxonomy-hierarchy/${enabled ? "enable" : "disable"}`,
+    async (request, reply) => {
+      const key = request.headers["idempotency-key"];
+      if (typeof key !== "string" || !key.trim()) return reply.code(400).send({ code: "idempotency-key-required" });
+      try { return store.setTaxonomyHierarchyEnabled(enabled, key); }
+      catch (error) {
+        if (error instanceof PaperOrganizationStoreError) return reply.code(error.status).send({ code: error.code });
+        throw error;
+      }
+    });
+
+  app.get<{ Params: { id: string } }>("/api/directions/:id/resolve", async (request, reply) => {
+    try {
+      return store.resolveResearchDirection(request.params.id);
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) {
+        return reply.code(error.status).send({ code: error.code });
+      }
+      throw error;
+    }
+  });
 
   app.post<{ Body: unknown }>("/api/directions", async (request, reply) => {
     const idempotencyKey = request.headers["idempotency-key"];
@@ -321,6 +415,141 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }
     try {
       return reply.code(201).send(store.createResearchDirection(request.body, idempotencyKey));
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) {
+        return reply.code(error.status).send({ code: error.code });
+      }
+      throw error;
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/directions/:id/rename/preview",
+    async (request, reply) => {
+      const direction = store.listResearchDirections().find((candidate) => candidate.id === request.params.id);
+      if (!direction) return reply.code(404).send({ code: "direction-not-found" });
+      return { current: direction, proposed: request.body };
+    });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/directions/:id/rename",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      try {
+        return store.renameResearchDirection(request.params.id, request.body, idempotencyKey);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    });
+
+  app.get<{ Params: { id: string } }>("/api/directions/:id/knowledge", async (request, reply) => {
+    try {
+      return store.getTopicKnowledge(request.params.id);
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) return reply.code(error.status).send({ code: error.code });
+      throw error;
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/directions/:id/knowledge/provenance-options",
+    async (request, reply) => {
+      try {
+        return { sources: store.listTopicKnowledgeProvenanceOptions(request.params.id) };
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) return reply.code(error.status).send({ code: error.code });
+        throw error;
+      }
+    });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/directions/:id/knowledge/preview",
+    async (request, reply) => {
+      try {
+        return store.previewTopicKnowledge(request.params.id, request.body);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) return reply.code(error.status).send({ code: error.code });
+        throw error;
+      }
+    });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/directions/:id/knowledge/revisions",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      try {
+        return reply.code(201).send(store.commitTopicKnowledge(request.params.id, request.body, idempotencyKey));
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) return reply.code(error.status).send({ code: error.code });
+        throw error;
+      }
+    });
+
+  app.post<{ Params: { id: string }; Body: { targetTopicId?: unknown } }>(
+    "/api/directions/:id/merge/preview",
+    async (request, reply) => {
+      if (typeof request.body?.targetTopicId !== "string") {
+        return reply.code(400).send({ code: "direction-merge-invalid" });
+      }
+      try {
+        return store.directionMergePreview(request.params.id, request.body.targetTopicId);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { targetTopicId?: unknown } }>(
+    "/api/directions/:id/merge",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      if (typeof request.body?.targetTopicId !== "string") {
+        return reply.code(400).send({ code: "direction-merge-invalid" });
+      }
+      try {
+        const result = store.reserveDirectionMerge(
+          request.params.id, request.body.targetTopicId, idempotencyKey);
+        directionMergeCoordinator.wake();
+        return reply.code(202).send(result);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get<{ Params: { id: string } }>("/api/direction-merges/:id", async (request, reply) => {
+    try {
+      return store.readDirectionMerge(request.params.id);
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) {
+        return reply.code(error.status).send({ code: error.code });
+      }
+      throw error;
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/direction-merges/:id/retry", async (request, reply) => {
+    const idempotencyKey = request.headers["idempotency-key"];
+    if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+      return reply.code(400).send({ code: "idempotency-key-required" });
+    }
+    try {
+      const result = store.retryDirectionMerge(request.params.id);
+      directionMergeCoordinator.wake();
+      return result;
     } catch (error) {
       if (error instanceof PaperOrganizationStoreError) {
         return reply.code(error.status).send({ code: error.code });
@@ -346,6 +575,475 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       throw error;
     }
   });
+
+  app.get<{ Params: { id: string } }>("/api/papers/:id/organization-suggestions", async (request, reply) => {
+    if (!store.paperExists(request.params.id)) return reply.code(404).send({ code: "paper-not-found" });
+    return {
+      ...store.readOrganizationForPaper(request.params.id, true),
+      availability: paperOrganizationCoordinator ? "ready" : "runner-unavailable",
+    };
+  });
+
+  app.get<{ Querystring: {
+    view?: string;
+    section?: string;
+    direction?: string;
+    unclassified?: string;
+    q?: string;
+  } }>("/api/paper-organization/queue", async (request, reply) => {
+    const view = request.query.view ?? "pending";
+    if (!["pending", "attention", "all"].includes(view) ||
+        (request.query.section && !["alias", "primary", "secondary"].includes(request.query.section)) ||
+        (request.query.unclassified !== undefined &&
+          !["true", "false"].includes(request.query.unclassified)) ||
+        (request.query.q?.length ?? 0) > 500) {
+      return reply.code(400).send({ code: "paper-organization-queue-query-invalid" });
+    }
+    try {
+      return store.paperOrganizationQueue({
+        view: view as "pending" | "attention" | "all",
+        ...(request.query.section
+          ? { section: request.query.section as "alias" | "primary" | "secondary" } : {}),
+        ...(request.query.direction ? { direction: request.query.direction } : {}),
+        unclassified: request.query.unclassified === "true",
+        ...(request.query.q ? { q: request.query.q } : {}),
+      });
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) {
+        return reply.code(error.status).send({ code: error.code });
+      }
+      throw error;
+    }
+  });
+
+  app.post<{ Body: { jobRunIds?: unknown; proposalIds?: unknown } }>(
+    "/api/paper-organization/status",
+    async (request, reply) => {
+      if (!Array.isArray(request.body?.jobRunIds) || !Array.isArray(request.body?.proposalIds) ||
+          request.body.jobRunIds.some((id) => typeof id !== "string") ||
+          request.body.proposalIds.some((id) => typeof id !== "string")) {
+        return reply.code(400).send({ code: "paper-organization-status-query-invalid" });
+      }
+      try {
+        return store.paperOrganizationStatuses({
+          jobRunIds: request.body.jobRunIds as string[],
+          proposalIds: request.body.proposalIds as string[],
+        });
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { scope?: unknown } }>(
+    "/api/papers/:id/organization-suggestions",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      if (!paperOrganizationCoordinator) {
+        return reply.code(503).send({ code: "paper-organization-runner-unavailable" });
+      }
+      const scope = request.body?.scope;
+      if (!["alias", "primary", "secondary"].includes(String(scope))) {
+        return reply.code(400).send({ code: "paper-organization-scope-invalid" });
+      }
+      try {
+        return reply.code(202).send(paperOrganizationCoordinator.request(
+          request.params.id,
+          scope as "alias" | "primary" | "secondary",
+          idempotencyKey,
+        ));
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get<{ Querystring: { mode?: string; limit?: string; priorManifestId?: string } }>(
+    "/api/paper-taxonomy/bootstrap/preview",
+    async (request, reply) => {
+      const mode = request.query.mode ?? "next";
+      const limit = Number.parseInt(request.query.limit ?? "100", 10);
+      if (!["next", "regenerate", "refresh"].includes(mode)) {
+        return reply.code(400).send({ code: "paper-taxonomy-mode-invalid" });
+      }
+      try {
+        return store.paperTaxonomyPreview(mode as "next" | "regenerate" | "refresh",
+          limit, request.query.priorManifestId);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get("/api/paper-taxonomy/bootstrap", async () => ({
+    ...store.readPaperTaxonomy(),
+    availability: paperTaxonomyCoordinator ? "ready" : "runner-unavailable",
+  }));
+
+  app.post<{ Body: { mode?: unknown; limit?: unknown; priorManifestId?: unknown } }>(
+    "/api/paper-taxonomy/bootstrap",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      if (!paperTaxonomyCoordinator) {
+        return reply.code(503).send({ code: "paper-taxonomy-runner-unavailable" });
+      }
+      const mode = String(request.body?.mode ?? "next");
+      const limit = Number(request.body?.limit ?? 100);
+      if (!["next", "regenerate", "refresh"].includes(mode) || !Number.isInteger(limit)) {
+        return reply.code(400).send({ code: "paper-taxonomy-request-invalid" });
+      }
+      try {
+        return reply.code(202).send(paperTaxonomyCoordinator.request({
+          mode: mode as "next" | "regenerate" | "refresh",
+          limit,
+          ...(typeof request.body?.priorManifestId === "string"
+            ? { priorManifestId: request.body.priorManifestId } : {}),
+        }, idempotencyKey));
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>("/api/paper-taxonomy/jobs/:id/retry", async (request, reply) => {
+    const idempotencyKey = request.headers["idempotency-key"];
+    if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+      return reply.code(400).send({ code: "idempotency-key-required" });
+    }
+    if (!paperTaxonomyCoordinator) {
+      return reply.code(503).send({ code: "paper-taxonomy-runner-unavailable" });
+    }
+    try {
+      return reply.code(202).send(paperTaxonomyCoordinator.retry(request.params.id, idempotencyKey));
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) {
+        return reply.code(error.status).send({ code: error.code });
+      }
+      throw error;
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { action?: unknown; value?: unknown } }>(
+    "/api/direction-taxonomy/proposals/:id/decision",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      try {
+        return store.decideDirectionTaxonomyProposal(request.params.id, request.body, idempotencyKey);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get("/api/paper-organization/automation", async () =>
+    paperOrganizationAutoCoordinator.automation.automationModel());
+
+  app.post("/api/paper-organization/automation/evaluate", async (_request, reply) => {
+    try {
+      return paperOrganizationAutoCoordinator.automation.evaluate();
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) {
+        return reply.code(error.status).send({ code: error.code });
+      }
+      throw error;
+    }
+  });
+
+  app.post<{ Body: { evaluationId?: unknown } }>(
+    "/api/paper-organization/automation/policies",
+    async (request, reply) => {
+      if (typeof request.body?.evaluationId !== "string") {
+        return reply.code(400).send({ code: "alias-automation-evaluation-required" });
+      }
+      try {
+        return paperOrganizationAutoCoordinator.automation.createPolicy(request.body.evaluationId);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/paper-organization/automation/policies/:id/enable",
+    async (request, reply) => {
+      try {
+        const result = paperOrganizationAutoCoordinator.automation.enablePolicy(request.params.id);
+        paperOrganizationAutoCoordinator.wake();
+        return result;
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { reason?: unknown } }>(
+    "/api/paper-organization/automation/policies/:id/suspend",
+    async (request, reply) => {
+      try {
+        return paperOrganizationAutoCoordinator.automation.suspendPolicy(request.params.id,
+          typeof request.body?.reason === "string" ? request.body.reason : "owner-request");
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get<{ Querystring: { limit?: string } }>("/api/paper-organization/automation/events",
+    async (request) => paperOrganizationAutoCoordinator.automation.listEvents(
+      Number.parseInt(request.query.limit ?? "50", 10),
+    ));
+
+  app.post<{ Params: { id: string } }>(
+    "/api/paper-organization/automation/events/:id/undo/preview",
+    async (request, reply) => {
+      try {
+        return paperOrganizationAutoCoordinator.automation.undoPreview(request.params.id);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/paper-organization/automation/events/:id/undo",
+    async (request, reply) => {
+      try {
+        return paperOrganizationAutoCoordinator.automation.undo(request.params.id);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Body: { action?: unknown; proposalIds?: unknown } }>(
+    "/api/paper-organization/batches/preview",
+    async (request, reply) => {
+      const action = String(request.body?.action ?? "");
+      if (!["accept", "reject"].includes(action) || !Array.isArray(request.body?.proposalIds)) {
+        return reply.code(400).send({ code: "paper-organization-batch-invalid" });
+      }
+      try {
+        return store.paperOrganizationBatchPreview(action as "accept" | "reject",
+          request.body.proposalIds as string[]);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post<{ Body: { action?: unknown; proposalIds?: unknown } }>(
+    "/api/paper-organization/batches",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      const action = String(request.body?.action ?? "");
+      if (!["accept", "reject"].includes(action) || !Array.isArray(request.body?.proposalIds)) {
+        return reply.code(400).send({ code: "paper-organization-batch-invalid" });
+      }
+      try {
+        const result = store.reservePaperOrganizationBatch(action as "accept" | "reject",
+          request.body.proposalIds as string[], idempotencyKey);
+        paperOrganizationBatchCoordinator.wake();
+        return reply.code(202).send(result);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get<{ Params: { id: string } }>("/api/paper-organization/batches/:id",
+    async (request, reply) => {
+      try {
+        return store.readPaperOrganizationBatch(request.params.id);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    });
+
+  app.post<{ Params: { id: string } }>("/api/paper-organization/batches/:id/retry",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      try {
+        const result = store.retryPaperOrganizationBatch(request.params.id);
+        paperOrganizationBatchCoordinator.wake();
+        return result;
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    });
+
+  app.post<{ Params: { id: string } }>("/api/paper-organization/batches/:id/abandon",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      try {
+        return store.abandonPaperOrganizationBatch(request.params.id);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    });
+
+  app.get<{ Querystring: { limit?: string } }>("/api/paper-organization/backfill/preview",
+    async (request, reply) => {
+      const limit = Number.parseInt(request.query.limit ?? "50", 10);
+      try {
+        return store.paperOrganizationBackfillPreview(limit);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    });
+
+  app.post<{ Body: { limit?: unknown } }>("/api/paper-organization/backfill", async (request, reply) => {
+    const idempotencyKey = request.headers["idempotency-key"];
+    if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+      return reply.code(400).send({ code: "idempotency-key-required" });
+    }
+    if (!paperOrganizationCoordinator) {
+      return reply.code(503).send({ code: "paper-organization-runner-unavailable" });
+    }
+    try {
+      return reply.code(202).send(store.reservePaperOrganizationBackfill(
+        Number(request.body?.limit ?? 50), idempotencyKey));
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) {
+        return reply.code(error.status).send({ code: error.code });
+      }
+      throw error;
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/paper-organization/backfills/:id",
+    async (request, reply) => {
+      try {
+        return store.readPaperOrganizationBackfill(request.params.id);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    });
+
+  app.post<{ Params: { id: string } }>("/api/paper-organization/backfills/:id/abandon",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      try {
+        return store.abandonPaperOrganizationBackfill(request.params.id);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        throw error;
+      }
+    });
+
+  app.post<{ Params: { id: string } }>("/api/paper-organization/jobs/:id/retry", async (request, reply) => {
+    const idempotencyKey = request.headers["idempotency-key"];
+    if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+      return reply.code(400).send({ code: "idempotency-key-required" });
+    }
+    if (!paperOrganizationCoordinator) {
+      return reply.code(503).send({ code: "paper-organization-runner-unavailable" });
+    }
+    try {
+      return reply.code(202).send(
+        paperOrganizationCoordinator.retryGeneration(request.params.id, idempotencyKey),
+      );
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) {
+        return reply.code(error.status).send({ code: error.code });
+      }
+      throw error;
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { action?: unknown; value?: unknown } }>(
+    "/api/paper-organization/proposals/:id/decision",
+    async (request, reply) => {
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string" || !idempotencyKey.trim()) {
+        return reply.code(400).send({ code: "idempotency-key-required" });
+      }
+      try {
+        return store.decidePaperOrganizationProposal(request.params.id, request.body ?? {}, idempotencyKey);
+      } catch (error) {
+        if (error instanceof PaperOrganizationStoreError) {
+          return reply.code(error.status).send({ code: error.code });
+        }
+        if (error instanceof PaperOrganizationValidationError) {
+          return reply.code(400).send({ code: error.code });
+        }
+        throw error;
+      }
+    },
+  );
 
   app.get<{ Params: { id: string } }>("/api/papers/:id/repositories", async (request, reply) => {
     if (!store.paperExists(request.params.id)) return reply.code(404).send({ code: "paper-not-found" });
@@ -610,12 +1308,39 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     return source ? reply.code(201).send(source) : reply.code(404).send({ code: "proposal-source-not-found" });
   });
 
-  app.post<{ Body: { question?: unknown } }>("/api/entry-agent/questions", async (request, reply) => {
+  app.post<{ Body: { question?: unknown; resolutionMode?: unknown; resolutionSelection?: unknown } }>(
+    "/api/entry-agent/questions", async (request, reply) => {
     if (typeof request.body?.question !== "string" || !request.body.question.trim()) return reply.code(400).send({ code: "question-required" });
     if (!options.codexRunner?.runEntry) return reply.code(503).send({ code: "codex-runner-unavailable" });
-    return store.answerEntry(request.body.question, (context) => options.codexRunner!.runEntry!(context));
+    if (request.body.resolutionMode !== undefined && !["auto", "off"].includes(String(request.body.resolutionMode))) {
+      return reply.code(400).send({ code: "entry-resolution-mode-invalid" });
+    }
+    let resolutionSelection: import("./storage/import-store.js").EntryResolutionRequest["resolutionSelection"];
+    if (request.body.resolutionSelection !== undefined) {
+      const value = request.body.resolutionSelection as { snapshotHash?: unknown; groups?: unknown };
+      if (!value || typeof value !== "object" || typeof value.snapshotHash !== "string" ||
+          !value.groups || typeof value.groups !== "object" || Array.isArray(value.groups) ||
+          Object.values(value.groups).some((paperId) => typeof paperId !== "string")) {
+        return reply.code(400).send({ code: "entry-paper-resolution-invalid" });
+      }
+      resolutionSelection = { snapshotHash: value.snapshotHash,
+        groups: value.groups as Record<string, string> };
+    }
+    try {
+      return await store.answerEntry(request.body.question,
+        (context) => options.codexRunner!.runEntry!(context), {
+          mode: options.entryResolverMode ?? "enabled",
+          ...(request.body.resolutionMode ? {
+            resolutionMode: request.body.resolutionMode as "auto" | "off",
+          } : {}),
+          ...(resolutionSelection ? { resolutionSelection } : {}),
+        });
+    } catch (error) {
+      if (error instanceof PaperResolverError) return reply.code(409).send({ code: error.code });
+      throw error;
+    }
   });
-  app.post<{ Params: { sourceType: "summary" | "takeaway"; sourceId: string } }>(
+  app.post<{ Params: { sourceType: "summary" | "takeaway" | "topic-knowledge"; sourceId: string } }>(
     "/api/entry-agent/sources/:sourceType/:sourceId/open", async (request, reply) =>
       store.recordEntrySourceOpen(request.params.sourceType, request.params.sourceId)
         ? reply.code(201).send({ recorded: true }) : reply.code(404).send({ code: "entry-source-not-found" }));
