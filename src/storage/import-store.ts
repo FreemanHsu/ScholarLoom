@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
+  type ReadStream } from "node:fs";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 
@@ -80,6 +81,19 @@ export type StoredPaper = {
     exact: boolean;
   };
 };
+
+export type PdfArtifactDescriptor = {
+  contentHash: string;
+  byteSize: number;
+  open(range?: { start: number; end: number }): ReadStream;
+};
+type PdfArtifactRow = {
+  id: string;
+  content_hash: string;
+  storage_ref: string;
+  byte_size: number;
+  integrity_status: string;
+};
 export type StoredImportRequest = { id: string; paperId: string; status: "resolved" };
 
 export type SummaryResult = {
@@ -148,6 +162,7 @@ export class ImportStore {
   readonly #paperResolver: PaperResolver;
   readonly #topicKnowledge: TopicKnowledgeStore;
   readonly #agentExecutionMetadata: AgentExecutionMetadataProvider | undefined;
+  readonly #verifiedPdfFiles = new Map<string, string>();
 
   static open(layout: StorageLayout,
     failurePoint: "reserved" | "staged" | "renamed" | "metadata-committed" | "indexed" | null = null,
@@ -236,6 +251,7 @@ export class ImportStore {
     this.#database.prepare(`INSERT INTO artifacts(id,artifact_type,content_hash,storage_ref,media_type,byte_size,created_by_kind,retention_class,created_at)
       VALUES (?,'paper-pdf',?,?,'application/pdf',?,'external-source','irreplaceable',?) ON CONFLICT(artifact_type,content_hash) DO NOTHING`)
       .run(artifactId, hash, storageRef, bytes.byteLength, now);
+    this.#rememberVerifiedPdf(artifactId, absolutePdf, hash, bytes);
     this.#database.prepare("UPDATE paper_versions SET pdf_artifact_id=?,processing_status='processing',updated_at=? WHERE id=?")
       .run(artifactId, now, versionId);
 
@@ -516,9 +532,11 @@ export class ImportStore {
     const latestJob = this.#database.prepare(`SELECT id,state,progress,attempt,error_json FROM job_runs
       WHERE paper_id=? AND job_type='paper-import' ORDER BY attempt DESC,queued_at DESC,id DESC LIMIT 1`).get(id) as
       { id: string; state: string; progress: number; attempt: number; error_json: string | null } | undefined;
+    const pdfArtifact = this.#pdfArtifactIdentityForVersion(versionId);
     return {
       paper: { ...paper, versionId },
-      pdf: extraction ? { pageCount: extraction.page_count } : null,
+      pdf: extraction && pdfArtifact ? { pageCount: extraction.page_count,
+        url: `/api/artifacts/${pdfArtifact.contentHash}/pdf` } : null,
       summary: summary ? { id: summary.id, status: summary.status, readStatus: summary.read_status,
         markdownPath: summary.markdown_path, ...JSON.parse(summary.structured_json) as object } : null,
       processing: latestJob ? { jobId: latestJob.id, state: requireImportJobState(latestJob.state), progress: latestJob.progress,
@@ -531,6 +549,19 @@ export class ImportStore {
     const row = this.#database.prepare(`SELECT a.id,a.storage_ref FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id WHERE v.id=?`).get(versionId) as
       { id: string; storage_ref: string } | undefined;
     return row && this.#artifactIsValid(row.id) ? readFileSync(join(this.#artifactRoot, row.storage_ref)) : null;
+  }
+
+  async getPdfArtifactForVersion(versionId: string): Promise<PdfArtifactDescriptor | null> {
+    const row = this.#database.prepare(`SELECT a.id,a.content_hash,a.storage_ref,a.byte_size,a.integrity_status
+      FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id
+      WHERE v.id=? AND a.artifact_type='paper-pdf'`).get(versionId) as PdfArtifactRow | undefined;
+    return this.#openPdfArtifact(row);
+  }
+
+  async getPdfArtifact(contentHash: string): Promise<PdfArtifactDescriptor | null> {
+    const row = this.#database.prepare(`SELECT id,content_hash,storage_ref,byte_size,integrity_status FROM artifacts
+      WHERE artifact_type='paper-pdf' AND content_hash=?`).get(contentHash) as PdfArtifactRow | undefined;
+    return this.#openPdfArtifact(row);
   }
 
   listRepositoryAssociations(paperId: string): unknown[] {
@@ -1015,40 +1046,28 @@ export class ImportStore {
     if (payload.candidateVersionId) {
       const candidate = this.#database.prepare("SELECT id FROM paper_versions WHERE id=?").get(payload.candidateVersionId);
       if (!candidate) return null;
-      const token = randomUUID();
-      this.#database.prepare("INSERT INTO source_open_tokens(token,proposal_id,paper_version_id,source_handle,issued_at) VALUES (?,?,?,?,?)")
-        .run(token, proposalId, payload.candidateVersionId, "pdf-page:1", new Date().toISOString());
-      return { pdfUrl: `/api/paper-versions/${encodeURIComponent(payload.candidateVersionId)}/pdf?openToken=${token}#page=1`, page: 1 };
+      return this.#recordProposalSourceOpen(proposalId, payload.candidateVersionId, "pdf-page:1", 1);
     }
     const pdfReceipt = payload.receiptIds?.map((id) => this.#database.prepare(`SELECT source_id,locator_json FROM all_evidence_receipts
       WHERE id=? AND evidence_kind='pdf' AND verification_status='verified'`).get(id) as
       { source_id: string; locator_json: string } | undefined).find(Boolean);
     if (pdfReceipt && row.source_version_id) {
       const page = Number((JSON.parse(pdfReceipt.locator_json) as { page?: number }).page ?? 1);
-      const token = randomUUID();
-      this.#database.prepare("INSERT INTO source_open_tokens(token,proposal_id,paper_version_id,source_handle,issued_at) VALUES (?,?,?,?,?)")
-        .run(token, proposalId, row.source_version_id, `pdf-page:${page}`, new Date().toISOString());
-      return { pdfUrl: `/api/paper-versions/${encodeURIComponent(row.source_version_id)}/pdf?openToken=${token}#page=${page}`, page };
+      return this.#recordProposalSourceOpen(proposalId, row.source_version_id, `pdf-page:${page}`, page);
     }
     const handle = payload.sourceHandles?.find((candidate) => candidate.startsWith("pdf-page:"));
     if (!handle || !row.source_version_id) return null;
-    const token = randomUUID();
-    this.#database.prepare("INSERT INTO source_open_tokens(token,proposal_id,paper_version_id,source_handle,issued_at) VALUES (?,?,?,?,?)")
-      .run(token, proposalId, row.source_version_id, handle, new Date().toISOString());
     const page = Number.parseInt(handle.slice(9), 10);
-    return { pdfUrl: `/api/paper-versions/${encodeURIComponent(row.source_version_id)}/pdf?openToken=${token}#page=${page}`, page };
+    return this.#recordProposalSourceOpen(proposalId, row.source_version_id, handle, page);
   }
 
-  consumeSourceOpenToken(versionId: string, token: string): void {
-    const row = this.#database.prepare(`SELECT proposal_id,source_handle FROM source_open_tokens
-      WHERE token=? AND paper_version_id=? AND consumed_at IS NULL`).get(token, versionId) as { proposal_id: string; source_handle: string } | undefined;
-    if (!row) return;
-    const now = new Date().toISOString();
-    this.#database.transaction(() => {
-      this.#database.prepare("UPDATE source_open_tokens SET consumed_at=? WHERE token=?").run(now, token);
-      this.#database.prepare("INSERT OR IGNORE INTO source_open_events(id,proposal_id,source_handle,opened_at) VALUES (?,?,?,?)")
-        .run(`source-open:${row.proposal_id}:${row.source_handle}`, row.proposal_id, row.source_handle, now);
-    })();
+  #recordProposalSourceOpen(proposalId: string, versionId: string, sourceHandle: string,
+    page: number): { pdfUrl: string; page: number } | null {
+    const artifact = this.#pdfArtifactIdentityForVersion(versionId);
+    if (!artifact) return null;
+    this.#database.prepare("INSERT INTO source_open_events(id,proposal_id,source_handle,opened_at) VALUES (?,?,?,?)")
+      .run(`source-open:${randomUUID()}`, proposalId, sourceHandle, this.#now().toISOString());
+    return { pdfUrl: `/api/artifacts/${artifact.contentHash}/pdf#page=${page}`, page };
   }
 
   async answerEntry(question: string, runEntry: (context: { question: string; sources: Array<{
@@ -1455,6 +1474,85 @@ export class ImportStore {
     return this.#fileMatches(join(this.#artifactRoot, artifact.storage_ref), artifact.content_hash, artifact.byte_size);
   }
 
+  #pdfArtifactIdentityForVersion(versionId: string): { contentHash: string } | null {
+    const row = this.#database.prepare(`SELECT a.content_hash,a.storage_ref,a.byte_size
+      FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id
+      WHERE v.id=? AND a.artifact_type='paper-pdf'`).get(versionId) as
+      { content_hash: string; storage_ref: string; byte_size: number } | undefined;
+    if (!row) return null;
+    try {
+      const stat = statSync(join(this.#artifactRoot, row.storage_ref));
+      return stat.isFile() && stat.size === row.byte_size ? { contentHash: row.content_hash } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async #openPdfArtifact(row: PdfArtifactRow | undefined): Promise<PdfArtifactDescriptor | null> {
+    if (!row) return null;
+    const absolutePath = join(this.#artifactRoot, row.storage_ref);
+    try {
+      const stat = statSync(absolutePath, { bigint: true });
+      if (!stat.isFile()) {
+        this.#markPdfIntegrity(row, "missing");
+        return null;
+      }
+      if (stat.size !== BigInt(row.byte_size)) {
+        this.#markPdfIntegrity(row, "corrupt");
+        return null;
+      }
+      const fingerprint = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+      const durableVerification = this.#database.prepare(`SELECT stat_fingerprint FROM artifact_integrity_verifications
+        WHERE artifact_id=?`).get(row.id) as { stat_fingerprint: string } | undefined;
+      const verificationMatches = row.integrity_status === "verified" &&
+        (this.#verifiedPdfFiles.get(row.content_hash) === fingerprint || durableVerification?.stat_fingerprint === fingerprint);
+      if (!verificationMatches) {
+        const hash = createHash("sha256");
+        for await (const chunk of createReadStream(absolutePath)) hash.update(chunk as Buffer);
+        if (hash.digest("hex") !== row.content_hash) {
+          this.#markPdfIntegrity(row, "corrupt");
+          return null;
+        }
+        this.#recordPdfVerification(row.id, row.content_hash, fingerprint);
+      } else {
+        this.#verifiedPdfFiles.set(row.content_hash, fingerprint);
+      }
+    } catch {
+      this.#markPdfIntegrity(row, "missing");
+      return null;
+    }
+    return { contentHash: row.content_hash, byteSize: row.byte_size,
+      open: (range) => createReadStream(absolutePath, range) };
+  }
+
+  #rememberVerifiedPdf(artifactId: string, path: string, contentHash: string, bytes: Uint8Array): void {
+    if (createHash("sha256").update(bytes).digest("hex") !== contentHash) {
+      throw new Error("pdf-artifact-integrity-mismatch");
+    }
+    const stat = statSync(path, { bigint: true });
+    if (!stat.isFile() || stat.size !== BigInt(bytes.byteLength)) throw new Error("pdf-artifact-integrity-mismatch");
+    this.#recordPdfVerification(artifactId, contentHash,
+      `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`);
+  }
+
+  #recordPdfVerification(artifactId: string, contentHash: string, fingerprint: string): void {
+    this.#database.transaction(() => {
+      this.#database.prepare("UPDATE artifacts SET integrity_status='verified' WHERE id=?").run(artifactId);
+      this.#database.prepare(`INSERT INTO artifact_integrity_verifications(artifact_id,stat_fingerprint,verified_at)
+        VALUES (?,?,?) ON CONFLICT(artifact_id) DO UPDATE SET stat_fingerprint=excluded.stat_fingerprint,
+        verified_at=excluded.verified_at`).run(artifactId, fingerprint, this.#now().toISOString());
+    })();
+    this.#verifiedPdfFiles.set(contentHash, fingerprint);
+  }
+
+  #markPdfIntegrity(row: Pick<PdfArtifactRow, "id" | "content_hash">, status: "missing" | "corrupt"): void {
+    this.#verifiedPdfFiles.delete(row.content_hash);
+    this.#database.transaction(() => {
+      this.#database.prepare("DELETE FROM artifact_integrity_verifications WHERE artifact_id=?").run(row.id);
+      this.#database.prepare("UPDATE artifacts SET integrity_status=? WHERE id=?").run(status, row.id);
+    })();
+  }
+
   #fileMatches(path: string, expectedHash: string, expectedSize: number): boolean {
     if (!existsSync(path)) return false;
     const bytes = readFileSync(path);
@@ -1543,6 +1641,7 @@ export class ImportStore {
       this.#database.prepare(`INSERT INTO artifacts(id,artifact_type,content_hash,storage_ref,media_type,byte_size,created_by_kind,retention_class,created_at)
         VALUES (?,'paper-pdf',?,?,?,?,'external-source','irreplaceable',?) ON CONFLICT(artifact_type,content_hash) DO NOTHING`)
         .run(artifactId, input.prepared.contentHash, storageRef, input.prepared.mediaType, input.prepared.byteSize, now);
+      this.#rememberVerifiedPdf(artifactId, absolutePdf, input.prepared.contentHash, input.prepared.bytes);
       this.#database.prepare(`INSERT INTO papers(id,title,acquisition_status,origin,lifecycle_status,current_version_id,created_at,updated_at)
         VALUES (?,?,'ingested','manual-import','active',?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at`)
         .run(paperId, input.prepared.metadata.title, changedAtSameUrl ? existingIdentity!.current_version_id : versionId, now, now);
@@ -1636,6 +1735,7 @@ export class ImportStore {
       this.#database.prepare(`INSERT INTO artifacts(id,artifact_type,content_hash,storage_ref,media_type,byte_size,created_by_kind,retention_class,created_at)
         VALUES (?,'paper-pdf',?,?,?,?,'external-source','irreplaceable',?) ON CONFLICT(artifact_type,content_hash) DO NOTHING`)
         .run(artifactId, input.downloaded.contentHash, storageRef, input.downloaded.mediaType, input.downloaded.byteSize, now);
+      this.#rememberVerifiedPdf(artifactId, absolutePdf, input.downloaded.contentHash, input.downloaded.bytes);
       frozenInput = JSON.stringify({ canonicalUrl: input.downloaded.canonicalUrl, contentHash: input.downloaded.contentHash, artifactId });
     }
     this.#database.prepare(`UPDATE import_requests SET resolution_status='failed',error_code=?,error_detail=?,completed_at=?,

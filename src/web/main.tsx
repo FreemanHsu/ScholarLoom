@@ -233,7 +233,7 @@ type AliasAutomationModel = {
 };
 type Workspace = {
   paper: Paper & { versionId: string };
-  pdf: { pageCount: number } | null;
+  pdf: { pageCount: number; url: string } | null;
   summary: null | {
     status: string;
     sections: Array<{ key: string; title: string; body: string }>;
@@ -280,14 +280,11 @@ type EntryAnswer = {
 type OpenedPdfSource = { href: string; anchor: string; page: number };
 
 function PdfFrame({ src }: { src: string }) {
-  const frame = useRef<HTMLIFrameElement>(null);
-  const initialSrc = useRef(src);
-  useEffect(() => {
-    if (src === initialSrc.current) return;
-    frame.current?.contentWindow?.location.replace(src);
-    initialSrc.current = src;
-  }, [src]);
-  return <iframe ref={frame} title="原始 PDF" src={initialSrc.current} />;
+  return <iframe title="原始 PDF" src={src} />;
+}
+
+function pdfViewerUrl(url: string, page: number): string {
+  return `${url.split("#", 1)[0]}#page=${Math.max(1, page)}&zoom=page-width&navpanes=0`;
 }
 type ConversationSummary = { id: string; paperId: string; title: string; status: "active" | "archived";
   snapshotIntegrity: "frozen" | "legacy"; continuedFromConversationId: string | null; updatedAt: string };
@@ -2674,6 +2671,13 @@ function PaperWorkspace(props: {
       anchor: mode === "reading" ? route.anchor : null });
   const panelKind = route.mode === "knowledge" ? "knowledge"
     : route.mode === "discussion" && !route.pdfOpen ? "discussion" : "source";
+  const pdfVersionId = props.conversation?.contextSnapshot?.paperVersionId ?? workspace.paper.versionId;
+  const defaultPdfUrl = pdfVersionId === workspace.paper.versionId && workspace.pdf
+    ? workspace.pdf.url
+    : `/api/paper-versions/${encodeURIComponent(pdfVersionId)}/pdf`;
+  const openedPdfUrl = props.openedPdfSource?.anchor === route.anchor && props.openedPdfSource.page === route.page
+    ? props.openedPdfSource.href : defaultPdfUrl;
+  const pdfSrc = pdfViewerUrl(openedPdfUrl, route.page);
   const sourceHref = route.conversationId
     ? paperHref(workspace.paper.id, { mode: "discussion", conversationId: route.conversationId,
       pdfOpen: true, page: route.page, anchor: route.anchor })
@@ -2956,9 +2960,9 @@ function PaperWorkspace(props: {
                 { mode: "discussion", conversationId: takeaway.source.conversationId, pdfOpen: false, page: 1, anchor: null })); }}>查看来源 Conversation →</a></article>)}</div></div>
     </section>}
     {panelKind === "source" && <aside className="pdf-pane workbench-source">
-        <PdfFrame src={props.openedPdfSource?.anchor === route.anchor && props.openedPdfSource.page === route.page
-          ? props.openedPdfSource.href
-          : `/api/paper-versions/${encodeURIComponent(props.conversation?.contextSnapshot?.paperVersionId ?? workspace.paper.versionId)}/pdf#page=${route.page}&zoom=page-width&navpanes=0`} /></aside>}
+        <div className="pdf-toolbar"><span>PDF · p. {route.page}</span>
+          <a href={pdfSrc} target="_blank" rel="noreferrer">新窗口打开原文</a></div>
+        <PdfFrame key={pdfSrc} src={pdfSrc} /></aside>}
         </div>
       </section>
     </div>

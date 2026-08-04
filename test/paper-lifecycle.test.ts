@@ -83,7 +83,7 @@ describe("paper ingestion lifecycle", () => {
     expect(workspace.statusCode).toBe(200);
     expect(workspace.json()).toMatchObject({
       paper: { title: "Fixture Paper", version: 2 },
-      pdf: { pageCount: 2 },
+      pdf: { pageCount: 2, url: expect.stringMatching(/^\/api\/artifacts\/[0-9a-f]{64}\/pdf$/) },
       summary: {
         status: "active",
         readStatus: "read",
@@ -92,10 +92,88 @@ describe("paper ingestion lifecycle", () => {
     });
     expect(workspace.json().summary.markdownPath).toMatch(/library\/papers\/fixture-paper\/summary-v2-r1\.md$/);
 
-    const pdf = await app.inject({ method: "GET", url: `/api/paper-versions/${workspace.json().paper.versionId}/pdf` });
+    const versionPdf = await app.inject({ method: "GET", url: `/api/paper-versions/${workspace.json().paper.versionId}/pdf` });
+    expect(versionPdf.statusCode).toBe(307);
+    expect(versionPdf.headers.location).toBe(workspace.json().pdf.url);
+    expect(versionPdf.headers["cache-control"]).toBe("private, no-cache");
+
+    const pdf = await app.inject({ method: "GET", url: workspace.json().pdf.url });
     expect(pdf.statusCode).toBe(200);
     expect(pdf.headers["content-type"]).toBe("application/pdf");
+    expect(pdf.headers.etag).toMatch(/^"[0-9a-f]{64}"$/);
+    expect(pdf.headers["cache-control"]).toBe("private, max-age=31536000, immutable");
+    expect(pdf.headers["accept-ranges"]).toBe("bytes");
     expect(pdf.rawPayload.subarray(0, 4).toString()).toBe("%PDF");
+
+    const range = await app.inject({ method: "GET", url: workspace.json().pdf.url,
+      headers: { range: "bytes=0-3" } });
+    expect(range.statusCode).toBe(206);
+    expect(range.headers["content-range"]).toBe(`bytes 0-3/${pdf.rawPayload.byteLength}`);
+    expect(range.headers["content-length"]).toBe("4");
+    expect(range.rawPayload.toString()).toBe("%PDF");
+
+    const head = await app.inject({ method: "HEAD", url: workspace.json().pdf.url });
+    expect(head.statusCode).toBe(200);
+    expect(head.headers["content-length"]).toBe(String(pdf.rawPayload.byteLength));
+    expect(head.headers.etag).toBe(pdf.headers.etag);
+    expect(head.rawPayload.byteLength).toBe(0);
+
+    const notModified = await app.inject({ method: "GET", url: workspace.json().pdf.url,
+      headers: { "if-none-match": String(pdf.headers.etag) } });
+    expect(notModified.statusCode).toBe(304);
+    expect(notModified.headers.etag).toBe(pdf.headers.etag);
+    expect(notModified.rawPayload.byteLength).toBe(0);
+    const weakNotModified = await app.inject({ method: "GET", url: workspace.json().pdf.url,
+      headers: { "if-none-match": `"other", W/${String(pdf.headers.etag)}` } });
+    expect(weakNotModified.statusCode).toBe(304);
+
+    const staleIfRange = await app.inject({ method: "GET", url: workspace.json().pdf.url,
+      headers: { range: "bytes=0-3", "if-range": '"stale"' } });
+    expect(staleIfRange.statusCode).toBe(200);
+    expect(staleIfRange.rawPayload.byteLength).toBe(pdf.rawPayload.byteLength);
+    const validIfRange = await app.inject({ method: "GET", url: workspace.json().pdf.url,
+      headers: { range: "bytes=-4", "if-range": String(pdf.headers.etag) } });
+    expect(validIfRange.statusCode).toBe(206);
+    expect(validIfRange.headers["content-range"]).toBe(
+      `bytes ${pdf.rawPayload.byteLength - 4}-${pdf.rawPayload.byteLength - 1}/${pdf.rawPayload.byteLength}`);
+
+    const unsatisfiable = await app.inject({ method: "GET", url: workspace.json().pdf.url,
+      headers: { range: `bytes=${pdf.rawPayload.byteLength}-` } });
+    expect(unsatisfiable.statusCode).toBe(416);
+    expect(unsatisfiable.headers["content-range"]).toBe(`bytes */${pdf.rawPayload.byteLength}`);
+
+    const multiRange = await app.inject({ method: "GET", url: workspace.json().pdf.url,
+      headers: { range: "bytes=0-1,4-5" } });
+    expect(multiRange.statusCode).toBe(200);
+    expect(multiRange.headers["content-range"]).toBeUndefined();
+    expect(multiRange.rawPayload.byteLength).toBe(pdf.rawPayload.byteLength);
+
+    const integrityDatabase = new Database(storageLayout.databasePath);
+    const artifact = integrityDatabase.prepare(`SELECT storage_ref FROM artifacts
+      WHERE artifact_type='paper-pdf' AND content_hash=?`).get(String(pdf.headers.etag).slice(1, -1)) as { storage_ref: string };
+    const artifactPath = join(storageLayout.root, artifact.storage_ref);
+    await chmod(artifactPath, 0o600);
+    await writeFile(artifactPath, Buffer.alloc(pdf.rawPayload.byteLength, 0x78));
+    const corruptPdf = await app.inject({ method: "GET", url: workspace.json().pdf.url });
+    expect(corruptPdf.statusCode).toBe(404);
+    expect((integrityDatabase.prepare("SELECT integrity_status FROM artifacts WHERE content_hash=?")
+      .get(String(pdf.headers.etag).slice(1, -1)) as { integrity_status: string }).integrity_status).toBe("corrupt");
+    await writeFile(artifactPath, pdf.rawPayload);
+    await chmod(artifactPath, 0o400);
+    const recoveredPdf = await app.inject({ method: "GET", url: workspace.json().pdf.url });
+    expect(recoveredPdf.statusCode).toBe(200);
+    expect((integrityDatabase.prepare("SELECT integrity_status FROM artifacts WHERE content_hash=?")
+      .get(String(pdf.headers.etag).slice(1, -1)) as { integrity_status: string }).integrity_status).toBe("verified");
+    await chmod(artifactPath, 0o600);
+    await writeFile(artifactPath, pdf.rawPayload.subarray(0, pdf.rawPayload.byteLength - 1));
+    const truncatedPdf = await app.inject({ method: "GET", url: workspace.json().pdf.url });
+    expect(truncatedPdf.statusCode).toBe(404);
+    expect((integrityDatabase.prepare("SELECT integrity_status FROM artifacts WHERE content_hash=?")
+      .get(String(pdf.headers.etag).slice(1, -1)) as { integrity_status: string }).integrity_status).toBe("corrupt");
+    await writeFile(artifactPath, pdf.rawPayload);
+    await chmod(artifactPath, 0o400);
+    expect((await app.inject({ method: "GET", url: workspace.json().pdf.url })).statusCode).toBe(200);
+    integrityDatabase.close();
 
     await app.close();
   });

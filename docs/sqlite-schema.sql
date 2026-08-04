@@ -46,6 +46,12 @@ CREATE TABLE artifact_parents (
     CHECK (artifact_id <> parent_artifact_id)
 ) STRICT;
 
+CREATE TABLE artifact_integrity_verifications (
+    artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+    stat_fingerprint TEXT NOT NULL,
+    verified_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE papers (
     id TEXT PRIMARY KEY,
     title TEXT,
@@ -754,6 +760,16 @@ CREATE TABLE proposals (
 CREATE UNIQUE INDEX uq_pending_proposal_fingerprint
     ON proposals(fingerprint)
     WHERE state = 'pending';
+
+CREATE TABLE source_open_events (
+    id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL REFERENCES proposals(id),
+    source_handle TEXT NOT NULL,
+    opened_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX source_open_events_proposal_source
+    ON source_open_events(proposal_id, source_handle, opened_at);
 
 CREATE TABLE takeaway_distillation_manifests (
     id TEXT PRIMARY KEY,

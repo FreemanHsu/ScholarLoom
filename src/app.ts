@@ -31,6 +31,7 @@ import {
   PaperOrganizationAutomation,
   PaperOrganizationAutoAcceptCoordinator,
 } from "./storage/paper-organization-automation.js";
+import { sendPdfArtifact } from "./pdf-http-response.js";
 
 export type ResolvedPaper = {
   arxivId: string;
@@ -1123,11 +1124,18 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     return { ...(workspace as object), updateProposal };
   });
 
-  app.get<{ Params: { id: string }; Querystring: { openToken?: string } }>("/api/paper-versions/:id/pdf", async (request, reply) => {
-    const pdf = store.getPdf(request.params.id);
+  app.get<{ Params: { id: string } }>("/api/paper-versions/:id/pdf", async (request, reply) => {
+    const pdf = await store.getPdfArtifactForVersion(request.params.id);
     if (!pdf) return reply.code(404).send({ code: "pdf-not-found" });
-    if (request.query.openToken) store.consumeSourceOpenToken(request.params.id, request.query.openToken);
-    return reply.type("application/pdf").send(Buffer.from(pdf));
+    return reply.code(307).header("location", `/api/artifacts/${pdf.contentHash}/pdf`)
+      .header("cache-control", "private, no-cache").send();
+  });
+
+  app.get<{ Params: { hash: string } }>("/api/artifacts/:hash/pdf", async (request, reply) => {
+    if (!/^[0-9a-f]{64}$/.test(request.params.hash)) return reply.code(404).send({ code: "pdf-not-found" });
+    const pdf = await store.getPdfArtifact(request.params.hash);
+    if (!pdf) return reply.code(404).send({ code: "pdf-not-found" });
+    return sendPdfArtifact(request, reply, pdf);
   });
 
   app.post<{ Params: { id: string }; Body: { continuedFromConversationId?: unknown } }>("/api/papers/:id/conversations", async (request, reply) => {

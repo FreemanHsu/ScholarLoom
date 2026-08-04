@@ -49,7 +49,7 @@ module with a small interface, not a separately deployed service.
 | Validation | Zod | Shared request, event, and Codex structured-output contracts |
 | Database | SQLite in WAL mode through `better-sqlite3` | Local durability, transactions, FTS5, no database daemon |
 | Migrations | Ordered raw SQL migrations | The reviewed SQL contract remains authoritative; no ORM schema shadow |
-| PDF | PDF.js for browser rendering and initial page/text extraction | One PDF model; first slice supports page-level anchors |
+| PDF | PDF.js extraction plus a native Chromium viewer stopgap; embedded PDF.js is gated | Ship reliable page-level reading first without prematurely replacing native selection, search, print, and download |
 | Search | Separate curated and working SQLite FTS5 projections | Entry Agent cannot accidentally query Paper-working rows |
 | AI runtime | Installed Codex CLI through `codex exec` | Matches the product constraint and reuses local Codex authentication |
 | Progress | Server-Sent Events | One-way job and conversation progress without WebSocket complexity |
@@ -480,7 +480,8 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | POST | `/api/papers/:id/repositories/:associationId/confirm` | Confirm a detected candidate and start materialization |
 | POST | `/api/papers/:id/repositories/:associationId/retry` | Create a new durable materialization attempt |
 | POST | `/api/papers/:id/repositories/:associationId/remove` | Reject and hide the current association while preserving history |
-| GET | `/api/paper-versions/:id/pdf` | Stream the accepted PDF asset |
+| GET/HEAD | `/api/paper-versions/:id/pdf` | Resolve a Paper Version to its canonical PDF Artifact URL |
+| GET/HEAD | `/api/artifacts/:sha256/pdf` | Stream immutable PDF bytes with ETag, single-range, and private HTTP cache semantics |
 | GET/POST | `/api/papers/:id/conversations` | List or start frozen Conversations |
 | GET | `/api/conversations/:id` | Restore Messages, attempts, citations, and context |
 | POST | `/api/conversations/:id/messages` | Persist a Message/attempt and return `202` |
@@ -493,6 +494,7 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | GET | `/api/papers/:id/knowledge` | Read pending Proposals and confirmed Takeaways |
 | GET | `/api/proposals` | List reviewable suggestions |
 | POST | `/api/proposals/:id/decisions` | Accept, edit, or reject |
+| POST | `/api/proposals/:id/open-source` | Record the user's source-open click and return a canonical PDF Artifact URL |
 | POST | `/api/entry-agent/questions` | Query global-curated knowledge |
 | POST | `/api/entry-agent/sources/:type/:id/open` | Record an Entry result source-open event |
 | GET | `/api/metrics/takeaway-distillation` | Read Selection, review, duplicate, coverage, retry, and source-open metrics |
@@ -504,6 +506,27 @@ Commands accept an `Idempotency-Key`. Errors use stable problem codes such as
 The generic durable SSE route is transport only: clients refetch the Conversation
 read model after an event or reconnect. Startup recovery completes before the server
 listens and marks dead paper-chat runs interrupted without silently dispatching them.
+
+PDF byte identity is the immutable source Artifact SHA-256. The Paper Version route
+returns a revalidated redirect and never claims long-lived immutability; only the
+hash-addressed Artifact route sends `private, max-age=31536000, immutable`. It streams
+from the external data root, supports `HEAD`, one byte range, strong ETag validation,
+`If-Range`, `206`, `304`, and `416`, and deliberately ignores malformed or multipart
+Range requests by serving the complete representation. Proposal `source-open` is a
+click event recorded by the POST use case; telemetry tokens are not part of PDF URLs
+or cache keys.
+
+ArtifactStore validates SHA-256 before recording a durable filesystem-stat fingerprint
+in SQLite. Unchanged immutable files reuse that verification across process restarts;
+metadata changes trigger a full rehash. A mismatch marks only that Artifact corrupt,
+and restoring the authoritative bytes allows the same Artifact to reverify and recover.
+
+The Core PDF reader deliberately keeps the native Chromium viewer as a reversible
+stopgap. A page change remounts the iframe and every entry requests `page-width`;
+the UI also exposes an explicit new-window fallback. An embedded PDF.js viewer is a
+gated enhancement, not current architecture: adopt it only if real Chromium journeys
+show fit-width/remount remains unreliable, or region-level Evidence highlighting
+becomes a committed requirement without regressing selection, search, print, or download.
 
 New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
 compatibility input. Direct PDF acquisition validates DNS and every redirect before

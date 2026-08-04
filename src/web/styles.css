@@ -121,7 +121,9 @@
 .workbench-source .pdf-toolbar{height:48px;border-bottom:1px solid #d2d4ce;background:#f8f7f1;color:#36463b}
 .workbench-source .pdf-toolbar button{border-color:transparent;background:transparent;color:#36463b}
 .workbench-source .pdf-toolbar button:hover{border-color:#cbd0c8;background:#eef1e9}
-.workbench-source iframe{width:100%;height:100%;background:#dedfdc}
+.workbench-source .pdf-toolbar a{color:#315f45;font-weight:600;text-decoration:none}
+.workbench-source .pdf-toolbar a:hover{text-decoration:underline}
+.workbench-source iframe{width:100%;height:auto;min-height:0;background:#dedfdc}
 .workspace-panel-body>.discussion-layout{height:100%;grid-template-columns:180px minmax(0,1fr);background:#faf9f4}
 .workspace-panel-body .conversation-list{min-width:0;padding:18px 12px}
 .workspace-panel-body .conversation-list-heading{align-items:stretch;flex-direction:column;gap:12px}

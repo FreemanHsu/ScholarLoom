@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { PDFDocument, StandardFonts } from "pdf-lib";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
@@ -108,8 +109,9 @@ describe("direct PDF import", () => {
     const firstBytes = new TextEncoder().encode("%PDF-first");
     const secondBytes = new TextEncoder().encode("%PDF-second");
     let selected = firstBytes;
+    const layout = initializeDataRoot(join(await mkdtemp(join(tmpdir(), "scholarloom-direct-dedup-")), "data"));
     const app = await createApp({
-      storageLayout: initializeDataRoot(join(await mkdtemp(join(tmpdir(), "scholarloom-direct-dedup-")), "data")),
+      storageLayout: layout,
       paperSource: { async resolve(arxivId) { return { arxivId, latestVersion: 1, title: "unused", authors: ["unused"], year: 2025 }; } },
       directPdfSource: { async prepare(reference) { const hash = createHash("sha256").update(selected).digest("hex"); return {
         reference, sourceIdentity: reference.normalizedUrl, sourceType: "direct-pdf" as const, sourceVersion: `sha256:${hash}`,
@@ -132,6 +134,19 @@ describe("direct PDF import", () => {
     const proposal = proposals.find((item: { proposalType: string }) => item.proposalType === "paper-version-update");
     const opened = await app.inject({ method: "POST", url: `/api/proposals/${encodeURIComponent(proposal.id)}/open-source` });
     expect(opened.statusCode).toBe(201);
+    expect(opened.json().pdfUrl).toMatch(/^\/api\/artifacts\/[0-9a-f]{64}\/pdf#page=1$/);
+    const database = new Database(layout.databasePath);
+    expect((database.prepare("SELECT count(*) count FROM source_open_events WHERE proposal_id=?")
+      .get(proposal.id) as { count: number }).count).toBe(1);
+    expect((database.prepare("SELECT count(*) count FROM source_open_tokens WHERE proposal_id=?")
+      .get(proposal.id) as { count: number }).count).toBe(0);
+    database.close();
+    const reopened = await app.inject({ method: "POST", url: `/api/proposals/${encodeURIComponent(proposal.id)}/open-source` });
+    expect(reopened.json().pdfUrl).toBe(opened.json().pdfUrl);
+    const reopenedDatabase = new Database(layout.databasePath);
+    expect((reopenedDatabase.prepare("SELECT count(*) count FROM source_open_events WHERE proposal_id=?")
+      .get(proposal.id) as { count: number }).count).toBe(2);
+    reopenedDatabase.close();
     const candidatePdf = await app.inject({ method: "GET", url: opened.json().pdfUrl });
     expect(candidatePdf.statusCode).toBe(200);
     expect(candidatePdf.rawPayload.subarray(0, 5).toString()).toBe("%PDF-");
