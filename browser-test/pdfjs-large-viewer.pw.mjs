@@ -57,12 +57,15 @@ test("large PDF records first-render, transport, CPU, and heap gates", async ({ 
   const fullResponseCompletedBeforeRenderObservation = resources.some((resource) =>
     resource.decodedBodySize >= pdfByteSize && resource.responseEnd <= renderObservedAt);
 
-  expect(firstRenderMs).toBeLessThan(5_000);
+  expect(firstRenderMs).toBeLessThanOrEqual(1_500);
   expect(pdfRequests.length).toBeLessThanOrEqual(4);
-  expect(pdfResponses.some((response) => response.status === 200 || response.status === 206)).toBe(true);
+  expect(pdfRequests.some((request) => request.range)).toBe(true);
+  expect(pdfResponses.some((response) => response.status === 200)).toBe(true);
+  expect(pdfResponses.some((response) => response.status === 206 &&
+    /^bytes \d+-\d+\/\d+$/.test(response.contentRange ?? ""))).toBe(true);
   expect(fullResponseCompletedBeforeRenderObservation).toBe(true);
-  expect(jsHeapDeltaBytes).toBeLessThan(128 * 1024 * 1024);
-  expect(taskDurationSeconds).toBeLessThan(3);
+  expect(jsHeapDeltaBytes).toBeLessThan(64 * 1024 * 1024);
+  expect(taskDurationSeconds).toBeLessThan(1);
   const metrics = {
     pdfByteSize,
     firstRenderMs,

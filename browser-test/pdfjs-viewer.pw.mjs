@@ -82,7 +82,7 @@ test("Evidence navigation reuses one PDF.js document without exposing the previo
   expect(pdfRequestCount).toBe(initialPdfRequestCount);
   const sortedDurations = [...renderDurationsMs].sort((left, right) => left - right);
   const p95RenderMs = sortedDurations[Math.ceil(sortedDurations.length * .95) - 1];
-  expect(p95RenderMs).toBeLessThan(500);
+  expect(p95RenderMs).toBeLessThanOrEqual(250);
   const afterMetrics = await cdp.send("Performance.getMetrics");
   const metric = (metrics, name) => metrics.metrics.find((item) => item.name === name)?.value ?? null;
   await writeFile(testInfo.outputPath("pdfjs-evidence-metrics.json"), `${JSON.stringify({
