@@ -122,6 +122,19 @@ SCHOLARLOOM_PDF_VIEWER=pdfjs npm start
 `npm run test:browser:pdfjs:large`；后者使用独立的 12 MiB、可重建 fixture，不读取
 生产 PDF。
 
+可选的 lossless delivery pipeline 使用 qpdf 把大于等于 1 MiB、尚未 linearized 的
+原文生成到 `derived/pdf-delivery`。先安装 qpdf，再显式启用：
+
+```bash
+brew install qpdf
+SCHOLARLOOM_PDF_OPTIMIZATION=lossless-linearization npm start
+```
+
+原始 PDF 始终保留在 `originals/` 且不被修改；工具缺失、输出校验失败、页数变化或
+体积膨胀超过 2% 时继续交付 original。默认 snapshot 不包含优化版，恢复后会从
+original 自动重建。该开关与 `SCHOLARLOOM_PDF_VIEWER` 相互独立。
+真实 throttled browser journey 可用 `npm run test:browser:pdfjs:linearized` 运行。
+
 应用只监听 `127.0.0.1:3000`。本地 fixture 旅程不访问 arXiv 或 Codex，仍使用真实
 SQLite、filesystem、PDF.js 和 Git：
 

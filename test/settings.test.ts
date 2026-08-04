@@ -24,6 +24,7 @@ describe("read-only Settings", () => {
         fixture: false,
         takeawayQualityReleased: false,
         pdfViewerEngine: "pdfjs",
+        pdfOptimization: "lossless-linearization",
         pdfNetwork: {
           strategy: "direct-first-proxy-fallback",
           proxyConfigured: true,
@@ -66,7 +67,7 @@ describe("read-only Settings", () => {
           },
           checkedAt: "2026-07-30T08:00:00.000Z",
         },
-        featureFlags: { takeawayQualityV2: false, pdfJsViewer: true },
+        featureFlags: { takeawayQualityV2: false, pdfJsViewer: true, pdfLosslessDelivery: true },
         latestAgentActivity: null,
       },
       agents: [

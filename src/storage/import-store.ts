@@ -50,6 +50,7 @@ import {
   type PaperResolverMode,
 } from "./paper-resolver.js";
 import { TopicKnowledgeStore } from "./topic-knowledge-store.js";
+import { PdfDeliveryOptimizer, type PdfLinearizationTool } from "./pdf-delivery-optimizer.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -162,12 +163,14 @@ export class ImportStore {
   readonly #paperResolver: PaperResolver;
   readonly #topicKnowledge: TopicKnowledgeStore;
   readonly #agentExecutionMetadata: AgentExecutionMetadataProvider | undefined;
+  readonly #pdfDeliveryOptimizer: PdfDeliveryOptimizer | null;
   readonly #verifiedPdfFiles = new Map<string, string>();
 
   static open(layout: StorageLayout,
     failurePoint: "reserved" | "staged" | "renamed" | "metadata-committed" | "indexed" | null = null,
     now?: () => Date, repositoryRuntime?: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void;
-      agentExecutionMetadata?: AgentExecutionMetadataProvider }): ImportStore {
+      agentExecutionMetadata?: AgentExecutionMetadataProvider;
+      pdfOptimization?: { strategy: "lossless-linearization"; tool?: PdfLinearizationTool } }): ImportStore {
     return new ImportStore(layout, failurePoint, now, repositoryRuntime);
   }
 
@@ -175,7 +178,8 @@ export class ImportStore {
     failurePoint: "reserved" | "staged" | "renamed" | "metadata-committed" | "indexed" | null = null,
     now: () => Date = () => new Date(),
     repositoryRuntime: { adapter?: RepositoryAdapter; schedule(task: Promise<void>): void;
-      agentExecutionMetadata?: AgentExecutionMetadataProvider } = { schedule() {} }) {
+      agentExecutionMetadata?: AgentExecutionMetadataProvider;
+      pdfOptimization?: { strategy: "lossless-linearization"; tool?: PdfLinearizationTool } } = { schedule() {} }) {
     this.#layout = layout;
     this.#artifactRoot = layout.root;
     this.#knowledgeRoot = layout.vaultRoot;
@@ -187,6 +191,9 @@ export class ImportStore {
     this.#database.pragma("journal_mode = WAL");
     this.#database.pragma("busy_timeout = 5000");
     migrate(this.#database);
+    this.#pdfDeliveryOptimizer = repositoryRuntime.pdfOptimization
+      ? new PdfDeliveryOptimizer(layout, this.#database, repositoryRuntime.pdfOptimization.tool, this.#now)
+      : null;
     this.#contextSnapshots = new ContextSnapshotBuilder(this.#database, this.#now, layout.repositoryRoot);
     this.#conversations = new ConversationStore(this.#database, this.#now);
     this.#repositoryAssociations = new RepositoryAssociations(this.#database, {
@@ -224,6 +231,7 @@ export class ImportStore {
     const archiveBefore = new Date(this.#now().getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
     this.#database.prepare(`UPDATE proposals SET review_status='archived',archived_at=?
       WHERE proposal_type='reconciliation' AND review_status='pending' AND created_at < ?`).run(this.#now().toISOString(), archiveBefore);
+    if (this.#pdfDeliveryOptimizer) repositoryRuntime.schedule(this.#pdfDeliveryOptimizer.rebuildAll());
   }
 
   async ingestPaper(input: {
@@ -254,6 +262,7 @@ export class ImportStore {
     this.#rememberVerifiedPdf(artifactId, absolutePdf, hash, bytes);
     this.#database.prepare("UPDATE paper_versions SET pdf_artifact_id=?,processing_status='processing',updated_at=? WHERE id=?")
       .run(artifactId, now, versionId);
+    await this.#pdfDeliveryOptimizer?.prepare({ id: artifactId, contentHash: hash, storageRef, byteSize: bytes.byteLength });
 
     const extractionId = `extraction:${versionId}:pdfjs`;
     const completedExtraction = this.#database.prepare(`SELECT output_artifact_id,page_count FROM extraction_runs
@@ -552,15 +561,29 @@ export class ImportStore {
   }
 
   async getPdfArtifactForVersion(versionId: string): Promise<PdfArtifactDescriptor | null> {
-    const row = this.#database.prepare(`SELECT a.id,a.content_hash,a.storage_ref,a.byte_size,a.integrity_status
-      FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id
-      WHERE v.id=? AND a.artifact_type='paper-pdf'`).get(versionId) as PdfArtifactRow | undefined;
-    return this.#openPdfArtifact(row);
+    const rows = this.#database.prepare(`SELECT candidate.id,candidate.content_hash,candidate.storage_ref,
+        candidate.byte_size,candidate.integrity_status,priority
+      FROM paper_versions v
+      JOIN artifacts source ON source.id=v.pdf_artifact_id AND source.artifact_type='paper-pdf'
+      JOIN (
+        SELECT a.id,a.content_hash,a.storage_ref,a.byte_size,a.integrity_status,o.source_artifact_id,0 priority
+        FROM pdf_delivery_optimizations o JOIN artifacts a ON a.id=o.output_artifact_id
+        WHERE o.status='selected' AND a.artifact_type='paper-pdf-delivery'
+        UNION ALL
+        SELECT a.id,a.content_hash,a.storage_ref,a.byte_size,a.integrity_status,a.id source_artifact_id,1 priority
+        FROM artifacts a WHERE a.artifact_type='paper-pdf'
+      ) candidate ON candidate.source_artifact_id=source.id
+      WHERE v.id=? ORDER BY priority`).all(versionId) as PdfArtifactRow[];
+    for (const row of rows) {
+      const opened = await this.#openPdfArtifact(row);
+      if (opened) return opened;
+    }
+    return null;
   }
 
   async getPdfArtifact(contentHash: string): Promise<PdfArtifactDescriptor | null> {
     const row = this.#database.prepare(`SELECT id,content_hash,storage_ref,byte_size,integrity_status FROM artifacts
-      WHERE artifact_type='paper-pdf' AND content_hash=?`).get(contentHash) as PdfArtifactRow | undefined;
+      WHERE artifact_type IN ('paper-pdf','paper-pdf-delivery') AND content_hash=?`).get(contentHash) as PdfArtifactRow | undefined;
     return this.#openPdfArtifact(row);
   }
 
@@ -1475,17 +1498,26 @@ export class ImportStore {
   }
 
   #pdfArtifactIdentityForVersion(versionId: string): { contentHash: string } | null {
-    const row = this.#database.prepare(`SELECT a.content_hash,a.storage_ref,a.byte_size
-      FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id
-      WHERE v.id=? AND a.artifact_type='paper-pdf'`).get(versionId) as
-      { content_hash: string; storage_ref: string; byte_size: number } | undefined;
-    if (!row) return null;
-    try {
-      const stat = statSync(join(this.#artifactRoot, row.storage_ref));
-      return stat.isFile() && stat.size === row.byte_size ? { contentHash: row.content_hash } : null;
-    } catch {
-      return null;
+    const rows = this.#database.prepare(`SELECT candidate.content_hash,candidate.storage_ref,candidate.byte_size,priority
+      FROM paper_versions v
+      JOIN artifacts source ON source.id=v.pdf_artifact_id AND source.artifact_type='paper-pdf'
+      JOIN (
+        SELECT a.content_hash,a.storage_ref,a.byte_size,o.source_artifact_id,0 priority
+        FROM pdf_delivery_optimizations o JOIN artifacts a ON a.id=o.output_artifact_id
+        WHERE o.status='selected' AND a.artifact_type='paper-pdf-delivery'
+        UNION ALL
+        SELECT a.content_hash,a.storage_ref,a.byte_size,a.id source_artifact_id,1 priority
+        FROM artifacts a WHERE a.artifact_type='paper-pdf'
+      ) candidate ON candidate.source_artifact_id=source.id
+      WHERE v.id=? ORDER BY priority`).all(versionId) as
+      Array<{ content_hash: string; storage_ref: string; byte_size: number }>;
+    for (const row of rows) {
+      try {
+        const stat = statSync(join(this.#artifactRoot, row.storage_ref));
+        if (stat.isFile() && stat.size === row.byte_size) return { contentHash: row.content_hash };
+      } catch { /* A rebuildable delivery artifact may be absent; fall back to the original. */ }
     }
+    return null;
   }
 
   async #openPdfArtifact(row: PdfArtifactRow | undefined): Promise<PdfArtifactDescriptor | null> {

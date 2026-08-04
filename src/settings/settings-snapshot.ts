@@ -31,6 +31,7 @@ export type SettingsRuntime = {
   agentMessageTimeoutMs?: number;
   entryResolverMode?: PaperResolverMode;
   pdfViewerEngine?: "native" | "pdfjs";
+  pdfOptimization?: "off" | "lossless-linearization";
   pdfNetwork?: PdfNetworkSettings;
   now?: () => Date;
   codexRuntimeStatus(): CodexRuntimeStatus;
@@ -82,6 +83,7 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
       featureFlags: {
         takeawayQualityV2: runtime.takeawayQualityReleased,
         pdfJsViewer: runtime.pdfViewerEngine === "pdfjs",
+        pdfLosslessDelivery: runtime.pdfOptimization === "lossless-linearization",
       },
       codex: runtime.codexRuntimeStatus(),
       latestAgentActivity: latestAgentActivity ? {

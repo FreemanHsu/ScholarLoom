@@ -194,6 +194,14 @@ Every persisted, versionable material output has:
 - creation time;
 - retention policy and integrity state.
 
+A delivery-optimized PDF is a rebuildable `paper-pdf-delivery` Artifact derived from one
+immutable `paper-pdf` Artifact. `pdf_delivery_optimizations` records the lossless strategy,
+tool/version, canonical parameters, selection or fallback reason, byte/page metrics, and the
+optional output Artifact. It never changes the Paper Version's source PDF identity. Extraction
+and Evidence continue to resolve through the original; Paper reading may use the selected
+delivery Artifact whose content hash appears in its URL and ETag. Missing delivery bytes after
+a default snapshot restore are rebuilt from the original rather than treated as data loss.
+
 ```mermaid
 flowchart LR
     PDF["SourcePDF"] --> EX["Extraction Artifact"]

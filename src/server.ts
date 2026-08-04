@@ -24,6 +24,7 @@ import { MINIMUM_CODEX_VERSION } from "./agent/agent-configuration.js";
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
 const largePdfFixture = fixture && process.env.SCHOLARLOOM_FIXTURE_PDF === "large";
 const pdfViewerEngine = process.env.SCHOLARLOOM_PDF_VIEWER === "pdfjs" ? "pdfjs" : "native";
+const pdfOptimization = process.env.SCHOLARLOOM_PDF_OPTIMIZATION === "lossless-linearization";
 const takeawayQualityReleased = process.env.SCHOLARLOOM_TAKEAWAY_V2_RELEASED === "1";
 const entryResolverMode = ["off", "shadow", "enabled"].includes(
   process.env.SCHOLARLOOM_ENTRY_RESOLVER_MODE ?? "enabled",
@@ -127,8 +128,10 @@ try {
   const productionCodex = fixture ? null : new CodexCliRunner({ runtimeRoot: layout.tmpRoot, storageLayout: layout });
   const app = await createApp({ paperSource, directPdfSource, storageLayout: layout,
     entryResolverMode,
+    ...(pdfOptimization ? { pdfOptimization: { strategy: "lossless-linearization" as const } } : {}),
     settingsRuntime: {
       host, port, startedAt, fixture, takeawayQualityReleased, pdfViewerEngine,
+      pdfOptimization: pdfOptimization ? "lossless-linearization" : "off",
       pdfNetwork: pdfProxy ? {
         strategy: "direct-first-proxy-fallback",
         proxyConfigured: true,

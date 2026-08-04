@@ -92,6 +92,13 @@ The independent large-PDF journey (`npm run test:browser:pdfjs:large`) uses a de
 The result verifies Range compatibility but also shows that this non-linearized PDF transfers
 all original bytes before first render. It does not demonstrate compression or byte savings.
 
+The lossless delivery journey (`npm run test:browser:pdfjs:linearized`) enabled qpdf 12.3.2
+and throttled Chrome to 2 MiB/s with 40 ms latency. qpdf produced 12,589,790 bytes from the
+12,588,462-byte original. Page 1 rendered in 1.41 seconds after a 64 KiB leading Range and a
+6.8 KiB tail Range, while the complete representation was still in progress. Isolated
+renderer checks produced identical image hashes for both A4 and Letter pages before and after
+linearization. This is a synthetic-fixture result; real-Paper corpus thresholds remain open.
+
 Decision: **go** for continued gated evaluation; **no-go** for the default reader. The
 canvas-only spike has no text selection, search, print UI, or document-content accessibility,
 and worker-inclusive resource use plus a representative real-Paper corpus remain unmeasured.

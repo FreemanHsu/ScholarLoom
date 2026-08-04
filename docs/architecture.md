@@ -570,8 +570,34 @@ of the following promotion gates must pass before changing the default:
 5. PDF.js plus worker remain lazy-loaded, their combined uncompressed build output stays below
    2 MiB, and any load/render failure reaches the correctly targeted native viewer.
 
-PDF.js does not compress original PDF bytes; derived PDF optimization remains a separate
-pipeline whose output may only enter rebuildable `derived/` or `cache/` storage.
+PDF.js does not compress original PDF bytes. The separate, opt-in
+`SCHOLARLOOM_PDF_OPTIMIZATION=lossless-linearization` pipeline uses the
+`PdfDeliveryOptimizer` seam and a production qpdf adapter. It evaluates only source PDFs of
+at least 1 MiB, skips already-linearized sources, and selects a candidate only after qpdf
+structure/linearization validation, PDF.js page-count parity, and a maximum 2% size-inflation
+gate. The Paper Workspace then exposes the selected content hash, so URL and ETag continue to
+identify the bytes actually delivered.
+
+The original `paper-pdf` Artifact remains read-only, irreplaceable, and authoritative for
+extraction and Evidence. A selected `paper-pdf-delivery` Artifact lives under content-addressed
+`derived/pdf-delivery`, has `rebuildable` retention, and records a `delivery-derived-from`
+parent. `pdf_delivery_optimizations` stores source/output IDs, relative storage metadata through
+the Artifact row, tool/version, canonical parameters, status/reason, byte sizes, page counts,
+and timing metrics; it stores no PDF blob. Tool absence, low benefit, invalid output, excessive
+inflation, or page-count drift records a bounded fallback and never fails Paper import.
+
+Startup backfill reuses a valid selected derived file without rerunning qpdf and rebuilds a
+missing file from its immutable original. This makes default snapshots (which exclude
+`derived/`) independently restorable. Image downsampling/lossy compression remains outside
+this accepted slice and requires a separate quality policy.
+
+On the deterministic 12 MiB fixture, qpdf 12.3.2 produced a 12,589,790-byte delivery file
+from the 12,588,462-byte original (about 0.011% growth). A headed Chrome/PDF.js journey at
+2 MiB/s and 40 ms latency rendered page 1 in 1.41 seconds after one 64 KiB leading Range and
+one 6.8 KiB tail Range; the complete representation had not finished at render time. The
+same renderer produced identical page-image hashes before and after linearization. This is
+evidence that the pipeline improves first-page delivery for the fixture, not a representative
+real-Paper corpus claim.
 
 New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
 compatibility input. Direct PDF acquisition validates DNS and every redirect before

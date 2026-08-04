@@ -32,6 +32,7 @@ import {
   PaperOrganizationAutoAcceptCoordinator,
 } from "./storage/paper-organization-automation.js";
 import { sendPdfArtifact } from "./pdf-http-response.js";
+import type { PdfLinearizationTool } from "./storage/pdf-delivery-optimizer.js";
 
 export type ResolvedPaper = {
   arxivId: string;
@@ -70,6 +71,7 @@ export type CreateAppOptions = {
   settingsRuntime?: SettingsRuntime;
   agentExecutionMetadata?: AgentExecutionMetadataProvider;
   entryResolverMode?: PaperResolverMode;
+  pdfOptimization?: { strategy: "lossless-linearization"; tool?: PdfLinearizationTool };
 };
 
 function classifyPaperResolutionError(error: unknown): { status: 404 | 503; code: string; detail: string } {
@@ -123,6 +125,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       void task.finally(() => backgroundTasks.delete(task));
     },
     ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}),
+    ...(options.pdfOptimization ? { pdfOptimization: options.pdfOptimization } : {}),
   });
   const distillationCoordinator = options.takeawaySelectionRunner ? new TakeawayDistillationCoordinator(options.storageLayout,
     options.takeawaySelectionRunner, { ...(options.agentMessageTimeoutMs !== undefined ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),

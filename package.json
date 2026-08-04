@@ -22,6 +22,7 @@
     "test:browser:pdf": "npm run build && playwright test --config playwright.pdf.config.mjs",
     "test:browser:pdfjs": "npm run build && playwright test --config playwright.pdfjs.config.mjs",
     "test:browser:pdfjs:large": "npm run build && playwright test --config playwright.pdfjs-large.config.mjs",
+    "test:browser:pdfjs:linearized": "npm run build && playwright test --config playwright.pdfjs-linearized.config.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
