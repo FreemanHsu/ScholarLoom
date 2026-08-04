@@ -12,6 +12,49 @@ describe("Paper Summary Markdown", () => {
     expect(html).toContain("基础 <strong>TTT layer</strong> 保持可微。");
   });
 
+  it("recovers a bold Agent label with whitespace before the closing marker", () => {
+    const html = renderToStaticMarkup(
+      <SummaryMarkdown markdown="**Agent 评价： **真正的新意更接近接口与训练范式的统一。" pageCount={13}
+        onOpenEvidence={() => undefined} />,
+    );
+
+    expect(html).toContain('class="summary-inference"');
+    expect(html).toContain("<small>Agent 推断</small>");
+    expect(html).toContain("<strong>Agent 评价：</strong>");
+    expect(html).not.toContain("**Agent 评价");
+  });
+
+  it("renders a valid Agent label when Chinese prose immediately follows the closing marker", () => {
+    const html = renderToStaticMarkup(
+      <SummaryMarkdown markdown="**Agent 评价：**这些缺项会显著影响严格复现。" pageCount={13}
+        onOpenEvidence={() => undefined} />,
+    );
+
+    expect(html).toContain('class="summary-inference"');
+    expect(html).toContain("<strong>Agent 评价：</strong> 这些缺项会显著影响严格复现。");
+    expect(html).not.toContain("**Agent 评价");
+  });
+
+  it("normalizes Agent labels whose punctuation sits outside the bold marker", () => {
+    const html = renderToStaticMarkup(
+      <SummaryMarkdown markdown="**Agent 评价**：这些数字需要进一步核验。" pageCount={13}
+        onOpenEvidence={() => undefined} />,
+    );
+
+    expect(html).toContain('class="summary-inference"');
+    expect(html).toContain("<strong>Agent 评价：</strong> 这些数字需要进一步核验。");
+  });
+
+  it("recognizes qualified Agent evaluation labels", () => {
+    const html = renderToStaticMarkup(
+      <SummaryMarkdown markdown="**Agent 评价——证据不足之处**：缺少方差和显著性检验。" pageCount={13}
+        onOpenEvidence={() => undefined} />,
+    );
+
+    expect(html).toContain('class="summary-inference"');
+    expect(html).toContain("<strong>Agent 评价——证据不足之处：</strong>");
+  });
+
   it("turns a valid PDF page marker into inline Evidence", () => {
     const html = renderToStaticMarkup(
       <SummaryMarkdown markdown="该更新对 outer loop 可微。[pdf-page:3]" pageCount={13} onOpenEvidence={() => undefined} />,

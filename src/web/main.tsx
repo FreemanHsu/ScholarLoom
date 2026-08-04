@@ -1,6 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
+import { ArrowSquareOutIcon } from "@phosphor-icons/react/dist/icons/ArrowSquareOut";
+import { ArrowLeftIcon } from "@phosphor-icons/react/dist/icons/ArrowLeft";
+import { CaretDoubleLeftIcon } from "@phosphor-icons/react/dist/icons/CaretDoubleLeft";
+import { CaretDoubleRightIcon } from "@phosphor-icons/react/dist/icons/CaretDoubleRight";
+import { DotsSixVerticalIcon } from "@phosphor-icons/react/dist/icons/DotsSixVertical";
+import { GithubLogoIcon } from "@phosphor-icons/react/dist/icons/GithubLogo";
+import { PencilSimpleIcon } from "@phosphor-icons/react/dist/icons/PencilSimple";
 import "@fontsource/dm-sans/400.css";
 import "@fontsource/dm-sans/500.css";
 import "@fontsource/dm-sans/600.css";
@@ -2635,6 +2642,11 @@ function PaperWorkspace(props: {
   const [showArchivedConversations, setShowArchivedConversations] = useState(false);
   const [organizationOpen, setOrganizationOpen] = useState(false);
   const [organizationStatus, setOrganizationStatus] = useState<string | null>(null);
+  const [outlineCollapsed, setOutlineCollapsed] = useState(true);
+  const [activeSummarySection, setActiveSummarySection] = useState(0);
+  const [summaryWidth, setSummaryWidth] = useState(50);
+  const workbenchRef = useRef<HTMLDivElement>(null);
+  const summaryPaneRef = useRef<HTMLElement>(null);
   const readyRepositories = workspace.repositories.filter((repository) => repository.materializationStatus === "ready").length;
   const hasRepositoryCandidates = workspace.repositories.some((repository) =>
     repository.associationStatus === "candidate");
@@ -2654,19 +2666,44 @@ function PaperWorkspace(props: {
     evidenceReceiptId: route.evidenceReceiptId,
     repositoriesOpen: open,
   });
-  const setPdf = (pdfOpen: boolean, page = route.page, anchor = route.anchor) => {
-    props.onNavigate(paperHref(workspace.paper.id, { mode: route.mode, conversationId: route.conversationId, pdfOpen, page, anchor }));
-  };
-  const pdfPageCount = route.mode === "discussion"
-    ? props.conversation?.contextSnapshot?.pageCount ?? 0
+  const pdfPageCount = route.conversationId
+    ? props.conversation?.contextSnapshot?.pageCount ?? workspace.pdf?.pageCount ?? 0
     : workspace.pdf?.pageCount ?? 0;
-  const changePdfPage = (offset: number) => {
-    const page = Math.min(pdfPageCount || route.page, Math.max(1, route.page + offset));
-    props.onNavigate(paperHref(workspace.paper.id, { mode: route.mode, conversationId: route.conversationId,
-      pdfOpen: true, page, anchor: null }), true);
-  };
   const modeHref = (mode: "reading" | "discussion" | "knowledge") => paperHref(workspace.paper.id,
-    { mode, conversationId: null, pdfOpen: false, page: 1, anchor: null });
+    { mode, conversationId: null, pdfOpen: mode === "reading", page: mode === "reading" ? route.page : 1,
+      anchor: mode === "reading" ? route.anchor : null });
+  const panelKind = route.mode === "knowledge" ? "knowledge"
+    : route.mode === "discussion" && !route.pdfOpen ? "discussion" : "source";
+  const sourceHref = route.conversationId
+    ? paperHref(workspace.paper.id, { mode: "discussion", conversationId: route.conversationId,
+      pdfOpen: true, page: route.page, anchor: route.anchor })
+    : paperHref(workspace.paper.id, { mode: "reading", conversationId: null,
+      pdfOpen: true, page: route.page, anchor: route.anchor });
+  const discussionHref = paperHref(workspace.paper.id, { mode: "discussion", conversationId: route.conversationId,
+    pdfOpen: false, page: 1, anchor: null });
+  const knowledgeHref = paperHref(workspace.paper.id, { mode: "knowledge", conversationId: null,
+    pdfOpen: false, page: 1, anchor: null });
+  const openSummaryEvidence = (page: number, anchor: string) => props.onNavigate(route.conversationId
+    ? paperHref(workspace.paper.id, { mode: "discussion", conversationId: route.conversationId,
+      pdfOpen: true, page, anchor })
+    : paperHref(workspace.paper.id, { mode: "reading", conversationId: null,
+      pdfOpen: true, page, anchor }));
+  const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    const workbench = workbenchRef.current;
+    if (!workbench) return;
+    event.preventDefault();
+    const bounds = workbench.getBoundingClientRect();
+    const move = (pointerEvent: PointerEvent) => {
+      const next = ((pointerEvent.clientX - bounds.left) / bounds.width) * 100;
+      setSummaryWidth(Math.min(62, Math.max(38, next)));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  };
   const running = props.conversation?.messages.some((message) => message.attempts.some((attempt) => attempt.state === "running")) ?? false;
   const discussionProposals = props.knowledge.pendingProposals.filter((proposal) =>
     proposal.source.conversationId === props.conversation?.conversation.id);
@@ -2677,21 +2714,23 @@ function PaperWorkspace(props: {
     ? (props.conversation.conversation.status === "archived") !== showArchivedConversations
     : false;
   return <main className="app workspace">
-    <header className="topbar"><a className="ghost" href={route.returnTo ?? "/papers"}
+    <header className="topbar"><a className="ghost back-link" href={route.returnTo ?? "/papers"}
       onClick={(event) => { event.preventDefault(); props.onNavigate(route.returnTo ?? "/papers"); }}>
-      ← {route.returnTo ? "整理建议" : "论文库"}</a>
-      <div className="workspace-paper-identity"><span className="eyebrow">PAPER WORKSPACE</span>
-        <h1 title={workspace.paper.title}>{workspace.paper.preferredAlias ?? workspace.paper.title}</h1>
-        {workspace.paper.preferredAlias && <p className="workspace-canonical-title">{workspace.paper.title}</p>}
-        <p className="paper-metadata" title={`${workspace.paper.authors.join(", ")} · ${workspace.paper.year}`}>
-          {workspace.paper.authors.join(", ")} · {workspace.paper.year}</p></div>
-      <div className="workspace-badges"><span className="version">{workspace.paper.sourceType === "arxiv" ? `arXiv v${workspace.paper.version}` : "公开 PDF"}</span>
-        <a className="source-link" href={workspace.paper.sourceUrl} target="_blank" rel="noopener noreferrer">打开来源</a>
+      <ArrowLeftIcon aria-hidden="true" size={16} weight="bold" />{route.returnTo ? "整理建议" : "论文库"}</a>
+      <div className="workspace-paper-identity">
+        <h1 title={workspace.paper.preferredAlias ? `${workspace.paper.preferredAlias} · ${workspace.paper.title}` : workspace.paper.title}>
+          {workspace.paper.preferredAlias ?? workspace.paper.title}</h1>
+        <p className="paper-metadata">{workspace.paper.year}</p></div>
+      <div className="workspace-badges"><a className="source-link source-action" href={workspace.paper.sourceUrl}
+        target="_blank" rel="noopener noreferrer">
+        {workspace.paper.sourceType === "arxiv" ? `arXiv v${workspace.paper.version}` : "公开 PDF"} · 打开来源
+        <ArrowSquareOutIcon aria-hidden="true" size={15} weight="bold" /></a>
         <button type="button" className="code-status repository-summary" onClick={() => setOrganizationOpen(true)}>
-          编辑别名与方向</button>
+          <PencilSimpleIcon aria-hidden="true" size={15} weight="bold" />编辑别名与方向</button>
         <button type="button" className="code-status repository-summary"
           aria-expanded={route.repositoriesOpen}
-          onClick={() => props.onNavigate(repositoryHref(!route.repositoriesOpen))}>{codeStatus}</button></div>
+          onClick={() => props.onNavigate(repositoryHref(!route.repositoriesOpen))}>
+          <GithubLogoIcon aria-hidden="true" size={16} weight="fill" />{codeStatus}</button></div>
     </header>
     {organizationOpen && <PaperOrganizationEditor paper={workspace.paper} directions={props.directions}
       onClose={() => setOrganizationOpen(false)} onChanged={props.onOrganizationChanged}
@@ -2706,12 +2745,81 @@ function PaperWorkspace(props: {
       onRemove={props.onRemoveRepository} />}
     {organizationStatus && <div className="inline-alert" role="status">{organizationStatus}</div>}
     {props.error && <div className="inline-alert">{props.error}</div>}
-    <nav className="workspace-modes" aria-label="Paper workspace mode">
-      {(["reading", "discussion", "knowledge"] as const).map((mode) => <a key={mode} href={modeHref(mode)}
-        aria-current={route.mode === mode ? "page" : undefined}
-        onClick={(event) => { event.preventDefault(); props.onNavigate(modeHref(mode)); }}>{mode === "reading" ? "Reading" : mode === "discussion" ? "Discussion" : "Knowledge"}</a>)}
-    </nav>
-    {route.mode === "discussion" && <div className="discussion-layout">
+    <div className="paper-workbench" ref={workbenchRef}
+      style={{ gridTemplateColumns: `${summaryWidth}% 10px minmax(0, ${100 - summaryWidth}%)` }}>
+      <section className={`summary-workbench ${outlineCollapsed ? "outline-collapsed" : "outline-expanded"}`}>
+        <aside className="summary-outline">
+          <button type="button" className="outline-toggle" aria-label={outlineCollapsed ? "展开 Summary 目录" : "收拢 Summary 目录"}
+            aria-expanded={!outlineCollapsed} onClick={() => setOutlineCollapsed((current) => !current)}>
+            {outlineCollapsed ? <CaretDoubleRightIcon aria-hidden="true" size={18} weight="bold" />
+              : <CaretDoubleLeftIcon aria-hidden="true" size={18} weight="bold" />}
+          </button>
+          <nav aria-label="Summary 目录">
+            {workspace.summary?.sections.map((section, index) => <a key={section.key}
+              className={activeSummarySection === index ? "active" : undefined}
+              href={`#summary-section-${index + 1}`}
+              aria-current={activeSummarySection === index ? "location" : undefined}
+              title={outlineCollapsed ? section.title : undefined}
+              onClick={(event) => {
+                event.preventDefault();
+                setActiveSummarySection(index);
+                const pane = summaryPaneRef.current;
+                const target = pane?.querySelector<HTMLElement>(`#summary-section-${index + 1}`);
+                if (pane && target) pane.scrollTo({
+                  top: Math.max(0, target.offsetTop - pane.offsetTop - 18), behavior: "smooth",
+                });
+              }}>
+              <span>{String(index + 1).padStart(2, "0")}</span>{!outlineCollapsed && <b>{section.title}</b>}
+            </a>)}
+          </nav>
+        </aside>
+        <article className="summary-pane" ref={summaryPaneRef} onScroll={(event) => {
+          const sections = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("[data-summary-section]"));
+          const threshold = event.currentTarget.scrollTop + 120;
+          const next = sections.reduce((selected, section, index) =>
+            section.offsetTop - event.currentTarget.offsetTop <= threshold ? index : selected, 0);
+          setActiveSummarySection(next);
+        }}>
+          <div className="pane-title"><div><span className="status">{workspace.summary ? "Summary Ready"
+            : workspace.processing?.state === "cancelled" ? "Import Cancelled"
+              : isRetryableImportJobState(workspace.processing?.state) ? "Import Failed" : "Processing"}</span>
+            <h2>技术精读</h2></div></div>
+          {!workspace.summary && <section className="import-state"><span className="section-no">IMPORT STATUS</span>
+            <h3>{workspace.processing?.state === "cancelled" ? "论文处理已取消" : isRetryableImportJobState(workspace.processing?.state) ? "论文处理未完成" : "正在生成 Paper Summary"}</h3>
+            {workspace.processing && <p>{workspace.processing.state} · {Math.round(workspace.processing.progress * 100)}% · attempt {workspace.processing.attempt}</p>}
+            {workspace.processing?.error && <><p>{workspace.processing.error.stage} · {workspace.processing.error.code}</p><p>{workspace.processing.error.message}</p></>}
+            {isRetryableImportJobState(workspace.processing?.state) && <button disabled={props.busy} onClick={() => void props.onRetry()}>
+              {props.busy ? `重试中 · ${props.progress ?? "queued"}` : workspace.processing?.error?.action === "repair-data-root-permissions" ? "修复存储权限后重试" : "重试 Paper Summary 流程"}</button>}
+          </section>}
+          {workspace.summary?.sections.map((section, index) => <section key={section.key}
+            id={`summary-section-${index + 1}`} data-summary-section><span className="section-no">{String(index + 1).padStart(2, "0")}</span>
+            <h3>{section.title}</h3><SummaryMarkdown markdown={section.body} pageCount={workspace.pdf?.pageCount ?? 0}
+              onOpenEvidence={(page) => openSummaryEvidence(page, `page:${page}`)} /></section>)}
+          {workspace.summary && <section className="summary-claims-section"><span className="section-no">KEY CLAIMS</span><h3>关键结论与证据</h3>
+            {workspace.summary.claims.map((claim) => <button className={`claim ${route.anchor === claim.evidence.id ? "selected" : ""}`} key={claim.claim}
+              onClick={() => openSummaryEvidence(claim.evidence.page, claim.evidence.id ?? `page:${claim.evidence.page}`)}>
+              <span>{claim.claim}</span><small>p. {claim.evidence.page} · {claim.evidence.verified ? "原文已核验" : "仅定位"}</small></button>)}</section>}
+        </article>
+      </section>
+      <div className="workbench-divider" role="separator" aria-label="调整 Summary 与工作区宽度" aria-orientation="vertical"
+        aria-valuemin={38} aria-valuemax={62} aria-valuenow={Math.round(summaryWidth)} tabIndex={0}
+        onPointerDown={startResize} onKeyDown={(event) => {
+          if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+            event.preventDefault();
+            setSummaryWidth((current) => Math.min(62, Math.max(38, current + (event.key === "ArrowLeft" ? -2 : 2))));
+          }
+        }}><DotsSixVerticalIcon aria-hidden="true" size={17} weight="bold" /></div>
+      <section className="workspace-side">
+        <nav className="workspace-tabs" aria-label="Paper 工作区">
+          <a href={sourceHref} aria-current={panelKind === "source" ? "page" : undefined}
+            onClick={(event) => { event.preventDefault(); props.onNavigate(sourceHref); }}>原文</a>
+          <a href={discussionHref} aria-current={panelKind === "discussion" ? "page" : undefined}
+            onClick={(event) => { event.preventDefault(); props.onNavigate(discussionHref); }}>讨论</a>
+          <a href={knowledgeHref} aria-current={panelKind === "knowledge" ? "page" : undefined}
+            onClick={(event) => { event.preventDefault(); props.onNavigate(knowledgeHref); }}>Knowledge</a>
+        </nav>
+        <div className="workspace-panel-body">
+    {panelKind === "discussion" && <div className="discussion-layout">
       <aside className="conversation-list"><div className="conversation-list-heading"><div><span className="eyebrow">CONVERSATIONS</span><h2>论文讨论</h2></div>
         <NewConversationButton onCreate={() => { setShowArchivedConversations(false); props.onNavigate(modeHref("discussion")); }} /></div>
         <button className="conversation-archive-filter" type="button" aria-label="显示已归档 Conversation"
@@ -2832,17 +2940,12 @@ function PaperWorkspace(props: {
             onChange={(event) => props.onQuestion(event.target.value)} placeholder="论文、Summary 或固定代码快照中的问题…" disabled={running}/>
             <button disabled={running || !props.question.trim()}>{running ? "处理中" : "发送"}</button></form>}
       </section>
-      {route.pdfOpen && <aside className="pdf-pane source-view"><div className="pdf-toolbar"><strong>固定 PDF 证据</strong>
-        <button aria-label="上一页" disabled={route.page <= 1} onClick={() => changePdfPage(-1)}>←</button>
-        <span>Page {route.page} / {pdfPageCount}</span>
-        <button aria-label="下一页" disabled={route.page >= pdfPageCount} onClick={() => changePdfPage(1)}>→</button></div>
-        <PdfFrame src={`/api/paper-versions/${encodeURIComponent(props.conversation?.contextSnapshot?.paperVersionId ?? workspace.paper.versionId)}/pdf#page=${route.page}`} /></aside>}
       {route.evidenceReceiptId && props.evidence && <EvidenceInspector evidence={props.evidence}
         onIntegrityFailure={props.onEvidenceIntegrityFailure} onClose={() => props.onNavigate(
         paperHref(workspace.paper.id, { mode: "discussion", conversationId: route.conversationId, pdfOpen: false,
           page: 1, anchor: null, evidenceReceiptId: null }))} />}
     </div>}
-    {route.mode === "knowledge" && <section className="knowledge-workspace"><header><span className="eyebrow">PAPER KNOWLEDGE</span><h2>已审核知识</h2></header>
+    {panelKind === "knowledge" && <section className="knowledge-workspace"><header><span className="eyebrow">PAPER KNOWLEDGE</span><h2>已审核知识</h2></header>
       <div className="knowledge-columns"><div><h3>Pending Proposals</h3>{props.knowledge.pendingProposals.length === 0 && <p className="empty">没有待审核 Proposal。</p>}
         {props.knowledge.pendingProposals.map((proposal) => <TakeawayReviewCard key={proposal.id} proposal={proposal}
           onDecide={(candidate, action, input) => void props.onReviewProposal(proposal, action, input)} />)}</div>
@@ -2852,37 +2955,13 @@ function PaperWorkspace(props: {
               pdfOpen: false, page: 1, anchor: null })} onClick={(event) => { event.preventDefault(); props.onNavigate(paperHref(workspace.paper.id,
                 { mode: "discussion", conversationId: takeaway.source.conversationId, pdfOpen: false, page: 1, anchor: null })); }}>查看来源 Conversation →</a></article>)}</div></div>
     </section>}
-    {route.mode === "reading" && <div className={`reading-grid ${route.pdfOpen ? "split" : ""}`}>
-      <article className="summary-pane">
-        <div className="pane-title"><div><span className="status">{workspace.summary ? "Summary Ready"
-          : workspace.processing?.state === "cancelled" ? "Import Cancelled"
-            : isRetryableImportJobState(workspace.processing?.state) ? "Import Failed" : "Processing"}</span><h2>技术精读</h2></div>
-          <button disabled={!workspace.pdf} onClick={() => setPdf(!route.pdfOpen, route.pdfOpen ? 1 : route.page, route.pdfOpen ? null : route.anchor)}>{route.pdfOpen ? "隐藏原文" : "打开原文"}</button></div>
-        {!workspace.summary && <section className="import-state"><span className="section-no">IMPORT STATUS</span>
-          <h3>{workspace.processing?.state === "cancelled" ? "论文处理已取消" : isRetryableImportJobState(workspace.processing?.state) ? "论文处理未完成" : "正在生成 Paper Summary"}</h3>
-          {workspace.processing && <p>{workspace.processing.state} · {Math.round(workspace.processing.progress * 100)}% · attempt {workspace.processing.attempt}</p>}
-          {workspace.processing?.error && <><p>{workspace.processing.error.stage} · {workspace.processing.error.code}</p><p>{workspace.processing.error.message}</p></>}
-          {isRetryableImportJobState(workspace.processing?.state) && <button disabled={props.busy} onClick={() => void props.onRetry()}>
-            {props.busy ? `重试中 · ${props.progress ?? "queued"}` : workspace.processing?.error?.action === "repair-data-root-permissions" ? "修复存储权限后重试" : "重试 Paper Summary 流程"}</button>}
-        </section>}
-        {workspace.summary?.sections.map((section, index) => <section key={section.key}><span className="section-no">{String(index + 1).padStart(2, "0")}</span>
-          <h3>{section.title}</h3><SummaryMarkdown markdown={section.body} pageCount={workspace.pdf?.pageCount ?? 0}
-            onOpenEvidence={(page) => props.onNavigate(paperHref(workspace.paper.id, {
-              mode: "reading", pdfOpen: true, page, anchor: `page:${page}`,
-            }))} /></section>)}
-        {workspace.summary && <section><span className="section-no">KEY CLAIMS</span><h3>关键结论与证据</h3>
-          {workspace.summary.claims.map((claim) => <button className={`claim ${route.anchor === claim.evidence.id ? "selected" : ""}`} key={claim.claim}
-            onClick={() => { props.onNavigate(paperHref(workspace.paper.id, { mode: "reading", pdfOpen: true, page: claim.evidence.page,
-              anchor: claim.evidence.id ?? `page:${claim.evidence.page}` })); }}>
-            <span>{claim.claim}</span><small>p. {claim.evidence.page} · {claim.evidence.verified ? "原文已核验" : "仅定位"}</small></button>)}</section>}
-      </article>
-      {route.pdfOpen && <aside className="pdf-pane"><div className="pdf-toolbar"><strong>原始 PDF</strong>
-        <button aria-label="上一页" disabled={route.page <= 1} onClick={() => changePdfPage(-1)}>←</button>
-        <span>Page {route.page} / {pdfPageCount}</span>
-        <button aria-label="下一页" disabled={route.page >= pdfPageCount} onClick={() => changePdfPage(1)}>→</button></div>
+    {panelKind === "source" && <aside className="pdf-pane workbench-source">
         <PdfFrame src={props.openedPdfSource?.anchor === route.anchor && props.openedPdfSource.page === route.page
-          ? props.openedPdfSource.href : `/api/paper-versions/${encodeURIComponent(workspace.paper.versionId)}/pdf#page=${route.page}`} /></aside>}
-    </div>}
+          ? props.openedPdfSource.href
+          : `/api/paper-versions/${encodeURIComponent(props.conversation?.contextSnapshot?.paperVersionId ?? workspace.paper.versionId)}/pdf#page=${route.page}&zoom=page-width&navpanes=0`} /></aside>}
+        </div>
+      </section>
+    </div>
   </main>;
 }
 

@@ -16,6 +16,15 @@ const evidenceProtocol = "scholarloom-evidence:";
 const unresolvedEvidenceProtocol = "scholarloom-evidence-unresolved:";
 const unresolvedMathProtocol = "scholarloom-math-unresolved:";
 
+function normalizeSummaryMarkdown(markdown: string): string {
+  return markdown
+    .replace(/^([ \t]*)\*\*(Agent\s*(?:评价|评估)(?:[^*\n]{0,32}?))[：:]?\s*\*\*[：:]?[ \t]*/gmu,
+      (_match, indentation: string, label: string) =>
+        `${indentation}**${label.trim().replace(/[：:]$/u, "")}：** `)
+    .replace(/\*\*([^*\n]*?\S)[ \t]+\*\*(?=[\p{L}\p{N}])/gu, "**$1** ")
+    .replace(/\*\*([^*\n]*?\S)[ \t]+\*\*/gu, "**$1**");
+}
+
 function safeSummaryUrl(url: string): string | undefined {
   if (url.startsWith(evidenceProtocol) || url.startsWith(unresolvedEvidenceProtocol) || url.startsWith(unresolvedMathProtocol)) return url;
   try {
@@ -130,6 +139,12 @@ export function SummaryMarkdown(props: SummaryMarkdownProps) {
       h4({ children }) { return <h5>{children}</h5>; },
       h5({ children }) { return <h6>{children}</h6>; },
       h6({ children }) { return <h6>{children}</h6>; },
+      p({ children }) {
+        if (/^Agent\s*(?:评价|评估)(?:[^：:\n]{0,32})?[:：]/.test(nodeText(children).trimStart())) {
+          return <aside className="summary-inference"><small>Agent 推断</small><p>{children}</p></aside>;
+        }
+        return <p>{children}</p>;
+      },
       pre({ children }) { return <SummaryCodeBlock>{children}</SummaryCodeBlock>; },
       table({ node: _node, children, ...attributes }) {
         return <div className="summary-table-scroll"><table {...attributes}>{children}</table></div>;
@@ -163,5 +178,5 @@ export function SummaryMarkdown(props: SummaryMarkdownProps) {
         return <span className="summary-image-fallback">{alt || "图片"} · 图片暂不支持</span>;
       },
     }}
-  >{props.markdown}</Markdown></div>;
+  >{normalizeSummaryMarkdown(props.markdown)}</Markdown></div>;
 }
