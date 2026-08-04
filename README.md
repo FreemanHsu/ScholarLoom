@@ -136,6 +136,9 @@ original 自动重建。该开关与 `SCHOLARLOOM_PDF_VIEWER` 相互独立。
 关闭开关后，Workspace 与版本跳转会立即恢复交付 original；既有 derived 文件仍只是
 可重建缓存，不会因曾经生成过而绕过 opt-in。
 真实 throttled browser journey 可用 `npm run test:browser:pdfjs:linearized` 运行。
+固定的真实 Paper Version corpus 可用 `npm run benchmark:pdf-delivery` 运行；它只在
+系统临时目录保存下载内容，输出 ignored JSON 报告，不读取生产 data root。当前结论与
+复现步骤见 [PDF Delivery Corpus Benchmark](docs/benchmarks/pdf-delivery-corpus-2026-08-05.md)。
 
 应用只监听 `127.0.0.1:3000`。本地 fixture 旅程不访问 arXiv 或 Codex，仍使用真实
 SQLite、filesystem、PDF.js 和 Git：

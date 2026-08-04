@@ -23,6 +23,8 @@ already reported linearized are skipped. A candidate is selected only when qpdf 
 both PDF structure and linearization, PDF.js reports the same page count as the original,
 and output size is no more than 102% of the source size. qpdf is lossless; a real renderer
 regression additionally requires identical page-image hashes before the adapter is accepted.
+qpdf runs with `--deterministic-id`, and this choice is part of the canonical generation
+parameters so rebuilding the same source does not create a new delivery identity.
 
 Original PDFs remain read-only under `originals/papers` and continue to drive extraction,
 Evidence Anchors, and source identity. Selected outputs are content-addressed
@@ -49,5 +51,8 @@ so a missing or same-size-corrupt derived file falls through to the verified ori
 - Default snapshots remain small and authoritative; derived delivery files are optional.
 - Enabling the strategy adds bounded import CPU/I/O and requires qpdf for optimization,
   while missing qpdf degrades safely to the original.
+- A five-Paper real corpus preserved all nine sampled page renders and reduced eligible
+  output size by 0.60%-3.08%, but browser A/B samples showed no meaningful first-page
+  latency improvement. The strategy therefore remains opt-in.
 - Image downsampling and lossy compression are separate future strategies with independent
   quality review; they are not implied by this ADR.

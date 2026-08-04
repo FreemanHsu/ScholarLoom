@@ -599,6 +599,15 @@ same renderer produced identical page-image hashes before and after linearizatio
 evidence that the pipeline improves first-page delivery for the fixture, not a representative
 real-Paper corpus claim.
 
+The 2026-08-05 pinned real-Paper corpus changes that interpretation. Three of five Papers
+were eligible and all nine sampled source/delivery page renders matched; qpdf reduced their
+total bytes by 0.60%-3.08%. However, headed Chrome A/B samples showed GPT-3 v4 at
+1.900 s original versus 1.906 s linearized and ViT v2 at 3.414 s versus 3.411 s under the
+same 2 MiB/s, 40 ms profile. ViT completed the full response before first render in both
+modes. Lossless linearization therefore remains opt-in and is not evidence for promoting
+PDF.js. The next transport spike should isolate PDF.js streaming/autofetch policy rather
+than alter source bytes. See `docs/benchmarks/pdf-delivery-corpus-2026-08-05.md`.
+
 New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
 compatibility input. Direct PDF acquisition validates DNS and every redirect before
 connection, pins transport to a validated address, limits redirects/time/bytes, and

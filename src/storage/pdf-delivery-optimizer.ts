@@ -14,6 +14,7 @@ import { ensureNoSymlinkDirectory, readRegularFileNoFollow } from "./safe-local-
 const run = promisify(execFile);
 
 export const LOSSLESS_LINEARIZATION_PARAMETERS = {
+  deterministicId: true,
   maximumSizeRatio: 1.02,
   minimumSourceBytes: 1_048_576,
 } as const;
@@ -62,7 +63,8 @@ export class QpdfLinearizationTool implements PdfLinearizationTool {
   }
 
   async linearize(inputPath: string, outputPath: string): Promise<void> {
-    await run(this.#executable, ["--linearize", inputPath, outputPath], { timeout: 120_000, maxBuffer: 1024 * 1024 });
+    await run(this.#executable, ["--deterministic-id", "--linearize", inputPath, outputPath],
+      { timeout: 120_000, maxBuffer: 1024 * 1024 });
   }
 
   async validate(outputPath: string): Promise<boolean> {

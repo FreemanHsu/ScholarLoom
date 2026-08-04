@@ -86,7 +86,7 @@ describe("derived PDF delivery optimization", () => {
       retention_class: "rebuildable",
       status: "selected",
       reason: "linearized",
-      parameters_json: JSON.stringify({ maximumSizeRatio: 1.02, minimumSourceBytes: 1_048_576 }),
+      parameters_json: JSON.stringify({ deterministicId: true, maximumSizeRatio: 1.02, minimumSourceBytes: 1_048_576 }),
     });
     database.close();
 

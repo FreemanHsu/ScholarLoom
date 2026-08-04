@@ -99,9 +99,17 @@ and throttled Chrome to 2 MiB/s with 40 ms latency. qpdf produced 12,589,790 byt
 renderer checks produced identical image hashes for both A4 and Letter pages before and after
 linearization. This is a synthetic-fixture result; real-Paper corpus thresholds remain open.
 
+The pinned five-Paper corpus closed that evidence gap. Three eligible Papers produced 0.60%-3.08%
+smaller delivery files and all nine first/middle/last renderer comparisons matched. Browser A/B
+samples did not show a first-page latency gain: GPT-3 v4 measured 1.900 s original versus 1.906 s
+linearized, while ViT v2 measured 3.414 s versus 3.411 s and completed the full response before
+render in both modes. Attention v7 linearized measured 2.411 s with the full response complete.
+These are single-run diagnostics, but they reject promotion on current evidence. qpdf output also
+proved non-deterministic until `--deterministic-id` was added and regression-tested.
+
 Decision: **go** for continued gated evaluation; **no-go** for the default reader. The
 canvas-only spike has no text selection, search, print UI, or document-content accessibility,
-and worker-inclusive resource use plus a representative real-Paper corpus remain unmeasured.
+and worker-inclusive resource use plus repeatable cross-device performance remain unmeasured.
 The executable promotion thresholds and parity gates are recorded in `docs/architecture.md`;
 the native viewer remains default and the new-window fallback remains visible.
 

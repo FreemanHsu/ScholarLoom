@@ -17,6 +17,7 @@ describe.runIf(qpdfAvailable && process.platform === "darwin")("QpdfLinearizatio
     const root = await mkdtemp(join(tmpdir(), "scholarloom-qpdf-"));
     const sourcePath = join(root, "source.pdf");
     const outputPath = join(root, "linearized.pdf");
+    const repeatedOutputPath = join(root, "linearized-repeated.pdf");
     const sourceBytes = Buffer.from(await createFixturePdf());
     await writeFile(sourcePath, sourceBytes);
     const tool = new QpdfLinearizationTool();
@@ -24,10 +25,14 @@ describe.runIf(qpdfAvailable && process.platform === "darwin")("QpdfLinearizatio
     expect(await tool.version()).toMatch(/^\d+\.\d+\.\d+/);
     expect(await tool.isLinearized(sourcePath)).toBe(false);
     await tool.linearize(sourcePath, outputPath);
+    await tool.linearize(sourcePath, repeatedOutputPath);
     expect(await tool.validate(outputPath)).toBe(true);
     expect(await tool.isLinearized(outputPath)).toBe(true);
 
     const outputBytes = await readFile(outputPath);
+    const repeatedOutputBytes = await readFile(repeatedOutputPath);
+    expect(createHash("sha256").update(repeatedOutputBytes).digest("hex"))
+      .toBe(createHash("sha256").update(outputBytes).digest("hex"));
     expect(createHash("sha256").update(outputBytes).digest("hex"))
       .not.toBe(createHash("sha256").update(sourceBytes).digest("hex"));
     const renderer = new PdfPageRenderer();
