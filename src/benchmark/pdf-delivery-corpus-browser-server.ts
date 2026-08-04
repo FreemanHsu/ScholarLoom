@@ -25,8 +25,8 @@ let closed = false;
 async function cleanup(): Promise<void> {
   if (closed) return;
   closed = true;
-  await app?.close();
-  await rm(runtimeRoot, { recursive: true, force: true });
+  try { await app?.close(); }
+  finally { await rm(runtimeRoot, { recursive: true, force: true }); }
 }
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

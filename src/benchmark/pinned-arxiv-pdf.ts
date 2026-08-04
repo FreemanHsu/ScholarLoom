@@ -5,7 +5,7 @@ const maximumRedirects = 5;
 const redirectStatuses = new Set([301, 302, 303, 307, 308]);
 
 export async function downloadPinnedArxivPdf(paper: PdfDeliveryCorpusPaper,
-  fetchPdf: typeof fetch = fetch): Promise<Uint8Array> {
+  fetchPdf: typeof fetch = fetch, maximumBytes = maximumPdfBytes): Promise<Uint8Array> {
   const expectedUrl = `https://arxiv.org/pdf/${paper.arxivId}v${paper.version}`;
   if (paper.pdfUrl !== expectedUrl) throw new Error(`corpus-source-url-unpinned:${paper.arxivId}`);
   let currentUrl = paper.pdfUrl;
@@ -30,12 +30,33 @@ export async function downloadPinnedArxivPdf(paper: PdfDeliveryCorpusPaper,
     if (!response.ok) throw new Error(`corpus-source-http-${response.status}:${paper.arxivId}v${paper.version}`);
     if (response.url) assertArxivResponse(response.url, paper);
     const declaredBytes = Number(response.headers.get("content-length") ?? "0");
-    if (declaredBytes > maximumPdfBytes) throw new Error(`corpus-source-too-large:${paper.arxivId}v${paper.version}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength > maximumPdfBytes) throw new Error(`corpus-source-too-large:${paper.arxivId}v${paper.version}`);
-    return bytes;
+    if (declaredBytes > maximumBytes) throw new Error(`corpus-source-too-large:${paper.arxivId}v${paper.version}`);
+    return readLimitedBody(response, maximumBytes, paper);
   }
   throw new Error(`corpus-source-redirect-invalid:${paper.arxivId}v${paper.version}`);
+}
+
+async function readLimitedBody(response: Response, maximumBytes: number,
+  paper: PdfDeliveryCorpusPaper): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteSize = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      byteSize += chunk.value.byteLength;
+      if (byteSize > maximumBytes) {
+        await reader.cancel();
+        throw new Error(`corpus-source-too-large:${paper.arxivId}v${paper.version}`);
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), byteSize);
 }
 
 function assertArxivResponse(responseUrl: string, paper: PdfDeliveryCorpusPaper): void {

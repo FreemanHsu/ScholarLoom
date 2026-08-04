@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import Database from "better-sqlite3";
@@ -136,33 +136,31 @@ export async function benchmarkPdfDeliveryCorpus(options: {
       await waitForImport(app, body.importRequest.id, paper);
       const workspace = await app.inject({ method: "GET", url: `/api/papers/${encodeURIComponent(body.paper.id)}` });
       if (workspace.statusCode !== 200) throw new Error(`corpus-workspace-unavailable:${paper.arxivId}v${paper.version}`);
+      const workspaceBody = workspace.json() as { pdf: { pageCount: number; url: string } };
 
       const database = new Database(layout.databasePath, { readonly: true });
       let optimization: { status: "selected" | "skipped" | "failed"; reason: string;
         output_byte_size: number | null; metrics_json: string; delivery_hash: string | null;
-        delivery_storage_ref: string | null };
-      let sourcePath: string;
+      };
       try {
         optimization = database.prepare(`SELECT o.status,o.reason,o.output_byte_size,o.metrics_json,
-            delivery.content_hash delivery_hash,delivery.storage_ref delivery_storage_ref
+            delivery.content_hash delivery_hash
           FROM pdf_delivery_optimizations o
           LEFT JOIN artifacts delivery ON delivery.id=o.output_artifact_id
           WHERE o.source_artifact_id=?`).get(`artifact:pdf:${sourceHash}`) as typeof optimization;
-        const source = database.prepare(`SELECT storage_ref FROM artifacts
-          WHERE artifact_type='paper-pdf' AND content_hash=?`).get(sourceHash) as { storage_ref: string };
-        sourcePath = join(layout.root, source.storage_ref);
       } finally { database.close(); }
 
-      let sourceLinearized: boolean | null = null;
-      try { sourceLinearized = await tool.isLinearized(sourcePath); } catch { /* Tool-unavailable is a measured result. */ }
+      const sourceLinearized = await inspectSourceLinearization(tool, layout.tmpRoot, bytes);
       const metrics = JSON.parse(optimization.metrics_json) as { durationMs?: number; sizeRatio?: number };
-      const pageCount = (workspace.json() as { pdf: { pageCount: number } }).pdf.pageCount;
-      const renderedPages = optimization.delivery_hash && optimization.delivery_storage_ref
-        ? await renderParitySamples(bytes, sourceHash,
-          await readFile(join(layout.root, optimization.delivery_storage_ref)), optimization.delivery_hash, pageCount)
+      const deliveryBytes = optimization.delivery_hash
+        ? await readDeliveryPdf(app, workspaceBody.pdf.url, optimization.delivery_hash, paper)
+        : null;
+      const renderedPages = optimization.delivery_hash && deliveryBytes
+        ? await renderParitySamples(bytes, sourceHash, deliveryBytes,
+          optimization.delivery_hash, workspaceBody.pdf.pageCount)
         : [];
       samples.push({ ...paper, sourceHash, sourceBytes: bytes.byteLength,
-        pageCount,
+        pageCount: workspaceBody.pdf.pageCount,
         sourceLinearized, status: optimization.status, reason: optimization.reason,
         deliveryHash: optimization.delivery_hash, deliveryBytes: optimization.output_byte_size,
         sizeRatio: typeof metrics.sizeRatio === "number" ? metrics.sizeRatio : null,
@@ -170,8 +168,8 @@ export async function benchmarkPdfDeliveryCorpus(options: {
         renderedPages,
       });
     } finally {
-      await app?.close();
-      await rm(sampleRoot, { recursive: true, force: true });
+      try { await app?.close(); }
+      finally { await rm(sampleRoot, { recursive: true, force: true }); }
     }
   }
 
@@ -190,6 +188,32 @@ export async function benchmarkPdfDeliveryCorpus(options: {
     },
     samples,
   };
+}
+
+async function inspectSourceLinearization(tool: PdfLinearizationTool, temporaryRoot: string,
+  bytes: Uint8Array): Promise<boolean | null> {
+  const inspectionRoot = await mkdtemp(join(temporaryRoot, "benchmark-source-"));
+  try {
+    const sourcePath = join(inspectionRoot, "source.pdf");
+    await writeFile(sourcePath, bytes);
+    try { return await tool.isLinearized(sourcePath); }
+    catch { return null; }
+  } finally {
+    await rm(inspectionRoot, { recursive: true, force: true });
+  }
+}
+
+async function readDeliveryPdf(app: Awaited<ReturnType<typeof createApp>>, url: string,
+  expectedHash: string, paper: PdfDeliveryCorpusPaper): Promise<Buffer> {
+  const response = await app.inject({ method: "GET", url });
+  if (response.statusCode !== 200) {
+    throw new Error(`corpus-delivery-unavailable:${paper.arxivId}v${paper.version}`);
+  }
+  const actualHash = createHash("sha256").update(response.rawPayload).digest("hex");
+  if (actualHash !== expectedHash) {
+    throw new Error(`corpus-delivery-hash-mismatch:${paper.arxivId}v${paper.version}`);
+  }
+  return response.rawPayload;
 }
 
 async function renderParitySamples(sourceBytes: Uint8Array, sourceHash: string, deliveryBytes: Uint8Array,

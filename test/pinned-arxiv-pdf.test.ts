@@ -22,7 +22,7 @@ describe("pinned arXiv PDF downloader", () => {
       return responseAt(paper.pdfUrl, bytes);
     }) as typeof fetch;
 
-    await expect(downloadPinnedArxivPdf(paper, fetchPdf)).resolves.toEqual(bytes);
+    await expect(downloadPinnedArxivPdf(paper, fetchPdf)).resolves.toEqual(Buffer.from(bytes));
     expect(requestedUrl).toBe(paper.pdfUrl);
   });
 
@@ -61,6 +61,24 @@ describe("pinned arXiv PDF downloader", () => {
     await expect(downloadPinnedArxivPdf(paper, fetchPdf))
       .rejects.toThrow("corpus-source-too-large:1706.03762v7");
     expect(bodyRead).toBe(false);
+  });
+
+  it("stops an undeclared streaming response as soon as it crosses the byte limit", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+        controller.enqueue(new Uint8Array([5, 6, 7, 8]));
+      },
+      cancel() { cancelled = true; },
+    });
+    const response = new Response(stream, { status: 200 });
+    Object.defineProperty(response, "url", { value: paper.pdfUrl });
+    const fetchPdf = (async () => response) as typeof fetch;
+
+    await expect(downloadPinnedArxivPdf(paper, fetchPdf, 5))
+      .rejects.toThrow("corpus-source-too-large:1706.03762v7");
+    expect(cancelled).toBe(true);
   });
 });
 
