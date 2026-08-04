@@ -529,7 +529,7 @@ export class ImportStore {
     })();
   }
 
-  getPaperWorkspace(id: string): unknown | null {
+  async getPaperWorkspace(id: string): Promise<unknown | null> {
     const paper = this.listPapers().find((candidate) => candidate.id === id);
     if (!paper) return null;
     const versionId = paper.versionId;
@@ -541,7 +541,7 @@ export class ImportStore {
     const latestJob = this.#database.prepare(`SELECT id,state,progress,attempt,error_json FROM job_runs
       WHERE paper_id=? AND job_type='paper-import' ORDER BY attempt DESC,queued_at DESC,id DESC LIMIT 1`).get(id) as
       { id: string; state: string; progress: number; attempt: number; error_json: string | null } | undefined;
-    const pdfArtifact = this.#pdfArtifactIdentityForVersion(versionId);
+    const pdfArtifact = extraction ? await this.getPdfArtifactForVersion(versionId) : null;
     return {
       paper: { ...paper, versionId },
       pdf: extraction && pdfArtifact ? { pageCount: extraction.page_count,
@@ -561,6 +561,12 @@ export class ImportStore {
   }
 
   async getPdfArtifactForVersion(versionId: string): Promise<PdfArtifactDescriptor | null> {
+    if (!this.#pdfDeliveryOptimizer) {
+      const original = this.#database.prepare(`SELECT a.id,a.content_hash,a.storage_ref,a.byte_size,a.integrity_status
+        FROM paper_versions v JOIN artifacts a ON a.id=v.pdf_artifact_id
+        WHERE v.id=? AND a.artifact_type='paper-pdf'`).get(versionId) as PdfArtifactRow | undefined;
+      return this.#openPdfArtifact(original);
+    }
     const rows = this.#database.prepare(`SELECT candidate.id,candidate.content_hash,candidate.storage_ref,
         candidate.byte_size,candidate.integrity_status,priority
       FROM paper_versions v
@@ -1057,7 +1063,7 @@ export class ImportStore {
       (JSON.parse(row.payload_json) as { sourceType?: string }).sourceType === "direct-pdf");
   }
 
-  issueProposalSourceOpen(proposalId: string): { pdfUrl: string; page: number } | null {
+  async issueProposalSourceOpen(proposalId: string): Promise<{ pdfUrl: string; page: number } | null> {
     const row = this.#database.prepare(`SELECT p.payload_json,cs.paper_version_id source_version_id
       FROM proposals p
       LEFT JOIN messages m ON m.id=p.source_message_id
@@ -1084,9 +1090,9 @@ export class ImportStore {
     return this.#recordProposalSourceOpen(proposalId, row.source_version_id, handle, page);
   }
 
-  #recordProposalSourceOpen(proposalId: string, versionId: string, sourceHandle: string,
-    page: number): { pdfUrl: string; page: number } | null {
-    const artifact = this.#pdfArtifactIdentityForVersion(versionId);
+  async #recordProposalSourceOpen(proposalId: string, versionId: string, sourceHandle: string,
+    page: number): Promise<{ pdfUrl: string; page: number } | null> {
+    const artifact = await this.getPdfArtifactForVersion(versionId);
     if (!artifact) return null;
     this.#database.prepare("INSERT INTO source_open_events(id,proposal_id,source_handle,opened_at) VALUES (?,?,?,?)")
       .run(`source-open:${randomUUID()}`, proposalId, sourceHandle, this.#now().toISOString());
@@ -1495,29 +1501,6 @@ export class ImportStore {
       { storage_ref: string; content_hash: string; byte_size: number } | undefined;
     if (!artifact) return false;
     return this.#fileMatches(join(this.#artifactRoot, artifact.storage_ref), artifact.content_hash, artifact.byte_size);
-  }
-
-  #pdfArtifactIdentityForVersion(versionId: string): { contentHash: string } | null {
-    const rows = this.#database.prepare(`SELECT candidate.content_hash,candidate.storage_ref,candidate.byte_size,priority
-      FROM paper_versions v
-      JOIN artifacts source ON source.id=v.pdf_artifact_id AND source.artifact_type='paper-pdf'
-      JOIN (
-        SELECT a.content_hash,a.storage_ref,a.byte_size,o.source_artifact_id,0 priority
-        FROM pdf_delivery_optimizations o JOIN artifacts a ON a.id=o.output_artifact_id
-        WHERE o.status='selected' AND a.artifact_type='paper-pdf-delivery'
-        UNION ALL
-        SELECT a.content_hash,a.storage_ref,a.byte_size,a.id source_artifact_id,1 priority
-        FROM artifacts a WHERE a.artifact_type='paper-pdf'
-      ) candidate ON candidate.source_artifact_id=source.id
-      WHERE v.id=? ORDER BY priority`).all(versionId) as
-      Array<{ content_hash: string; storage_ref: string; byte_size: number }>;
-    for (const row of rows) {
-      try {
-        const stat = statSync(join(this.#artifactRoot, row.storage_ref));
-        if (stat.isFile() && stat.size === row.byte_size) return { contentHash: row.content_hash };
-      } catch { /* A rebuildable delivery artifact may be absent; fall back to the original. */ }
-    }
-    return null;
   }
 
   async #openPdfArtifact(row: PdfArtifactRow | undefined): Promise<PdfArtifactDescriptor | null> {

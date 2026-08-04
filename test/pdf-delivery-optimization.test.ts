@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,7 +38,7 @@ function fixtureLinearizer(): PdfLinearizationTool {
   };
 }
 
-async function fixtureApp(layout: StorageLayout, sourceBytes: Uint8Array, tool: PdfLinearizationTool) {
+async function fixtureApp(layout: StorageLayout, sourceBytes: Uint8Array, tool?: PdfLinearizationTool) {
   return createApp({
     storageLayout: layout,
     paperSource: {
@@ -46,7 +46,7 @@ async function fixtureApp(layout: StorageLayout, sourceBytes: Uint8Array, tool: 
       async fetchPdf() { return sourceBytes; },
     },
     codexRunner: { async runSummary() { return fixtureSummary; } },
-    pdfOptimization: { strategy: "lossless-linearization", tool },
+    ...(tool ? { pdfOptimization: { strategy: "lossless-linearization" as const, tool } } : {}),
   });
 }
 
@@ -78,9 +78,10 @@ describe("derived PDF delivery optimization", () => {
     expect((await stat(originalPath)).mode & 0o777).toBe(0o400);
 
     const database = new Database(layout.databasePath, { readonly: true });
-    expect(database.prepare(`SELECT a.storage_ref,a.retention_class,o.status,o.reason,o.parameters_json,o.metrics_json
+    const selected = database.prepare(`SELECT a.storage_ref,a.retention_class,o.status,o.reason,o.parameters_json,o.metrics_json
       FROM pdf_delivery_optimizations o JOIN artifacts a ON a.id=o.output_artifact_id
-      WHERE o.source_artifact_id=?`).get(`artifact:pdf:${sourceHash}`)).toMatchObject({
+      WHERE o.source_artifact_id=?`).get(`artifact:pdf:${sourceHash}`) as { storage_ref: string };
+    expect(selected).toMatchObject({
       storage_ref: expect.stringMatching(/^derived\/pdf-delivery\/[0-9a-f]{2}\/[0-9a-f]{64}\.pdf$/),
       retention_class: "rebuildable",
       status: "selected",
@@ -88,6 +89,18 @@ describe("derived PDF delivery optimization", () => {
       parameters_json: JSON.stringify({ maximumSizeRatio: 1.02, minimumSourceBytes: 1_048_576 }),
     });
     database.close();
+
+    const derivedPath = join(layout.root, selected.storage_ref);
+    const corruptedBytes = await readFile(derivedPath);
+    corruptedBytes[1024] = corruptedBytes[1024]! ^ 0xff;
+    await chmod(derivedPath, 0o600);
+    await writeFile(derivedPath, corruptedBytes);
+    await chmod(derivedPath, 0o400);
+    const fallbackWorkspace = await app.inject({ method: "GET", url: `/api/papers/${paper.id}` });
+    expect(fallbackWorkspace.json().pdf.url).toBe(`/api/artifacts/${sourceHash}/pdf`);
+    const fallback = await app.inject({ method: "GET", url: fallbackWorkspace.json().pdf.url });
+    expect(fallback.statusCode).toBe(200);
+    expect(createHash("sha256").update(fallback.rawPayload).digest("hex")).toBe(sourceHash);
     await app.close();
   }, 60_000);
 
@@ -255,6 +268,11 @@ describe("derived PDF delivery optimization", () => {
       { storage_ref: string; content_hash: string };
     database.close();
     await firstApp.close();
+
+    const disabledReopen = await fixtureApp(layout, sourceBytes);
+    const disabledWorkspace = await disabledReopen.inject({ method: "GET", url: `/api/papers/${paper.id}` });
+    expect(disabledWorkspace.json().pdf.url).toBe(`/api/artifacts/${sourceHash}/pdf`);
+    await disabledReopen.close();
 
     const healthyReopen = await fixtureApp(layout, sourceBytes, tool);
     await healthyReopen.close();

@@ -170,7 +170,7 @@ export class PdfDeliveryOptimizer {
         const outputHash = createHash("sha256").update(outputBytes).digest("hex");
         const artifactId = `artifact:pdf-delivery:${outputHash}`;
         const storageRef = join("derived", "pdf-delivery", outputHash.slice(0, 2), `${outputHash}.pdf`);
-        await this.#publish(outputPath, storageRef, outputHash, outputBytes.length);
+        const statFingerprint = await this.#publish(outputPath, storageRef, outputHash, outputBytes.length);
         const now = this.now().toISOString();
         this.database.transaction(() => {
           this.database.prepare(`INSERT OR IGNORE INTO artifacts
@@ -181,6 +181,9 @@ export class PdfDeliveryOptimizer {
             WHERE artifact_type='paper-pdf-delivery' AND content_hash=?`).get(outputHash) as { id: string }).id;
           this.database.prepare(`INSERT OR IGNORE INTO artifact_parents(artifact_id,parent_artifact_id,relationship,ordinal)
             VALUES (?,?,'delivery-derived-from',0)`).run(storedArtifactId, source.id);
+          this.database.prepare(`INSERT INTO artifact_integrity_verifications(artifact_id,stat_fingerprint,verified_at)
+            VALUES (?,?,?) ON CONFLICT(artifact_id) DO UPDATE SET stat_fingerprint=excluded.stat_fingerprint,
+            verified_at=excluded.verified_at`).run(storedArtifactId, statFingerprint, now);
           this.#upsert(source, { status: "selected", reason: "linearized", outputArtifactId: storedArtifactId,
             outputContentHash: outputHash }, toolVersion, outputBytes.length, parametersJson,
           { durationMs: performance.now() - started, sizeRatio, sourcePageCount, outputPageCount }, now);
@@ -237,25 +240,27 @@ export class PdfDeliveryOptimizer {
         result.status, result.reason, source.byteSize, outputByteSize, JSON.stringify(metrics), now, now);
   }
 
-  async #publish(stagedPath: string, storageRef: string, expectedHash: string, expectedSize: number): Promise<void> {
+  async #publish(stagedPath: string, storageRef: string, expectedHash: string, expectedSize: number): Promise<string> {
     const target = join(this.layout.root, storageRef);
     const parent = dirname(target);
     ensureNoSymlinkDirectory(this.layout.derivedRoot, parent, "pdf-optimization-output-unsafe");
     if (existsSync(target)) {
       const existing = readRegularFileNoFollow(this.layout.derivedRoot, target, "pdf-optimization-output-unsafe");
-      if (existing.size === expectedSize && createHash("sha256").update(existing.bytes).digest("hex") === expectedHash) return;
-      const invalid = `${target}.invalid-${randomUUID()}`;
-      await rename(target, invalid);
-      try { await chmod(stagedPath, 0o400); await rename(stagedPath, target); }
-      catch (error) { await rename(invalid, target); throw error; }
-      await rm(invalid, { force: true });
+      if (existing.size !== expectedSize || createHash("sha256").update(existing.bytes).digest("hex") !== expectedHash) {
+        const invalid = `${target}.invalid-${randomUUID()}`;
+        await rename(target, invalid);
+        try { await chmod(stagedPath, 0o400); await rename(stagedPath, target); }
+        catch (error) { await rename(invalid, target); throw error; }
+        await rm(invalid, { force: true });
+      }
     } else {
       await mkdir(parent, { recursive: true, mode: 0o700 });
       await chmod(stagedPath, 0o400);
       await rename(stagedPath, target);
     }
-    const published = await stat(target);
-    if (!published.isFile() || published.size !== expectedSize) throw new Error("pdf-optimization-publish-failed");
+    const published = await stat(target, { bigint: true });
+    if (!published.isFile() || published.size !== BigInt(expectedSize)) throw new Error("pdf-optimization-publish-failed");
+    return `${published.dev}:${published.ino}:${published.size}:${published.mtimeNs}:${published.ctimeNs}`;
   }
 }
 

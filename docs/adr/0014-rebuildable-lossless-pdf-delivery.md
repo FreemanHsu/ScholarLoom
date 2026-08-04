@@ -37,6 +37,12 @@ without rerunning qpdf. Startup backfill rebuilds missing selected output after 
 snapshot restore and opportunistically evaluates existing Paper PDFs; the original remains
 readable while rebuilding.
 
+Selection is gated by the same runtime flag as generation. When the flag is off, Paper
+Workspace and version redirects serve the original even if a selected derived Artifact is
+already present. Direct content-hash access remains valid for immutable URLs, but does not
+change the runtime selection policy. Candidate selection uses the normal PDF integrity path,
+so a missing or same-size-corrupt derived file falls through to the verified original.
+
 ## Consequences
 
 - Artifact URLs and ETags identify the bytes actually delivered.

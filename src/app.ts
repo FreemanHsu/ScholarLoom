@@ -1116,7 +1116,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     });
 
   app.get<{ Params: { id: string } }>("/api/papers/:id", async (request, reply) => {
-    const workspace = store.getPaperWorkspace(request.params.id);
+    const workspace = await store.getPaperWorkspace(request.params.id);
     if (!workspace) return reply.code(404).send({ code: "paper-not-found" });
     const viewer = { engine: settingsRuntime.pdfViewerEngine ?? "native" } as const;
     const workspacePaper = (workspace as { paper: import("./storage/import-store.js").StoredPaper }).paper;
@@ -1319,7 +1319,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     return reply.code(result.status).send(result.body);
   });
   app.post<{ Params: { id: string } }>("/api/proposals/:id/open-source", async (request, reply) => {
-    const source = store.issueProposalSourceOpen(request.params.id);
+    const source = await store.issueProposalSourceOpen(request.params.id);
     return source ? reply.code(201).send(source) : reply.code(404).send({ code: "proposal-source-not-found" });
   });
 

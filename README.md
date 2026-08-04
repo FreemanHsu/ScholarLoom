@@ -133,6 +133,8 @@ SCHOLARLOOM_PDF_OPTIMIZATION=lossless-linearization npm start
 原始 PDF 始终保留在 `originals/` 且不被修改；工具缺失、输出校验失败、页数变化或
 体积膨胀超过 2% 时继续交付 original。默认 snapshot 不包含优化版，恢复后会从
 original 自动重建。该开关与 `SCHOLARLOOM_PDF_VIEWER` 相互独立。
+关闭开关后，Workspace 与版本跳转会立即恢复交付 original；既有 derived 文件仍只是
+可重建缓存，不会因曾经生成过而绕过 opt-in。
 真实 throttled browser journey 可用 `npm run test:browser:pdfjs:linearized` 运行。
 
 应用只监听 `127.0.0.1:3000`。本地 fixture 旅程不访问 arXiv 或 Codex，仍使用真实
