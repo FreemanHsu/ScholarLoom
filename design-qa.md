@@ -10,7 +10,7 @@
 | Priority | Finding | Resolution |
 |---|---|---|
 | P0 | None | — |
-| P1 | The first pass rendered both an app PDF toolbar and the browser PDF toolbar. | Removed the duplicate toolbar and used a page-width PDF fragment with the navigation pane collapsed. |
+| P1 | The first pass rendered both an app PDF toolbar and the browser PDF toolbar. | Removed the duplicate toolbar and requested native viewer fitting with the navigation pane collapsed; the later real-paper regression below corrected the fragment to Chromium's `view=FitH`. |
 | P1 | The compact Discussion conversation rail allowed the new-conversation action to overflow. | Stacked the heading and action and constrained the button to the rail width. |
 | P2 | The original workspace header repeated the canonical title, author, source version, and source action. | Reduced the identity block to alias-or-title plus year and merged version/source into one interactive control. |
 | P2 | The outline occupied permanent reading width. | Added a 68px collapsed rail with numbered anchors, active marker, and an accessible expand/collapse control. |
@@ -27,6 +27,64 @@
 - Narrow layouts were checked at 800 × 1000 and 390 × 844 without horizontal overflow.
 
 Final result: passed.
+
+## Native PDF fit-width regression
+
+- Browser: installed Google Chrome, headed through Playwright
+- Viewport: 1600 × 1000
+- Fixture: page 1 uses A4 dimensions (595.28 × 841.89 pt); page 2 uses Letter dimensions (612 × 792 pt)
+- Automated command: `npm run test:browser:pdf`
+- Artifacts: `output/playwright/pdf-fit-width/test-results/`
+
+The earlier `zoom=page-width` fragment was not recognized by Chromium. Small fixture
+pages obscured that failure, while a real Paper showed the native toolbar at 100% and
+left substantial unused horizontal space. The reader now emits
+`#page=N&view=FitH&navpanes=0` and keeps the existing iframe remount and new-window
+fallback.
+
+The real-browser regression verifies:
+
+- A4 page 1 opens with Chromium reporting `fit-to-width`;
+- clicking a Summary Evidence Anchor remounts the viewer on Letter page 2 while preserving `fit-to-width`;
+- resizing the source pane from 50% to 44% and 62% keeps `fit-to-width` and changes native zoom in the expected direction;
+- the A4, Letter, narrow-source, and wide-source screenshots all show the fixture page border fitted to the available width;
+- every run creates a fresh temporary ScholarLoom data root and removes it on shutdown; production data is never opened.
+
+Final result: passed.
+
+Native iframe reuse was also tested as a way to remove the transient page-1 flash during
+Evidence navigation. It was rejected: keeping the frame stable and changing only
+`#page=2` updated the iframe's DOM `src`, but Chromium continued rendering page 1. The
+permanent regression therefore inspects the native viewer's actual current page, not only
+the outer URL. Remounting remains the correctness-preserving native-viewer behavior; a
+flash-free transition is a PDF.js evaluation criterion rather than a private Chromium
+integration.
+
+## Feature-flagged PDF.js spike
+
+- Enable: `SCHOLARLOOM_PDF_VIEWER=pdfjs`
+- Browser: installed Google Chrome, headed through Playwright
+- Automated command: `npm run test:browser:pdfjs`
+- Artifacts: `output/playwright/pdfjs-spike/test-results/`
+
+The spike keeps a single lazily loaded PDF.js document and renders one fit-width canvas.
+It removes the previous canvas before an Evidence page render, exposes loading progress,
+re-renders after pane resize, and falls back to a correctly targeted native iframe after
+PDF.js failure. Thirty Evidence/Back cycles (60 renders) preserved the reader instance and
+issued no PDF reload.
+
+Observed on the two-page A4/Letter fixture:
+
+- first render: 230 ms;
+- page-transition p95 / maximum: 80 ms / 82 ms;
+- PDF requests: 1 total, 0 Range requests (the PDF is only 1.5 KB);
+- JS heap after the transition run: 9.6 MB; main-thread task time across the run: 0.68 s;
+- build assets: lazy PDF.js chunk 432 KB (128 KB gzip), worker 1.26 MB.
+
+Decision: **go** for continued gated evaluation; **no-go** for the default reader. The
+canvas-only spike has no text selection, search, print UI, or document-content accessibility,
+and the fixture does not establish large-PDF performance. The native viewer remains default
+and the new-window fallback remains visible.
 
 ## Paper Workspace bottom-edge regression
 

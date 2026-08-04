@@ -19,6 +19,8 @@
     "diagnostics": "tsx src/cli.ts diagnostics",
     "rebuild-index": "tsx src/cli.ts rebuild-index",
     "test": "vitest run",
+    "test:browser:pdf": "npm run build && playwright test --config playwright.pdf.config.mjs",
+    "test:browser:pdfjs": "npm run build && playwright test --config playwright.pdfjs.config.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
@@ -52,6 +54,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",
     "pdf-lib": "^1.17.1",
+    "playwright": "1.62.0-alpha-1783623505000",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
     "vite": "^7.3.6",

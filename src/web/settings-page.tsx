@@ -37,8 +37,9 @@ export function SettingsPage({ snapshot, error }: { snapshot: SettingsSnapshot |
           detail="仅允许 loopback，由 Tailscale Serve 提供远程入口" />
         <OverviewCard label="数据根目录" value={overview.dataRoot}
           detail={overview.fixture ? "Fixture runtime" : "Production runtime"} mono />
-        <OverviewCard label="Feature flags" value="Takeaway Quality V2"
-          detail={overview.featureFlags.takeawayQualityV2 ? "已启用" : "未启用"} />
+        <OverviewCard label="Feature flags" value="实验功能"
+          detail={`Takeaway Quality V2 ${overview.featureFlags.takeawayQualityV2 ? "已启用" : "未启用"} · ` +
+            `PDF.js Reader ${overview.featureFlags.pdfJsViewer ? "已启用" : "未启用"}`} />
         <OverviewCard label="最近 Agent 活动"
           value={overview.latestAgentActivity?.taskKind ?? "暂无记录"}
           detail={overview.latestAgentActivity

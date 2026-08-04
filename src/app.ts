@@ -1115,13 +1115,16 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   app.get<{ Params: { id: string } }>("/api/papers/:id", async (request, reply) => {
     const workspace = store.getPaperWorkspace(request.params.id);
     if (!workspace) return reply.code(404).send({ code: "paper-not-found" });
+    const viewer = { engine: settingsRuntime.pdfViewerEngine ?? "native" } as const;
     const workspacePaper = (workspace as { paper: import("./storage/import-store.js").StoredPaper }).paper;
-    if (workspacePaper.sourceType !== "arxiv" || !workspacePaper.arxivId) return { ...(workspace as object), updateProposal: null };
+    if (workspacePaper.sourceType !== "arxiv" || !workspacePaper.arxivId) {
+      return { ...(workspace as object), viewer, updateProposal: null };
+    }
     const paper = store.findFrozenArxiv(workspacePaper.arxivId)!;
     let updateProposal: unknown = null;
     try { updateProposal = store.proposePaperUpdate(paper, (await options.paperSource.resolve(workspacePaper.arxivId)).latestVersion); }
     catch { /* Update checks never make a readable workspace unavailable. */ }
-    return { ...(workspace as object), updateProposal };
+    return { ...(workspace as object), viewer, updateProposal };
   });
 
   app.get<{ Params: { id: string } }>("/api/paper-versions/:id/pdf", async (request, reply) => {

@@ -522,11 +522,34 @@ metadata changes trigger a full rehash. A mismatch marks only that Artifact corr
 and restoring the authoritative bytes allows the same Artifact to reverify and recover.
 
 The Core PDF reader deliberately keeps the native Chromium viewer as a reversible
-stopgap. A page change remounts the iframe and every entry requests `page-width`;
-the UI also exposes an explicit new-window fallback. An embedded PDF.js viewer is a
-gated enhancement, not current architecture: adopt it only if real Chromium journeys
-show fit-width/remount remains unreliable, or region-level Evidence highlighting
-becomes a committed requirement without regressing selection, search, print, or download.
+stopgap. A page change remounts the iframe and every entry requests Chromium's
+`view=FitH` fit-to-width mode; the UI also exposes an explicit new-window fallback.
+The browser regression uses real A4 and Letter page dimensions and verifies initial
+loading, Evidence page navigation, and fit recalculation after both narrower and wider
+pane resizes. A native-viewer reuse spike proved that retaining the same iframe and only
+changing its URL fragment does not navigate the loaded Chromium PDF viewer: the DOM URL
+advances to page 2 while the rendered document stays on page 1. Chromium's external PDF
+scripting surface has no supported page-navigation message, so iframe remount remains the
+intentional default despite its brief page-1 flash.
+
+`SCHOLARLOOM_PDF_VIEWER=pdfjs` enables a runtime-gated PDF.js spike behind the `PdfReader`
+seam. It dynamically loads PDF.js and its worker, keeps one document alive across Evidence
+navigation, replaces the previous canvas before rendering the target page, recalculates
+fit-width through `ResizeObserver`, exposes loading progress, and automatically falls back
+to the target page in the native viewer after a load or render failure. The external native
+new-window action remains available in every mode. The runtime flag is observable through
+the read-only Settings snapshot and Paper Workspace response; native remains the fallback
+when the flag is absent or invalid.
+
+The headed Chrome A4/Letter fixture measured a 230 ms first render and 80 ms p95 across 60
+page transitions, with one PDF request, about 9.6 MB observed JS heap, and 0.68 seconds of
+main-thread task time across those transitions. These are local small-fixture measurements,
+not large-PDF claims: the 1.5 KB PDF did not trigger Range requests. The build adds a lazy
+432 KB PDF.js chunk (128 KB gzip) and a 1.26 MB worker asset. This is a **go** for continued
+feature-flagged evaluation and a **no-go** for default replacement: the canvas-only spike
+lacks text selection, search, print, and document-content accessibility, and has not passed
+a representative large-PDF/real-paper corpus. PDF.js also does not reduce original PDF bytes;
+derived PDF optimization remains a separate pipeline.
 
 New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
 compatibility input. Direct PDF acquisition validates DNS and every redirect before

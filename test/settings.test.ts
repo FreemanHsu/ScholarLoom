@@ -23,6 +23,7 @@ describe("read-only Settings", () => {
         now: () => new Date("2026-07-30T08:05:00.000Z"),
         fixture: false,
         takeawayQualityReleased: false,
+        pdfViewerEngine: "pdfjs",
         pdfNetwork: {
           strategy: "direct-first-proxy-fallback",
           proxyConfigured: true,
@@ -65,7 +66,7 @@ describe("read-only Settings", () => {
           },
           checkedAt: "2026-07-30T08:00:00.000Z",
         },
-        featureFlags: { takeawayQualityV2: false },
+        featureFlags: { takeawayQualityV2: false, pdfJsViewer: true },
         latestAgentActivity: null,
       },
       agents: [

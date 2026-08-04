@@ -108,6 +108,16 @@ HTTP 状态、TLS 证书、redirect、大小和 PDF 校验错误不会改走代�
 使用已经过公网校验并固定的目标 IP，TLS SNI 仍使用原域名。`/settings` 展示 effective
 策略与配置来源，但不会显示代理地址或凭据。
 
+原文阅读默认使用 Chromium native PDF viewer。可显式启动尚未发布的 PDF.js reader
+spike；它用于评估无闪烁 Evidence 跳页、fit-width 与加载反馈，不应视为默认阅读器：
+
+```bash
+SCHOLARLOOM_PDF_VIEWER=pdfjs npm start
+```
+
+当前 spike 是 canvas-only，尚未提供文本选择、搜索、打印和完整 accessibility；加载或
+渲染失败时会自动降级 native viewer，新窗口打开原文始终保留。
+
 应用只监听 `127.0.0.1:3000`。本地 fixture 旅程不访问 arXiv 或 Codex，仍使用真实
 SQLite、filesystem、PDF.js 和 Git：
 

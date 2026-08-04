@@ -33,6 +33,8 @@ import { canContinueConversation, conversationActionRequest, filterConversations
 import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspector.js";
 import { RepositoryPanel, type RepositoryAssociation } from "./repository-panel.js";
 import { SettingsPage } from "./settings-page.js";
+import { pdfViewerUrl } from "./pdf-viewer-url.js";
+import { PdfReader, type PdfViewerEngine } from "./pdf-reader.js";
 import type { SettingsSnapshot } from "../settings/settings-snapshot.js";
 import "./styles.css";
 
@@ -241,6 +243,7 @@ type Workspace = {
   };
   processing: null | { jobId: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null };
   repositories: RepositoryAssociation[];
+  viewer: { engine: PdfViewerEngine };
 };
 type Proposal = ConversationProposal & { oneClickEligible: boolean };
 type ReviewProposal = {
@@ -279,13 +282,6 @@ type EntryAnswer = {
 };
 type OpenedPdfSource = { href: string; anchor: string; page: number };
 
-function PdfFrame({ src }: { src: string }) {
-  return <iframe title="原始 PDF" src={src} />;
-}
-
-function pdfViewerUrl(url: string, page: number): string {
-  return `${url.split("#", 1)[0]}#page=${Math.max(1, page)}&zoom=page-width&navpanes=0`;
-}
 type ConversationSummary = { id: string; paperId: string; title: string; status: "active" | "archived";
   snapshotIntegrity: "frozen" | "legacy"; continuedFromConversationId: string | null; updatedAt: string };
 type ConversationDetail = {
@@ -2962,7 +2958,7 @@ function PaperWorkspace(props: {
     {panelKind === "source" && <aside className="pdf-pane workbench-source">
         <div className="pdf-toolbar"><span>PDF · p. {route.page}</span>
           <a href={pdfSrc} target="_blank" rel="noreferrer">新窗口打开原文</a></div>
-        <PdfFrame key={pdfSrc} src={pdfSrc} /></aside>}
+        <PdfReader engine={workspace.viewer.engine} url={openedPdfUrl} page={route.page} /></aside>}
         </div>
       </section>
     </div>

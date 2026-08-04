@@ -30,6 +30,7 @@ export type SettingsRuntime = {
   takeawayQualityReleased: boolean;
   agentMessageTimeoutMs?: number;
   entryResolverMode?: PaperResolverMode;
+  pdfViewerEngine?: "native" | "pdfjs";
   pdfNetwork?: PdfNetworkSettings;
   now?: () => Date;
   codexRuntimeStatus(): CodexRuntimeStatus;
@@ -78,7 +79,10 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
       listener: { host: runtime.host, port: runtime.port, loopbackOnly: true },
       dataRoot: layout.root,
       fixture: runtime.fixture,
-      featureFlags: { takeawayQualityV2: runtime.takeawayQualityReleased },
+      featureFlags: {
+        takeawayQualityV2: runtime.takeawayQualityReleased,
+        pdfJsViewer: runtime.pdfViewerEngine === "pdfjs",
+      },
       codex: runtime.codexRuntimeStatus(),
       latestAgentActivity: latestAgentActivity ? {
         taskKind: latestAgentActivity[0],

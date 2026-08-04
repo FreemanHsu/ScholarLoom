@@ -6,8 +6,13 @@ import { join } from "node:path";
 export async function createFixturePdf(): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
-  pdf.addPage().drawText("ScholarLoom fixture introduction", { x: 40, y: 700, font });
-  const visualPage = pdf.addPage();
+  const a4Page = pdf.addPage([595.28, 841.89]);
+  a4Page.drawRectangle({ x: 18, y: 18, width: 559.28, height: 805.89, borderColor: rgb(.12, .3, .2), borderWidth: 3 });
+  a4Page.drawText("A4 - PAGE 1", { x: 40, y: 775, font, size: 28, color: rgb(.12, .3, .2) });
+  a4Page.drawText("ScholarLoom fixture introduction", { x: 40, y: 720, font });
+  const visualPage = pdf.addPage([612, 792]);
+  visualPage.drawRectangle({ x: 18, y: 18, width: 576, height: 756, borderColor: rgb(.35, .18, .08), borderWidth: 3 });
+  visualPage.drawText("LETTER - PAGE 2", { x: 40, y: 725, font, size: 28, color: rgb(.35, .18, .08) });
   visualPage.drawText("Table 1 reports accuracy 91.2. Code: https://github.com/example/fixture", { x: 40, y: 700, font, size: 10 });
   visualPage.drawRectangle({ x: 80, y: 160, width: 70, height: 180, color: rgb(.35, .5, .7) });
   visualPage.drawRectangle({ x: 190, y: 160, width: 70, height: 300, color: rgb(1, .5, 0) });
