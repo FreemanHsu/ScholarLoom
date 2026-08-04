@@ -3,8 +3,13 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export async function createFixturePdf(): Promise<Uint8Array> {
+async function buildFixturePdf(attachmentBytes = 0): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
+  const fixtureDate = new Date("2024-01-01T00:00:00.000Z");
+  pdf.setCreationDate(fixtureDate);
+  pdf.setModificationDate(fixtureDate);
+  pdf.setCreator("ScholarLoom fixture");
+  pdf.setProducer("ScholarLoom fixture");
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const a4Page = pdf.addPage([595.28, 841.89]);
   a4Page.drawRectangle({ x: 18, y: 18, width: 559.28, height: 805.89, borderColor: rgb(.12, .3, .2), borderWidth: 3 });
@@ -18,7 +23,26 @@ export async function createFixturePdf(): Promise<Uint8Array> {
   visualPage.drawRectangle({ x: 190, y: 160, width: 70, height: 300, color: rgb(1, .5, 0) });
   visualPage.drawText("A", { x: 110, y: 140, font });
   visualPage.drawText("B", { x: 220, y: 140, font });
+  if (attachmentBytes > 0) {
+    const payload = new Uint8Array(attachmentBytes);
+    let state = 0x5c10_1a7e;
+    for (let index = 0; index < payload.length; index += 1) {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      payload[index] = state & 0xff;
+    }
+    await pdf.attach(payload, "deterministic-large-fixture.bin");
+  }
   return pdf.save();
+}
+
+export async function createFixturePdf(): Promise<Uint8Array> {
+  return buildFixturePdf();
+}
+
+export async function createLargeFixturePdf(): Promise<Uint8Array> {
+  return buildFixturePdf(12 * 1024 * 1024);
 }
 
 export const fixtureSummary = {

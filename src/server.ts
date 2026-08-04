@@ -1,5 +1,5 @@
 import { createApp, type PaperSource } from "./app.js";
-import { createFixturePdf, fixtureSummary, prepareFixtureRepository } from "./adapters/fixture.js";
+import { createFixturePdf, createLargeFixturePdf, fixtureSummary, prepareFixtureRepository } from "./adapters/fixture.js";
 import { GitRepositoryAdapter } from "./adapters/git-repository.js";
 import { ArxivPaperSource } from "./adapters/arxiv.js";
 import { DirectPdfSource } from "./adapters/direct-pdf.js";
@@ -22,6 +22,7 @@ import { VisualEvidenceStore } from "./storage/visual-evidence-store.js";
 import { MINIMUM_CODEX_VERSION } from "./agent/agent-configuration.js";
 
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
+const largePdfFixture = fixture && process.env.SCHOLARLOOM_FIXTURE_PDF === "large";
 const pdfViewerEngine = process.env.SCHOLARLOOM_PDF_VIEWER === "pdfjs" ? "pdfjs" : "native";
 const takeawayQualityReleased = process.env.SCHOLARLOOM_TAKEAWAY_V2_RELEASED === "1";
 const entryResolverMode = ["off", "shadow", "enabled"].includes(
@@ -95,7 +96,7 @@ const fixtureSelectionRunner: TakeawaySelectionRunner = {
 };
 const paperSource: PaperSource = fixture ? {
   async resolve(arxivId) { return { arxivId, latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
-  async fetchPdf() { return createFixturePdf(); },
+  async fetchPdf() { return largePdfFixture ? createLargeFixturePdf() : createFixturePdf(); },
 } : new ArxivPaperSource();
 const pdfProxy = fixture ? null : resolvePdfProxyConfiguration(process.env);
 const directPdfSource = fixture ? {

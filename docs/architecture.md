@@ -543,13 +543,35 @@ when the flag is absent or invalid.
 
 The headed Chrome A4/Letter fixture measured a 230 ms first render and 80 ms p95 across 60
 page transitions, with one PDF request, about 9.6 MB observed JS heap, and 0.68 seconds of
-main-thread task time across those transitions. These are local small-fixture measurements,
-not large-PDF claims: the 1.5 KB PDF did not trigger Range requests. The build adds a lazy
-432 KB PDF.js chunk (128 KB gzip) and a 1.26 MB worker asset. This is a **go** for continued
-feature-flagged evaluation and a **no-go** for default replacement: the canvas-only spike
-lacks text selection, search, print, and document-content accessibility, and has not passed
-a representative large-PDF/real-paper corpus. PDF.js also does not reduce original PDF bytes;
-derived PDF optimization remains a separate pipeline.
+main-thread task time across those transitions. A separate deterministic 12,588,462-byte
+fixture rendered its first page in 0.29–0.39 seconds across repeated runs, with 6.5–6.9 MB
+page-target heap growth and 0.15–0.16 seconds of page-target task time. It issued one full
+`200` request plus one 5.6 KB tail
+`Range` request. Range transport therefore works, but this non-linearized fixture still
+transferred the complete original before rendering; PDF.js did not reduce first-open bytes.
+Chrome page-target metrics exclude the PDF.js worker process, so these are lower bounds.
+
+The build adds a lazy 432 KB PDF.js chunk (128 KB gzip) and a 1.26 MB worker asset. This is a
+**go** for continued feature-flagged evaluation and a **no-go** for default replacement. All
+of the following promotion gates must pass before changing the default:
+
+1. On a versioned corpus of at least 20 real Papers spanning 1–100 MiB, scanned/text PDFs,
+   embedded/subset fonts, and linearized/non-linearized files, first-page p95 is at most
+   1.5 seconds on the documented reference Mac and no Paper falls back unexpectedly.
+2. Thirty Evidence/Back cycles produce no stale page, no extra PDF download, and page-render
+   p95 at most 250 ms; fit-width differs from available width by at most 2 CSS pixels before
+   and after narrow/wide pane resizes.
+3. A PDF of at least 10 MiB stays below 64 MiB page-target heap growth and 1 second of
+   page-target task time for first render; worker-inclusive RSS/CPU must also be measured and
+   assigned a threshold before release.
+4. Automated parity journeys prove selectable text, in-document search, print, and an
+   accessibility tree containing document text. The current canvas-only spike fails all four
+   capability gates; the visible native new-window action is an escape hatch, not parity.
+5. PDF.js plus worker remain lazy-loaded, their combined uncompressed build output stays below
+   2 MiB, and any load/render failure reaches the correctly targeted native viewer.
+
+PDF.js does not compress original PDF bytes; derived PDF optimization remains a separate
+pipeline whose output may only enter rebuildable `derived/` or `cache/` storage.
 
 New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
 compatibility input. Direct PDF acquisition validates DNS and every redirect before

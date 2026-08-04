@@ -118,6 +118,10 @@ SCHOLARLOOM_PDF_VIEWER=pdfjs npm start
 当前 spike 是 canvas-only，尚未提供文本选择、搜索、打印和完整 accessibility；加载或
 渲染失败时会自动降级 native viewer，新窗口打开原文始终保留。
 
+对应 browser journeys 为 `npm run test:browser:pdfjs` 和
+`npm run test:browser:pdfjs:large`；后者使用独立的 12 MiB、可重建 fixture，不读取
+生产 PDF。
+
 应用只监听 `127.0.0.1:3000`。本地 fixture 旅程不访问 arXiv 或 Codex，仍使用真实
 SQLite、filesystem、PDF.js 和 Git：
 

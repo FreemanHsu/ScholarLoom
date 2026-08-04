@@ -138,3 +138,15 @@ test("PDF.js load failure falls back to the native viewer on the requested page"
   await expect(fallback.getByRole("alert")).toContainText("已切换到浏览器 PDF 阅读器");
   await expect(fallback.getByTitle("原始 PDF")).toHaveAttribute("src", /#page=2&view=FitH&navpanes=0$/);
 });
+
+test("canvas-only spike records release-blocking reader capability gaps", async ({ page }) => {
+  await page.goto(`/papers/${encodeURIComponent(paperId)}`);
+
+  const reader = page.locator('[data-viewer-engine="pdfjs"]');
+  await expect(reader.locator('canvas[data-rendered-page="1"]')).toBeVisible();
+  await expect(reader.locator(".textLayer")).toHaveCount(0);
+  await expect(reader.getByText("A4 - PAGE 1")).toHaveCount(0);
+  await expect(reader.getByRole("searchbox")).toHaveCount(0);
+  await expect(reader.getByRole("button", { name: /打印|Print/i })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "新窗口打开原文" })).toBeVisible();
+});

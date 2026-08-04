@@ -81,10 +81,22 @@ Observed on the two-page A4/Letter fixture:
 - JS heap after the transition run: 9.6 MB; main-thread task time across the run: 0.68 s;
 - build assets: lazy PDF.js chunk 432 KB (128 KB gzip), worker 1.26 MB.
 
+The independent large-PDF journey (`npm run test:browser:pdfjs:large`) uses a deterministic
+12,588,462-byte PDF and observed:
+
+- first render: 0.29–0.39 seconds across repeated runs;
+- requests: one complete `200` plus one 5.6 KB tail `Range 206`;
+- page-target heap growth: 6.5–6.9 MB; page-target task time: 0.15–0.16 s;
+- worker-process CPU and memory are not included in those CDP page-target values.
+
+The result verifies Range compatibility but also shows that this non-linearized PDF transfers
+all original bytes before first render. It does not demonstrate compression or byte savings.
+
 Decision: **go** for continued gated evaluation; **no-go** for the default reader. The
 canvas-only spike has no text selection, search, print UI, or document-content accessibility,
-and the fixture does not establish large-PDF performance. The native viewer remains default
-and the new-window fallback remains visible.
+and worker-inclusive resource use plus a representative real-Paper corpus remain unmeasured.
+The executable promotion thresholds and parity gates are recorded in `docs/architecture.md`;
+the native viewer remains default and the new-window fallback remains visible.
 
 ## Paper Workspace bottom-edge regression
 
