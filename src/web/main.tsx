@@ -35,6 +35,7 @@ import { RepositoryPanel, type RepositoryAssociation } from "./repository-panel.
 import { SettingsPage } from "./settings-page.js";
 import { pdfViewerUrl } from "./pdf-viewer-url.js";
 import { PdfReader, type PdfViewerEngine } from "./pdf-reader.js";
+import type { PdfJsRequestPolicy } from "../runtime-config.js";
 import type { SettingsSnapshot } from "../settings/settings-snapshot.js";
 import "./styles.css";
 
@@ -243,7 +244,7 @@ type Workspace = {
   };
   processing: null | { jobId: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null };
   repositories: RepositoryAssociation[];
-  viewer: { engine: PdfViewerEngine };
+  viewer: { engine: PdfViewerEngine; requestPolicy: PdfJsRequestPolicy };
 };
 type Proposal = ConversationProposal & { oneClickEligible: boolean };
 type ReviewProposal = {
@@ -2958,7 +2959,8 @@ function PaperWorkspace(props: {
     {panelKind === "source" && <aside className="pdf-pane workbench-source">
         <div className="pdf-toolbar"><span>PDF · p. {route.page}</span>
           <a href={pdfSrc} target="_blank" rel="noreferrer">新窗口打开原文</a></div>
-        <PdfReader engine={workspace.viewer.engine} url={openedPdfUrl} page={route.page} /></aside>}
+        <PdfReader engine={workspace.viewer.engine} requestPolicy={workspace.viewer.requestPolicy}
+          url={openedPdfUrl} page={route.page} /></aside>}
         </div>
       </section>
     </div>

@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { createApp } from "../app.js";
 import { fixtureSummary } from "../adapters/fixture.js";
-import { parsePort } from "../runtime-config.js";
+import { parsePort, resolvePdfJsRequestPolicy } from "../runtime-config.js";
 import { initializeDataRoot } from "../storage/layout.js";
 import { MINIMUM_CODEX_VERSION } from "../agent/agent-configuration.js";
 import { PDF_DELIVERY_CORPUS } from "./pdf-delivery-corpus.js";
@@ -17,6 +17,7 @@ if (!paper) throw new Error("benchmark-corpus-paper-required");
 const port = parsePort(process.env.SCHOLARLOOM_PORT ?? "3018");
 const host = "127.0.0.1";
 const optimizationEnabled = process.env.SCHOLARLOOM_BENCHMARK_PDF_OPTIMIZATION !== "off";
+const requestPolicy = resolvePdfJsRequestPolicy(process.env.SCHOLARLOOM_PDFJS_REQUEST_POLICY);
 const startedAt = new Date().toISOString();
 const runtimeRoot = await mkdtemp(join(tmpdir(), `scholarloom-pdf-corpus-browser-${paper.arxivId}-`));
 let app: Awaited<ReturnType<typeof createApp>> | null = null;
@@ -49,7 +50,8 @@ try {
     ...(optimizationEnabled ? { pdfOptimization: { strategy: "lossless-linearization" as const } } : {}),
     settingsRuntime: {
       host, port, startedAt, fixture: true, takeawayQualityReleased: false,
-      pdfViewerEngine: "pdfjs", pdfOptimization: optimizationEnabled ? "lossless-linearization" : "off",
+      pdfViewerEngine: "pdfjs", pdfJsRequestPolicy: requestPolicy,
+      pdfOptimization: optimizationEnabled ? "lossless-linearization" : "off",
       codexRuntimeStatus: () => ({
         installedVersion: null, minimumVersion: MINIMUM_CODEX_VERSION, versionStatus: "unavailable",
         capabilityStatus: "not-run", capabilityChecks: {
@@ -77,6 +79,7 @@ try {
     sourceBytes: bytes.byteLength,
     arxivId: paper.arxivId,
     deliveryMode: servingOriginal ? "original" : "lossless-linearization",
+    requestPolicy,
   })}\n`);
 } catch (error) {
   await cleanup();

@@ -84,7 +84,7 @@ describe("paper ingestion lifecycle", () => {
     expect(workspace.json()).toMatchObject({
       paper: { title: "Fixture Paper", version: 2 },
       pdf: { pageCount: 2, url: expect.stringMatching(/^\/api\/artifacts\/[0-9a-f]{64}\/pdf$/) },
-      viewer: { engine: "native" },
+      viewer: { engine: "native", requestPolicy: "default" },
       summary: {
         status: "active",
         readStatus: "read",

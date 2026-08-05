@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { parsePort, requireLoopbackHost, resolvePdfProxyConfiguration } from "../src/runtime-config.js";
+import { parsePort, requireLoopbackHost, resolvePdfJsRequestPolicy,
+  resolvePdfProxyConfiguration } from "../src/runtime-config.js";
 
 describe("production listener configuration", () => {
   it("accepts loopback listeners and rejects wildcard, LAN, and tailnet binds", () => {
@@ -32,5 +33,11 @@ describe("production listener configuration", () => {
     }
     expect(resolvePdfProxyConfiguration({ ALL_PROXY: "http://proxy.example.test:7890" })).toBeNull();
     expect(resolvePdfProxyConfiguration({ all_proxy: "not a url" })).toBeNull();
+  });
+
+  it("enables range-first PDF.js requests only for the exact opt-in value", () => {
+    expect(resolvePdfJsRequestPolicy(undefined)).toBe("default");
+    expect(resolvePdfJsRequestPolicy("range-first")).toBe("range-first");
+    expect(resolvePdfJsRequestPolicy("enabled")).toBe("default");
   });
 });

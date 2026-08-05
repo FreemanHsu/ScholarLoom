@@ -17,7 +17,8 @@ describe("SettingsPage", () => {
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: "$HOME/ScholarLoomData",
         fixture: false,
-        featureFlags: { takeawayQualityV2: false, pdfJsViewer: false, pdfLosslessDelivery: false },
+        featureFlags: { takeawayQualityV2: false, pdfJsViewer: false, pdfJsRangeFirst: false,
+          pdfLosslessDelivery: false },
         latestAgentActivity: {
           taskKind: "paper-summary",
           runId: "job:summary",
@@ -98,6 +99,7 @@ describe("SettingsPage", () => {
     expect(html).toContain("0.1.0");
     expect(html).toContain("Takeaway Quality V2");
     expect(html).toContain("PDF.js Reader 未启用");
+    expect(html).toContain("PDF.js Range-first 未启用");
     expect(html).toContain("Lossless PDF Delivery 未启用");
     expect(html).toContain("vault-markdown-yaml");
     expect(html).toContain("agent-configuration.v5");

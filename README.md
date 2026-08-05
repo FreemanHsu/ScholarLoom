@@ -118,6 +118,19 @@ SCHOLARLOOM_PDF_VIEWER=pdfjs npm start
 当前 spike 是 canvas-only，尚未提供文本选择、搜索、打印和完整 accessibility；加载或
 渲染失败时会自动降级 native viewer，新窗口打开原文始终保留。
 
+可独立启用 PDF.js `range-first` request policy；它关闭 streaming 与 auto-fetch，避免
+不需要的完整响应和 Range 请求竞速。默认仍使用 PDF.js 自身策略：
+
+```bash
+SCHOLARLOOM_PDF_VIEWER=pdfjs \
+SCHOLARLOOM_PDFJS_REQUEST_POLICY=range-first \
+npm start
+```
+
+该策略在真实 ViT v2 样本上明显降低首屏流量和时间，在 GPT-3 v4 上基本中性，当前仍
+只用于 gated evaluation。方法与数据见
+[PDF.js Request Policy Benchmark](docs/benchmarks/pdfjs-request-policy-2026-08-05.md)。
+
 对应 browser journeys 为 `npm run test:browser:pdfjs` 和
 `npm run test:browser:pdfjs:large`；后者使用独立的 12 MiB、可重建 fixture，不读取
 生产 PDF。

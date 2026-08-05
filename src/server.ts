@@ -5,7 +5,8 @@ import { ArxivPaperSource } from "./adapters/arxiv.js";
 import { DirectPdfSource } from "./adapters/direct-pdf.js";
 import { CodexCliRunner } from "./adapters/codex-cli.js";
 import { existsSync } from "node:fs";
-import { parsePort, requireLoopbackHost, resolvePdfProxyConfiguration } from "./runtime-config.js";
+import { parsePort, requireLoopbackHost, resolvePdfJsRequestPolicy,
+  resolvePdfProxyConfiguration } from "./runtime-config.js";
 import { assertDataRootWritable, DATA_MANIFEST_NAME, defaultDataRoot, initializeDataRoot, openDataRoot } from "./storage/layout.js";
 import { acquireRuntimeLock } from "./storage/runtime-lock.js";
 import { join } from "node:path";
@@ -24,6 +25,7 @@ import { MINIMUM_CODEX_VERSION } from "./agent/agent-configuration.js";
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
 const largePdfFixture = fixture && process.env.SCHOLARLOOM_FIXTURE_PDF === "large";
 const pdfViewerEngine = process.env.SCHOLARLOOM_PDF_VIEWER === "pdfjs" ? "pdfjs" : "native";
+const pdfJsRequestPolicy = resolvePdfJsRequestPolicy(process.env.SCHOLARLOOM_PDFJS_REQUEST_POLICY);
 const pdfOptimization = process.env.SCHOLARLOOM_PDF_OPTIMIZATION === "lossless-linearization";
 const takeawayQualityReleased = process.env.SCHOLARLOOM_TAKEAWAY_V2_RELEASED === "1";
 const entryResolverMode = ["off", "shadow", "enabled"].includes(
@@ -130,7 +132,7 @@ try {
     entryResolverMode,
     ...(pdfOptimization ? { pdfOptimization: { strategy: "lossless-linearization" as const } } : {}),
     settingsRuntime: {
-      host, port, startedAt, fixture, takeawayQualityReleased, pdfViewerEngine,
+      host, port, startedAt, fixture, takeawayQualityReleased, pdfViewerEngine, pdfJsRequestPolicy,
       pdfOptimization: pdfOptimization ? "lossless-linearization" : "off",
       pdfNetwork: pdfProxy ? {
         strategy: "direct-first-proxy-fallback",

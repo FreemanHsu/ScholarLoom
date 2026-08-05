@@ -1118,7 +1118,11 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   app.get<{ Params: { id: string } }>("/api/papers/:id", async (request, reply) => {
     const workspace = await store.getPaperWorkspace(request.params.id);
     if (!workspace) return reply.code(404).send({ code: "paper-not-found" });
-    const viewer = { engine: settingsRuntime.pdfViewerEngine ?? "native" } as const;
+    const viewerEngine = settingsRuntime.pdfViewerEngine ?? "native";
+    const viewer = {
+      engine: viewerEngine,
+      requestPolicy: viewerEngine === "pdfjs" ? settingsRuntime.pdfJsRequestPolicy ?? "default" : "default",
+    } as const;
     const workspacePaper = (workspace as { paper: import("./storage/import-store.js").StoredPaper }).paper;
     if (workspacePaper.sourceType !== "arxiv" || !workspacePaper.arxivId) {
       return { ...(workspace as object), viewer, updateProposal: null };

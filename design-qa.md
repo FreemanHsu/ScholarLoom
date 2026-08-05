@@ -107,6 +107,14 @@ render in both modes. Attention v7 linearized measured 2.411 s with the full res
 These are single-run diagnostics, but they reject promotion on current evidence. qpdf output also
 proved non-deterministic until `--deterministic-id` was added and regression-tested.
 
+The follow-up request-policy spike compared PDF.js default behavior with `disableStream` plus
+`disableAutoFetch` in fresh headed Chrome sessions. GPT-3 v4 remained neutral at 1.904 s versus
+1.914 s and 411,052 completed response-body bytes in both modes. ViT v2 improved from 3.408 s
+with the complete 3.74 MB response finished to 1.906 s with 467,014 completed Range bytes.
+Its Evidence page-2 transition changed from 53 ms to 79 ms. This is a strong transport result
+for the affected sample, but only a two-Paper, single-run diagnostic; range-first remains a
+separate opt-in until repeated corpus and far-page measurements pass.
+
 Decision: **go** for continued gated evaluation; **no-go** for the default reader. The
 canvas-only spike has no text selection, search, print UI, or document-content accessibility,
 and worker-inclusive resource use plus repeatable cross-device performance remain unmeasured.

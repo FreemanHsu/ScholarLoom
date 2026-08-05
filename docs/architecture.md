@@ -551,6 +551,21 @@ page-target heap growth and 0.15–0.16 seconds of page-target task time. It iss
 transferred the complete original before rendering; PDF.js did not reduce first-open bytes.
 Chrome page-target metrics exclude the PDF.js worker process, so these are lower bounds.
 
+`SCHOLARLOOM_PDFJS_REQUEST_POLICY=range-first` adds a second, independently observable
+runtime gate inside the PDF.js reader seam. It passes `disableStream: true` and
+`disableAutoFetch: true` to PDF.js; missing or unknown values preserve the library default.
+The Paper Workspace carries the effective request policy and the read-only Settings snapshot
+reports whether it is active. It has no effect when the native reader is selected.
+
+A fresh-session headed Chrome A/B on two pinned original Paper Versions used the same
+2 MiB/s, 40 ms profile and clicked Evidence page 2 after first render. GPT-3 v4 was neutral:
+1.904 s default versus 1.914 s range-first, with 411,052 completed response-body bytes in
+both modes. ViT v2 improved from 3.408 s and a completed full 3.74 MB response to 1.906 s
+and 467,014 completed Range bytes. Its Evidence transition changed from 53 ms to 79 ms,
+still below the 250 ms gate. These single-run diagnostics justify retaining the policy but
+not promoting it; far-page navigation, idle traffic, repeat distributions, and worker-inclusive
+CPU/RSS remain open. See `docs/benchmarks/pdfjs-request-policy-2026-08-05.md`.
+
 The build adds a lazy 432 KB PDF.js chunk (128 KB gzip) and a 1.26 MB worker asset. This is a
 **go** for continued feature-flagged evaluation and a **no-go** for default replacement. All
 of the following promotion gates must pass before changing the default:
@@ -605,8 +620,9 @@ total bytes by 0.60%-3.08%. However, headed Chrome A/B samples showed GPT-3 v4 a
 1.900 s original versus 1.906 s linearized and ViT v2 at 3.414 s versus 3.411 s under the
 same 2 MiB/s, 40 ms profile. ViT completed the full response before first render in both
 modes. Lossless linearization therefore remains opt-in and is not evidence for promoting
-PDF.js. The next transport spike should isolate PDF.js streaming/autofetch policy rather
-than alter source bytes. See `docs/benchmarks/pdf-delivery-corpus-2026-08-05.md`.
+PDF.js. The subsequent streaming/autofetch spike is recorded separately in
+`docs/benchmarks/pdfjs-request-policy-2026-08-05.md`; it found a material ViT improvement
+without changing source bytes, but remains opt-in on the current evidence.
 
 New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
 compatibility input. Direct PDF acquisition validates DNS and every redirect before

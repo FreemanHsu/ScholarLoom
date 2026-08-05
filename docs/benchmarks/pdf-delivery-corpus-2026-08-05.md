@@ -66,10 +66,11 @@ render work, not PDF byte layout, dominates the observed first page.
 - Keep the qpdf pipeline available for gated evaluation: it preserved sampled
   rendering and reduced total bytes for all three eligible sources.
 - Do not use the synthetic attached-payload fixture as evidence of real-Paper speedup.
-- Evaluate PDF.js request policy next, behind its own flag. In particular,
-  `disableStream: true` plus `disableAutoFetch: true` may prevent the initial full
-  response from racing Range requests; measure first-page latency, navigation cost,
-  total bytes, CPU, and heap before considering promotion.
+- The follow-up PDF.js request-policy spike is complete. `disableStream: true` plus
+  `disableAutoFetch: true` prevented ViT's initial full response from racing Range
+  requests and improved its first render, while GPT-3 remained neutral. The policy
+  remains opt-in pending repeated and far-page measurements; see
+  [PDF.js Request Policy Benchmark](pdfjs-request-policy-2026-08-05.md).
 
 ## Reproduction
 

@@ -1,19 +1,29 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 
+import type { PdfJsRequestPolicy } from "../runtime-config.js";
 import { pdfViewerUrl } from "./pdf-viewer-url.js";
 
 export type PdfViewerEngine = "native" | "pdfjs";
 
-export function PdfReader({ engine, url, page }: { engine: PdfViewerEngine; url: string; page: number }) {
+export function PdfReader({ engine, requestPolicy, url, page }: {
+  engine: PdfViewerEngine;
+  requestPolicy: PdfJsRequestPolicy;
+  url: string;
+  page: number;
+}) {
   if (engine === "native") {
     const src = pdfViewerUrl(url, page);
     return <iframe key={src} title="原始 PDF" src={src} data-viewer-engine="native" />;
   }
-  return <PdfJsReader url={url.split("#", 1)[0]!} page={page} />;
+  return <PdfJsReader url={url.split("#", 1)[0]!} page={page} requestPolicy={requestPolicy} />;
 }
 
-function PdfJsReader({ url, page }: { url: string; page: number }) {
+function PdfJsReader({ url, page, requestPolicy }: {
+  url: string;
+  page: number;
+  requestPolicy: PdfJsRequestPolicy;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
@@ -46,7 +56,11 @@ function PdfJsReader({ url, page }: { url: string; page: number }) {
     ]).then(async ([pdfjs, worker]) => {
       if (cancelled) return;
       pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
-      loadingTask = pdfjs.getDocument({ url, rangeChunkSize: 64 * 1024 });
+      loadingTask = pdfjs.getDocument({
+        url,
+        rangeChunkSize: 64 * 1024,
+        ...(requestPolicy === "range-first" ? { disableStream: true, disableAutoFetch: true } : {}),
+      });
       loadingTask.onProgress = ({ loaded, total }: { loaded: number; total: number }) => {
         if (!cancelled && total > 0) setLoadedPercent(Math.min(100, Math.round((loaded / total) * 100)));
       };
@@ -62,7 +76,7 @@ function PdfJsReader({ url, page }: { url: string; page: number }) {
       cancelled = true;
       void loadingTask?.destroy();
     };
-  }, [url]);
+  }, [requestPolicy, url]);
 
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
@@ -111,7 +125,8 @@ function PdfJsReader({ url, page }: { url: string; page: number }) {
 
   const busy = !error && renderedPage !== page;
   const status = !document ? `正在加载原文… ${loadedPercent}%` : `正在渲染第 ${page} 页…`;
-  return <div className="pdfjs-reader" data-viewer-engine="pdfjs" aria-busy={busy} ref={scrollRef}>
+  return <div className="pdfjs-reader" data-viewer-engine="pdfjs" data-request-policy={requestPolicy}
+    aria-busy={busy} ref={scrollRef}>
     {busy && <div className="pdfjs-status" role="status" aria-live="polite">{status}</div>}
     <div className="pdfjs-page">
       <canvas key={`${url}:${page}`} ref={canvasRef} aria-label={`PDF 第 ${page} 页`}
