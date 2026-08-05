@@ -560,7 +560,11 @@ inflation, or page-count drift records a bounded fallback and never fails Paper 
 Startup backfill reuses a valid selected derived file without rerunning qpdf and rebuilds a
 missing file from its immutable original. This makes default snapshots (which exclude
 `derived/`) independently restorable. Image downsampling/lossy compression remains outside
-this accepted slice and requires a separate quality policy.
+this accepted slice and requires a separate quality policy. A six-Paper Ghostscript `/ebook`
+experiment passed 0/6 quality gates despite reducing total bytes by 81.52%; complete figure
+loss and one structurally invalid output make the preset unsuitable for delivery. The
+reproducible no-go evidence is recorded in
+`docs/benchmarks/ghostscript-ebook-compression-2026-08-05.md`.
 
 On the deterministic 12 MiB fixture, qpdf 12.3.2 produced a 12,589,790-byte delivery file
 from the 12,588,462-byte original (about 0.011% growth). A headed Chrome/PDF.js journey at

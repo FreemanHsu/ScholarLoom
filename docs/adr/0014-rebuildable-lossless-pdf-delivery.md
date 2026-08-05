@@ -54,5 +54,8 @@ so a missing or same-size-corrupt derived file falls through to the verified ori
 - A five-Paper real corpus preserved all nine sampled page renders and reduced eligible
   output size by 0.60%-3.08%, but browser A/B samples showed no meaningful first-page
   latency improvement. The strategy therefore remains opt-in.
-- Image downsampling and lossy compression are separate future strategies with independent
-  quality review; they are not implied by this ADR.
+- Image downsampling and lossy compression are separate strategies with independent
+  quality review; they are not implied by this ADR. A six-Paper Ghostscript `/ebook`
+  experiment reduced total bytes by 81.52% but passed 0/6 quality gates, including
+  complete figure loss and one structurally invalid candidate, so it was not integrated;
+  see [Ghostscript `/ebook` PDF Compression Benchmark](../benchmarks/ghostscript-ebook-compression-2026-08-05.md).

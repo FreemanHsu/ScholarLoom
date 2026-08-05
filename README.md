@@ -131,6 +131,11 @@ original 自动重建。
 系统临时目录保存下载内容，输出 ignored JSON 报告，不读取生产 data root。当前结论与
 复现步骤见 [PDF Delivery Corpus Benchmark](docs/benchmarks/pdf-delivery-corpus-2026-08-05.md)。
 
+Ghostscript `/ebook` 有损压缩可用 `npm run benchmark:pdf-compression` 复现，但当前明确
+不接入 delivery pipeline：六篇真实论文虽总计减少 81.52%，却有 0/6 通过质量门禁，
+包含完整 figure 丢失和结构警告。详见
+[Ghostscript `/ebook` PDF Compression Benchmark](docs/benchmarks/ghostscript-ebook-compression-2026-08-05.md)。
+
 应用只监听 `127.0.0.1:3000`。本地 fixture 旅程不访问 arXiv 或 Codex，仍使用真实
 SQLite、filesystem、PDF.js 和 Git：
 

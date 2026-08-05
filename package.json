@@ -15,6 +15,7 @@
     "backup": "tsx src/data-cli.ts snapshot",
     "backup:verify": "tsx src/data-cli.ts verify",
     "benchmark:pdf-delivery": "tsx src/benchmark/pdf-delivery-corpus-cli.ts",
+    "benchmark:pdf-compression": "tsx src/benchmark/pdf-compression-corpus-cli.ts",
     "restore": "tsx src/data-cli.ts restore",
     "migrate": "tsx src/cli.ts migrate",
     "diagnostics": "tsx src/cli.ts diagnostics",
