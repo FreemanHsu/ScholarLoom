@@ -28,6 +28,39 @@
 
 Final result: passed.
 
+## Paper Library year-column alignment
+
+- Source visual truth: `local Codex attachment (not committed)`
+- Implementation screenshot: `.playwright-cli/page-2026-08-05T12-03-50-822Z.png`
+- Full-view comparison: `output/playwright/paper-library-year-column-comparison.png`
+- Focused catalog comparison: `output/playwright/paper-library-year-column-focused.png`
+- Source and implementation pixels: 2560 × 1318
+- Implementation CSS viewport: 2560 × 1318 at device scale factor 1; no density normalization required
+- State: `/papers?sort=year`, 44 real Papers, one starred Paper, EgoScale row hovered
+
+**Findings**
+
+- [P3] The source annotation identifies the year column as slightly too far right. The revised grid reduces the original-title track from `2.5fr` to `2.3fr` and expands the Direction track from `1.1fr` to `1.2fr`, moving the year heading and values approximately 30px left at this viewport without crowding either adjacent column.
+- P0: none.
+- P1: none.
+- P2: none.
+
+**Required fidelity surfaces**
+
+- Fonts and typography: unchanged.
+- Spacing and layout rhythm: year, Direction, and status remain aligned across header and rows; only the requested horizontal track distribution changed.
+- Colors and visual tokens: unchanged.
+- Image quality and asset fidelity: no image assets are involved in the catalog grid.
+- Copy and content: unchanged; the live counts differ only where real production state changed after the source capture.
+
+**Comparison history**
+
+- Initial: the year column sat close to the right-side Direction group, leaving an oversized original-title track.
+- Revised: same-size and same-hover-state comparison shows the year column shifted left while long titles, Direction pills, and status pills remain readable.
+- Browser console: 0 errors, 0 warnings in a fresh post-deployment session.
+
+final result: passed
+
 ## Native PDF fit-width regression
 
 - Browser: installed Google Chrome, headed through Playwright
