@@ -55,6 +55,7 @@ describe("browser navigation", () => {
       relation: "all",
       pending: false,
       query: "",
+      sort: "recent",
     });
     expect(readBrowserRoute({ pathname: "/reviews", search: "" })).toEqual({ name: "reviews" });
     expect(readBrowserRoute({ pathname: "/settings", search: "" })).toEqual({ name: "settings" });
@@ -73,6 +74,7 @@ describe("browser navigation", () => {
       relation: "primary",
       pending: true,
       query: "GenCeption",
+      sort: "recent",
     });
     expect(papersHref({
       view: "all",
@@ -81,14 +83,24 @@ describe("browser navigation", () => {
       relation: "all",
       pending: false,
       query: "",
+      sort: "recent",
     })).toBe("/papers?direction=topic%3Avideo-generation");
   });
 
   it("round trips Domain and Ungrouped library filters", () => {
     expect(papersHref({ view: "all", direction: null, domain: "topic:vision", relation: "all",
-      pending: false, query: "" })).toBe("/papers?domain=topic%3Avision");
+      pending: false, query: "", sort: "recent" })).toBe("/papers?domain=topic%3Avision");
     expect(readBrowserRoute({ pathname: "/papers", search: "?domain=ungrouped&relation=primary" }))
       .toMatchObject({ domain: "ungrouped", direction: null, relation: "primary" });
+  });
+
+  it("round trips starred papers and catalog sorting", () => {
+    const href = papersHref({ view: "starred", direction: null, domain: null, relation: "all",
+      pending: false, query: "", sort: "year" });
+    expect(href).toBe("/papers?view=starred&sort=year");
+    expect(readBrowserRoute(new URL(href, "http://localhost"))).toMatchObject({
+      name: "papers", view: "starred", sort: "year",
+    });
   });
 
   it("round trips Paper Organization filters without cursor state", () => {

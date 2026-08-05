@@ -1,10 +1,11 @@
 export type PaperLibraryViewState = {
-  view: "all" | "unclassified";
+  view: "all" | "unclassified" | "starred";
   direction: string | null;
   domain?: string | null;
   relation: "all" | "primary";
   pending: boolean;
   query: string;
+  sort: "recent" | "year" | "title";
 };
 export type PaperOrganizationViewState = {
   view: "pending" | "attention" | "all";
@@ -58,12 +59,13 @@ export function paperHref(paperId: string, view: PaperViewState = { pdfOpen: fal
 
 export function papersHref(view: PaperLibraryViewState): string {
   const query = new URLSearchParams();
-  if (view.view === "unclassified") query.set("view", "unclassified");
+  if (view.view !== "all") query.set("view", view.view);
   if (view.direction) query.set("direction", view.direction);
   if (view.domain) query.set("domain", view.domain);
   if (view.relation === "primary") query.set("relation", "primary");
   if (view.pending) query.set("pending", "true");
   if (view.query.trim()) query.set("q", view.query.trim());
+  if (view.sort !== "recent") query.set("sort", view.sort);
   const search = query.toString();
   return `/papers${search ? `?${search}` : ""}`;
 }
@@ -83,14 +85,17 @@ export function readBrowserRoute(location: BrowserLocation): BrowserRoute {
   if (location.pathname === "/") return { name: "home" };
   if (location.pathname === "/papers") {
     const query = new URLSearchParams(location.search);
+    const view = query.get("view");
+    const sort = query.get("sort");
     return {
       name: "papers",
-      view: query.get("view") === "unclassified" ? "unclassified" : "all",
+      view: view === "unclassified" || view === "starred" ? view : "all",
       direction: query.get("direction") || null,
       domain: query.get("domain") || null,
       relation: query.get("relation") === "primary" ? "primary" : "all",
       pending: query.get("pending") === "true",
       query: query.get("q") ?? "",
+      sort: sort === "year" || sort === "title" ? sort : "recent",
     };
   }
   if (location.pathname === "/papers/organize") {

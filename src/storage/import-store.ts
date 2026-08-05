@@ -76,6 +76,7 @@ export type StoredPaper = {
   externalIdentities?: string[];
   pendingOrganizationCount?: number;
   aliasCollision?: boolean;
+  starred: boolean;
   matchedBy?: {
     kind: "external-identity" | "preferred-alias" | "alias" | "canonical-title" | "prefix" | "catalog";
     value: string;
@@ -1799,7 +1800,8 @@ export class ImportStore {
     const storedPaper = this.listPapers().find((candidate) => candidate.id === row.paper_id)!;
     const paper: StoredPaper = { id: row.paper_id, title: row.title, authors: storedPaper.authors, year: storedPaper.year,
       version, versionId, versionLabel: versionRow.source_version,
-      sourceType: versionRow.source_type, sourceUrl: versionRow.source_url, ...(arxivId ? { arxivId } : {}) };
+      sourceType: versionRow.source_type, sourceUrl: versionRow.source_url, starred: storedPaper.starred,
+      ...(arxivId ? { arxivId } : {}) };
     const replay = this.#database.prepare(`SELECT id,attempt,state,import_request_id FROM job_runs
       WHERE idempotency_key=?`).get(idempotencyKey) as
       { id: string; attempt: number; state: string; import_request_id: string | null } | undefined;
@@ -1912,7 +1914,7 @@ export class ImportStore {
 
   listPapers(filters: {
     q?: string;
-    view?: "all" | "unclassified";
+    view?: "all" | "unclassified" | "starred";
     direction?: string;
     domain?: string;
     relation?: "all" | "primary";
@@ -1933,6 +1935,8 @@ export class ImportStore {
         ORDER BY j.attempt DESC,j.queued_at DESC,j.id DESC LIMIT 1) job_error_json,
       CASE WHEN EXISTS (SELECT 1 FROM summary_revisions s WHERE s.paper_id=p.id AND s.status='active') THEN 'ready'
         WHEN v.processing_status='failed' THEN 'failed' ELSE 'processing' END summary_status,
+      CASE WHEN EXISTS (SELECT 1 FROM paper_library_preferences pref
+        WHERE pref.paper_id=p.id AND pref.starred=1) THEN 1 ELSE 0 END starred,
       CASE WHEN EXISTS (SELECT 1 FROM paper_code_links pcl WHERE pcl.paper_id=p.id AND pcl.status='confirmed') THEN 'ready'
         WHEN EXISTS (SELECT 1 FROM proposals pr WHERE pr.paper_id=p.id AND pr.proposal_type='repository-retry'
           AND pr.review_status='pending') THEN 'failed'
@@ -1945,7 +1949,7 @@ export class ImportStore {
         source_url: string; source_version: string; arxiv_id: string | null; metadata_json: string;
         job_state: string | null; job_progress: number | null; job_error_json: string | null;
         summary_status: "ready" | "processing" | "failed";
-        code_status: "ready" | "failed" | "not-linked"; pending_review_count: number }>).map((row) => ({
+        starred: number; code_status: "ready" | "failed" | "not-linked"; pending_review_count: number }>).map((row) => ({
         id: row.id, ...(row.arxiv_id ? { arxivId: row.arxiv_id } : {}), title: row.title,
         authors: (JSON.parse(row.metadata_json) as { authors: string[] }).authors,
         year: (JSON.parse(row.metadata_json) as { year: number }).year,
@@ -1955,10 +1959,22 @@ export class ImportStore {
         processing: row.job_state ? { state: requireImportJobState(row.job_state), progress: row.job_progress ?? 0,
           needsAttention: isRetryableImportJobState(row.job_state), error: parseStoredImportError(row.job_error_json) } : null,
         summaryStatus: row.summary_status,
+        starred: row.starred === 1,
         codeStatus: row.code_status,
         pendingReviewCount: row.pending_review_count,
       }));
     return this.#paperOrganization.decoratePapers(papers, filters);
+  }
+
+  setPaperStarred(paperId: string, starred: boolean): { paperId: string; starred: boolean } {
+    if (!this.paperExists(paperId)) throw new PaperOrganizationStoreError("paper-not-found", 404);
+    const now = new Date().toISOString();
+    this.#database.prepare(`INSERT INTO paper_library_preferences(paper_id,starred,starred_at,updated_at)
+      VALUES (?,?,?,?)
+      ON CONFLICT(paper_id) DO UPDATE SET starred=excluded.starred,
+        starred_at=excluded.starred_at,updated_at=excluded.updated_at`)
+      .run(paperId, starred ? 1 : 0, starred ? now : null, now);
+    return { paperId, starred };
   }
 
   listResearchDirections(): ReturnType<PaperOrganizationStore["listDirections"]> {

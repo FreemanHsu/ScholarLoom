@@ -1393,7 +1393,7 @@ export class PaperOrganizationStore {
 
   decoratePapers<T extends BasePaper>(papers: T[], filters: {
     q?: string;
-    view?: "all" | "unclassified";
+    view?: "all" | "unclassified" | "starred";
     direction?: string;
     domain?: string;
     relation?: "all" | "primary";
@@ -1448,6 +1448,7 @@ export class PaperOrganizationStore {
     if (filters.view === "unclassified") {
       result = result.filter((paper) => !paper.directions.some((direction) => direction.role === "primary"));
     }
+    if (filters.view === "starred") result = result.filter((paper) => Boolean(paper.starred));
     if (filters.pending) result = result.filter((paper) => paper.pendingOrganizationCount > 0);
     if (filters.domain && filters.direction) throw new PaperOrganizationStoreError("paper-domain-filter-invalid", 409);
     if (filters.domain) {

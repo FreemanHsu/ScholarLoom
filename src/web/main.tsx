@@ -3,11 +3,18 @@ import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { ArrowSquareOutIcon } from "@phosphor-icons/react/dist/icons/ArrowSquareOut";
 import { ArrowLeftIcon } from "@phosphor-icons/react/dist/icons/ArrowLeft";
+import { ArrowRightIcon } from "@phosphor-icons/react/dist/icons/ArrowRight";
 import { CaretDoubleLeftIcon } from "@phosphor-icons/react/dist/icons/CaretDoubleLeft";
 import { CaretDoubleRightIcon } from "@phosphor-icons/react/dist/icons/CaretDoubleRight";
 import { DotsSixVerticalIcon } from "@phosphor-icons/react/dist/icons/DotsSixVertical";
+import { FunnelSimpleIcon } from "@phosphor-icons/react/dist/icons/FunnelSimple";
 import { GithubLogoIcon } from "@phosphor-icons/react/dist/icons/GithubLogo";
+import { HouseIcon } from "@phosphor-icons/react/dist/icons/House";
+import { MagnifyingGlassIcon } from "@phosphor-icons/react/dist/icons/MagnifyingGlass";
 import { PencilSimpleIcon } from "@phosphor-icons/react/dist/icons/PencilSimple";
+import { StarIcon } from "@phosphor-icons/react/dist/icons/Star";
+import { TagIcon } from "@phosphor-icons/react/dist/icons/Tag";
+import { WarningCircleIcon } from "@phosphor-icons/react/dist/icons/WarningCircle";
 import "@fontsource/dm-sans/400.css";
 import "@fontsource/dm-sans/500.css";
 import "@fontsource/dm-sans/600.css";
@@ -58,6 +65,7 @@ type Paper = {
   externalIdentities: string[];
   pendingOrganizationCount: number;
   aliasCollision: boolean;
+  starred: boolean;
   matchedBy?: { kind: string; value: string; exact: boolean };
 };
 type ResearchDirection = {
@@ -310,6 +318,7 @@ type KnowledgeModel = { pendingProposals: Array<Proposal & { reviewStatus: strin
 function App() {
   const [route, setRoute] = useState<BrowserRoute>(() => readBrowserRoute(window.location));
   const [papers, setPapers] = useState<Paper[]>([]);
+  const [papersLoading, setPapersLoading] = useState(true);
   const [papersError, setPapersError] = useState<string | null>(null);
   const [directions, setDirections] = useState<ResearchDirection[]>([]);
   const [hierarchy, setHierarchy] = useState<DirectionHierarchyModel>({ enabled: false, everEnabled: false,
@@ -362,6 +371,25 @@ function App() {
       setPapersError(null);
     } catch (cause) {
       setPapersError(cause instanceof Error ? cause.message : "论文库暂时不可用");
+    } finally {
+      setPapersLoading(false);
+    }
+  };
+
+  const togglePaperStar = async (paperId: string, starred: boolean) => {
+    setPapers((current) => current.map((paper) => paper.id === paperId ? { ...paper, starred } : paper));
+    try {
+      const response = await fetch(`/api/papers/${encodeURIComponent(paperId)}/star`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ starred }),
+      });
+      if (!response.ok) throw new Error("星标状态保存失败");
+      setPapersError(null);
+    } catch (cause) {
+      setPapers((current) => current.map((paper) => paper.id === paperId ? { ...paper, starred: !starred } : paper));
+      setPapersError(cause instanceof Error ? cause.message : "星标状态保存失败");
+      throw cause;
     }
   };
 
@@ -837,10 +865,9 @@ function App() {
       onBypassEntry={() => submitEntryQuestion({ resolutionMode: "off" })}
       onNavigate={navigate} onImport={() => setImportOpen(true)} />}
     {route.name === "papers" && <PaperLibrary papers={papers} directions={directions} hierarchy={hierarchy} route={route}
-      error={papersError} onNavigate={navigate}
-      onDirectionsChanged={async () => { await refreshDirections(); await refreshPapers(); }} />}
+      loading={papersLoading} error={papersError} onNavigate={navigate} onToggleStar={togglePaperStar} />}
     {route.name === "paper-organization" &&
-      <PaperOrganizationWorkspace route={route} directions={directions} onNavigate={navigate}
+      <PaperOrganizationWorkspace route={route} directions={directions} hierarchy={hierarchy} onNavigate={navigate}
         onDirectionsChanged={async () => { await refreshDirections(); await refreshPapers(); }} />}
     {route.name === "reviews" && <ReviewCenter proposals={reviewProposals} error={reviewsError} onNavigate={navigate}
       onRefresh={async () => {
@@ -988,6 +1015,7 @@ function StatusSummary({ label, title, count, empty, onOpen }: { label: string; 
 function PaperOrganizationWorkspace(props: {
   route: Extract<BrowserRoute, { name: "paper-organization" }>;
   directions: ResearchDirection[];
+  hierarchy: DirectionHierarchyModel;
   onNavigate(href: string): void;
   onDirectionsChanged(): Promise<void>;
 }) {
@@ -1057,6 +1085,8 @@ function PaperOrganizationWorkspace(props: {
     <TaxonomyBootstrapPanel directionCount={props.directions.length}
       onChanged={async () => { await props.onDirectionsChanged(); await load(); }}
       onNavigate={props.onNavigate} />
+    <DirectionCreator directions={props.directions} hierarchy={props.hierarchy}
+      onCreated={async () => { await props.onDirectionsChanged(); await load(); }} />
     <form className="paper-catalog-search" onSubmit={(event) => {
       event.preventDefault();
       navigateWith({ query: query.trim() });
@@ -1558,9 +1588,10 @@ function PaperLibrary(props: {
   directions: ResearchDirection[];
   hierarchy: DirectionHierarchyModel;
   route: Extract<BrowserRoute, { name: "papers" }>;
+  loading: boolean;
   error: string | null;
   onNavigate(href: string): void;
-  onDirectionsChanged(): Promise<void>;
+  onToggleStar(paperId: string, starred: boolean): Promise<void>;
 }) {
   const { route } = props;
   const [query, setQuery] = useState(route.query);
@@ -1604,9 +1635,14 @@ function PaperLibrary(props: {
     ? new Set(props.directions.filter((direction) => !direction.parentDomainId).map((direction) => direction.id))
     : selectedDomain ? new Set(props.directions.filter((direction) => direction.parentDomainId === selectedDomain.id)
       .map((direction) => direction.id)) : null;
-  const visible = (catalogMatches ?? props.papers).filter((paper) => {
+  const latestStars = new Map(props.papers.map((paper) => [paper.id, paper.starred]));
+  const visible = (catalogMatches ?? props.papers).map((paper) => ({
+    ...paper,
+    starred: latestStars.get(paper.id) ?? paper.starred,
+  })).filter((paper) => {
     if (route.view === "unclassified" && paper.directions.some((direction) => direction.role === "primary")) return false;
-    if (route.pending && !paper.pendingOrganizationCount) return false;
+    if (route.view === "starred" && !paper.starred) return false;
+    if (route.pending && !paperNeedsAttention(paper)) return false;
     if (route.direction && !paper.directions.some((direction) =>
       direction.topicId === route.direction && (route.relation !== "primary" || direction.role === "primary"))) return false;
     if (domainChildIds && !paper.directions.some((direction) => domainChildIds.has(direction.topicId) &&
@@ -1616,49 +1652,27 @@ function PaperLibrary(props: {
       ...paper.directions.map((direction) => direction.title)].join(" ").normalize("NFKC")
       .toLocaleLowerCase().includes(normalizedQuery);
   });
-  const primary = selectedDirection
-    ? visible.filter((paper) => paper.directions.some((direction) =>
-      direction.topicId === selectedDirection.id && direction.role === "primary"))
-    : visible;
-  const secondaryOnly = selectedDirection && route.relation === "all"
-    ? visible.filter((paper) => paper.directions.some((direction) =>
-      direction.topicId === selectedDirection.id && direction.role === "secondary"))
-    : [];
-  const libraryGroups = route.view === "unclassified"
-    ? [{ id: "unclassified", title: "未分类", papers: visible }]
-    : [
-      ...props.directions.map((direction) => ({
-        id: direction.id,
-        title: direction.title,
-        papers: visible.filter((paper) => paper.directions.some((assignment) =>
-          assignment.topicId === direction.id && assignment.role === "primary")),
-      })).filter((group) => group.papers.length > 0),
-      {
-        id: "unclassified",
-        title: "未分类",
-        papers: visible.filter((paper) => !paper.directions.some((direction) => direction.role === "primary")),
-      },
-    ].filter((group) => group.papers.length > 0);
+  const sortedPapers = visible.toSorted((left, right) => {
+    if (route.sort === "year") return right.year - left.year || paperDisplayName(left).localeCompare(paperDisplayName(right), "zh-CN");
+    if (route.sort === "title") return paperDisplayName(left).localeCompare(paperDisplayName(right), "zh-CN");
+    return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")) || left.id.localeCompare(right.id);
+  });
   const href = (next: Partial<PaperLibraryViewState>) => papersHref({ ...route, ...next });
   const navigateLibrary = (nextHref: string) => {
     setDirectionNavOpen(false);
     props.onNavigate(nextHref);
   };
+  const navClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigateLibrary(event.currentTarget.getAttribute("href") ?? "/papers");
+  };
+  const starredCount = props.papers.filter((paper) => paper.starred).length;
+  const attentionCount = props.papers.filter(paperNeedsAttention).length;
+  const unclassifiedCount = props.papers.filter((paper) =>
+    !paper.directions.some((direction) => direction.role === "primary")).length;
+  const organizeCount = props.papers.filter((paper) => paper.pendingOrganizationCount > 0).length;
   return <main className="app page library-page">
-    <header className="page-header library-header"><div><span className="eyebrow">LIBRARY</span><h1>论文库</h1>
-      <p>按核心研究问题和贡献组织 Paper，也可以用模型名、方法名或缩写检索。</p></div>
-      <button className="ghost" onClick={() => props.onNavigate("/papers/organize")}>整理建议</button></header>
-    <form className="paper-catalog-search" onSubmit={(event) => {
-      event.preventDefault();
-      props.onNavigate(href({ query }));
-    }}>
-      <input aria-label="搜索论文标题、别名、作者或方向" value={query}
-        onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题、alias、作者或方向" />
-      <button>搜索</button>
-      {route.query && <button type="button" className="ghost" onClick={() => props.onNavigate(href({ query: "" }))}>清除</button>}
-    </form>
-    <button type="button" className="direction-drawer-trigger" aria-expanded={directionNavOpen}
-      onClick={() => setDirectionNavOpen(true)}>选择论文分组</button>
     <div className="paper-library-layout">
       {directionNavOpen && <button type="button" className="direction-drawer-backdrop" aria-label="关闭论文分组"
         onClick={() => setDirectionNavOpen(false)} />}
@@ -1666,68 +1680,136 @@ function PaperLibrary(props: {
         <button type="button" className="direction-drawer-close" onClick={() => setDirectionNavOpen(false)}>关闭</button>
         <a href={href({ view: "all", direction: null, domain: null, relation: "all", pending: false })}
           aria-current={route.view === "all" && !route.direction && !route.domain && !route.pending ? "page" : undefined}
-          onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
-          <span>全部</span><b>{props.papers.length}</b></a>
-        <a href={href({ view: "unclassified", direction: null, domain: null, relation: "all", pending: false })}
-          aria-current={route.view === "unclassified" && !route.pending ? "page" : undefined}
-          onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
-          <span>未分类</span><b>{props.papers.filter((paper) => !paper.directions.some((direction) => direction.role === "primary")).length}</b></a>
+          onClick={navClick}><span><HouseIcon size={17} />全部论文</span><b>{props.papers.length}</b></a>
+        <a href={href({ view: "starred", direction: null, domain: null, relation: "all", pending: false })}
+          aria-current={route.view === "starred" && !route.pending ? "page" : undefined} onClick={navClick}>
+          <span><StarIcon size={17} />星标论文</span><b>{starredCount}</b></a>
         <a href={href({ view: "all", direction: null, domain: null, relation: "all", pending: true })}
           aria-current={route.pending ? "page" : undefined}
-          onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
-          <span>待确认</span><b>{props.papers.filter((paper) => paper.pendingOrganizationCount > 0).length}</b></a>
-        <div className="direction-sidebar-heading"><span>研究方向</span><small>Primary</small></div>
+          onClick={navClick}><span><WarningCircleIcon size={17} />需要处理</span><b>{attentionCount}</b></a>
+        <a href={href({ view: "unclassified", direction: null, domain: null, relation: "all", pending: false })}
+          aria-current={route.view === "unclassified" && !route.pending ? "page" : undefined} onClick={navClick}>
+          <span><TagIcon size={17} />未归入方向</span><b>{unclassifiedCount}</b></a>
+        <a className="organize-library-link" href="/papers/organize" onClick={navClick}>
+          <span><strong>整理与管理</strong><small>建议 · Direction 管理</small></span><b>{organizeCount}</b>
+          <ArrowRightIcon size={15} /></a>
+        <div className="direction-sidebar-heading"><span>研究方向（Domain）</span></div>
         {props.hierarchy.enabled ? <>
           {props.hierarchy.domains.map((domain) => <details className="domain-nav-group" open key={domain.id}>
             <summary><a href={href({ view: "all", direction: null, domain: domain.id, relation: "all", pending: false })}
               aria-current={route.domain === domain.id ? "page" : undefined}
-              onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
+              onClick={navClick}>
               <span>{domain.title}</span><b>{domain.primaryCount}</b></a></summary>
             {props.directions.filter((direction) => direction.parentDomainId === domain.id).map((direction) => <a key={direction.id}
               href={href({ view: "all", direction: direction.id, domain: null, relation: "all", pending: false })}
               aria-current={route.direction === direction.id ? "page" : undefined}
-              onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
+              onClick={navClick}>
               <span>{direction.title}</span><b>{direction.primaryCount}</b></a>)}</details>)}
           <details className="domain-nav-group" open><summary><a
             href={href({ view: "all", direction: null, domain: "ungrouped", relation: "all", pending: false })}
             aria-current={route.domain === "ungrouped" ? "page" : undefined}
-            onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
+            onClick={navClick}>
             <span>Ungrouped</span><b>{props.hierarchy.ungroupedPrimaryCount}</b></a></summary>
             {props.directions.filter((direction) => !direction.parentDomainId).map((direction) => <a key={direction.id}
               href={href({ view: "all", direction: direction.id, domain: null, relation: "all", pending: false })}
-              onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
+              onClick={navClick}>
               <span>{direction.title}</span><b>{direction.primaryCount}</b></a>)}</details>
         </> : props.directions.map((direction) => <a key={direction.id}
           href={href({ view: "all", direction: direction.id, domain: null, relation: "all", pending: false })}
           aria-current={route.direction === direction.id ? "page" : undefined}
-          onClick={(event) => { event.preventDefault(); navigateLibrary(event.currentTarget.href.replace(window.location.origin, "")); }}>
+          onClick={navClick}>
           <span>{direction.title}</span><b>{direction.primaryCount}</b></a>)}
-        <DirectionCreator directions={props.directions} hierarchy={props.hierarchy} onCreated={props.onDirectionsChanged} />
       </aside>
       <section className="library">
+        <header className="library-catalog-heading"><h1>论文库 <span>· {props.papers.length} 篇</span></h1>
+          <p>集中管理与追踪你的研究资料，快速定位论文并进入阅读流程。</p></header>
+        <div className="paper-catalog-toolbar">
+          <form className="paper-catalog-search" onSubmit={(event) => {
+            event.preventDefault(); props.onNavigate(href({ query }));
+          }}><MagnifyingGlassIcon size={19} aria-hidden="true" />
+            <input aria-label="搜索论文标题、Alias、作者或研究方向" value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索论文标题、Alias、作者或研究方向" />
+            {route.query && <button type="button" className="catalog-clear"
+              onClick={() => { setQuery(""); props.onNavigate(href({ query: "" })); }}>清除</button>}
+          </form>
+          <button type="button" className="catalog-filter-button" aria-expanded={directionNavOpen}
+            onClick={() => setDirectionNavOpen(true)}><FunnelSimpleIcon size={18} />筛选</button>
+          <label className="catalog-sort"><span className="sr-only">排序方式</span><select value={route.sort}
+            onChange={(event) => props.onNavigate(href({ sort: event.target.value as PaperLibraryViewState["sort"] }))}>
+            <option value="recent">最近加入</option><option value="year">年份从新到旧</option><option value="title">按标题排序</option>
+          </select></label>
+        </div>
         {redirectNotice && <p className="inline-alert">{redirectNotice}</p>}
         {props.error && props.papers.length > 0 && <p className="inline-alert">{props.error}，正在显示上次成功载入的列表。</p>}
         {invalidDirection ? <div className="error-block"><p>这个方向或 Domain 过滤条件无效、已停用，或层级尚未启用。</p>
           <button onClick={() => props.onNavigate(papersHref({ ...route, direction: null, domain: null }))}>返回全部论文</button></div>
-          : props.error && props.papers.length === 0 ? <p className="error-block">{props.error}</p>
+          : props.loading ? <div className="paper-catalog-state" aria-live="polite"><p>正在载入论文目录…</p></div>
+          : props.error && props.papers.length === 0 ? <div className="paper-catalog-state error-block"><p>{props.error}</p>
+            <button onClick={() => window.location.reload()}>重新载入</button></div>
           : props.papers.length === 0 ? <div className="empty"><p>还没有论文。使用顶部的“导入论文”粘贴 arXiv 链接或公开 PDF 直链。</p></div>
-            : visible.length === 0 ? <div className="empty"><p>当前筛选条件下没有 Paper。</p></div>
-              : selectedDirection ? <>
-                <div className="library-section-heading"><div><span className="eyebrow">PRIMARY</span>
-                  <h2>{selectedDirection.title}</h2></div><strong>{primary.length}</strong></div>
-                {primary.map((paper) => <PaperCard key={paper.id} paper={paper} onNavigate={props.onNavigate} />)}
-                {route.relation === "all" && <><div className="library-section-heading secondary"><div>
-                  <span className="eyebrow">SECONDARY ONLY</span><h2>相关方向</h2></div><strong>{secondaryOnly.length}</strong></div>
-                  {secondaryOnly.length === 0 ? <p className="empty">还没有仅以此方向为 Secondary 的 Paper。</p>
-                    : secondaryOnly.map((paper) => <PaperCard key={paper.id} paper={paper} onNavigate={props.onNavigate} />)}</>}
-              </> : libraryGroups.map((group) => <section className="paper-direction-group" key={group.id}>
-                <div className="library-section-heading"><div><span className="eyebrow">PRIMARY GROUP</span>
-                  <h2>{group.title}</h2></div><strong>{group.papers.length}</strong></div>
-                {group.papers.map((paper) => <PaperCard key={paper.id} paper={paper} onNavigate={props.onNavigate} />)}
-              </section>)}
+            : sortedPapers.length === 0 ? <div className="paper-catalog-state empty"><p>当前筛选条件下没有论文。</p>
+              <button onClick={() => props.onNavigate("/papers")}>返回全部论文</button></div>
+              : <div className="paper-catalog-table" role="table" aria-label="论文目录">
+                <div className="paper-catalog-table-head" role="row">
+                  <span aria-hidden="true" /><span aria-hidden="true" /><span role="columnheader">Alias</span>
+                  <span role="columnheader">原始标题</span><span role="columnheader">年份</span>
+                  <span role="columnheader">研究方向</span><span role="columnheader">状态</span>
+                </div>
+                {sortedPapers.map((paper, index) => <PaperCatalogRow key={paper.id} paper={paper} index={index + 1}
+                  onNavigate={props.onNavigate} onToggleStar={props.onToggleStar} />)}
+              </div>}
       </section>
     </div>
   </main>;
+}
+
+function PaperCatalogRow(props: {
+  paper: Paper;
+  index: number;
+  onNavigate(href: string): void;
+  onToggleStar(paperId: string, starred: boolean): Promise<void>;
+}) {
+  const href = paperHref(props.paper.id);
+  const primaryDirection = props.paper.directions.find((direction) => direction.role === "primary") ?? null;
+  const status = paperLibraryStatus(props.paper);
+  return <article className="paper-catalog-row" role="row">
+    <span className="paper-catalog-index" role="cell">{String(props.index).padStart(2, "0")}</span>
+    <button type="button" className={`paper-star-button${props.paper.starred ? " starred" : ""}`}
+      aria-label={props.paper.starred ? `取消星标：${paperDisplayName(props.paper)}` : `加星标：${paperDisplayName(props.paper)}`}
+      aria-pressed={props.paper.starred} title={props.paper.starred ? "取消星标" : "加星标"}
+      onClick={() => void props.onToggleStar(props.paper.id, !props.paper.starred)}>
+      <StarIcon size={19} weight={props.paper.starred ? "fill" : "regular"} /></button>
+    <a className="paper-catalog-row-link" href={href} onClick={(event) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault(); props.onNavigate(href);
+    }}>
+      <span className={`paper-catalog-alias${props.paper.preferredAlias ? "" : " missing"}`} role="cell">
+        {props.paper.preferredAlias ?? "未设置 Alias"}</span>
+      <span className="paper-catalog-title" role="cell">{props.paper.title}</span>
+      <span className="paper-catalog-year" role="cell">{props.paper.year}</span>
+      <span className={`paper-catalog-direction${primaryDirection ? "" : " missing"}`} role="cell">
+        {primaryDirection?.title ?? "未归入方向"}</span>
+      <span className={`paper-catalog-status ${status.tone}`} role="cell">{status.label}</span>
+    </a>
+  </article>;
+}
+
+function paperDisplayName(paper: Paper): string {
+  return paper.preferredAlias ?? paper.title;
+}
+
+function paperNeedsAttention(paper: Paper): boolean {
+  return Boolean(paper.processing?.needsAttention || paper.pendingOrganizationCount > 0 || paper.summaryStatus === "failed");
+}
+
+function paperLibraryStatus(paper: Paper): { label: string; tone: "ready" | "processing" | "attention" | "muted" } {
+  if (paper.processing?.needsAttention || paper.summaryStatus === "failed") return { label: "需要恢复", tone: "attention" };
+  if (paper.processing && !isTerminalImportJobState(paper.processing.state)) {
+    return { label: `处理中 ${Math.round(paper.processing.progress * 100)}%`, tone: "processing" };
+  }
+  if (paper.summaryStatus === "ready") return { label: "可阅读", tone: "ready" };
+  return { label: "等待处理", tone: "muted" };
 }
 
 function DirectionCreator({ directions, hierarchy, onCreated }: {
@@ -1762,7 +1844,8 @@ function DirectionCreator({ directions, hierarchy, onCreated }: {
     setMergePreview(null);
     setKnowledgeOpen(false);
   }, [selectedId, selected?.revisionId]);
-  return <details className="direction-creator"><summary>＋ 管理方向</summary>
+  return <details className="direction-creator"><summary><span><b>研究方向管理</b>
+    <small>创建、重命名、合并与 Domain 维护</small></span></summary>
     <section className="hierarchy-manager"><div><b>Domain → Direction</b><small>
       {hierarchy.enabled ? "已启用" : `未启用 · ${hierarchy.directionCount}/${hierarchy.threshold} 个方向`}</small></div>
       <button type="button" className="ghost" disabled={!hierarchy.enabled && !hierarchy.canEnable} onClick={async () => {

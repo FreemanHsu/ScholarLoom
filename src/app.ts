@@ -333,7 +333,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   app.get<{ Querystring: {
     q?: string;
-    view?: "all" | "unclassified";
+    view?: "all" | "unclassified" | "starred";
     direction?: string;
     domain?: string;
     relation?: "all" | "primary";
@@ -354,6 +354,18 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       if (error instanceof PaperOrganizationStoreError) {
         return reply.code(error.status).send({ code: error.code });
       }
+      throw error;
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: { starred?: unknown } }>("/api/papers/:id/star", async (request, reply) => {
+    if (typeof request.body?.starred !== "boolean") {
+      return reply.code(400).send({ code: "paper-starred-invalid" });
+    }
+    try {
+      return store.setPaperStarred(request.params.id, request.body.starred);
+    } catch (error) {
+      if (error instanceof PaperOrganizationStoreError) return reply.code(error.status).send({ code: error.code });
       throw error;
     }
   });
