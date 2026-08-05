@@ -98,6 +98,51 @@ The focused comparison was required because the correction concerns the horizont
 
 final result: passed
 
+### Iteration 3 — catalog header and row alignment
+
+- Source visual truth: `local Codex attachment (not committed)`
+- Implementation screenshot: `.playwright-cli/page-2026-08-05T12-40-50-225Z.png`
+- Full-view comparison: `output/playwright/paper-library-header-alignment-comparison.png`
+- Focused table comparison: `output/playwright/paper-library-header-alignment-focused.png`
+- Source and implementation pixels: 2560 × 1318
+- Implementation CSS viewport: 2560 × 1318 at device scale factor 1; no density normalization required
+- State: default `/papers`, 44 real Papers, one starred Paper
+
+**Findings**
+
+- [P2] Every visible header label started 8px before the corresponding row content. The star control did not change the grid tracks; the mismatch came from `.paper-catalog-row-link > span` having 8px horizontal padding while header cells had none.
+  - Fix: applied the same `padding: 0 8px` and `min-width: 0` to `.paper-catalog-table-head > span` without changing the existing index or star tracks.
+- P0: none.
+- P1: none.
+- Remaining P2: none.
+
+**Measured alignment**
+
+- Alias header/cell border-box x: 418px / 418px; both have 8px left padding.
+- Original Title header/cell border-box x: 798px / 798px; both have 8px left padding.
+- Year header/cell border-box x: 1574px / 1574px; both have 8px left padding.
+- Direction header/cell border-box x: 1830px / 1830px; header text uses 8px and pill text uses its intentional 9px badge inset.
+- Status header/cell border-box x: 2412px / 2412px; header text uses 8px and pill text uses its intentional 9px badge inset.
+
+**Required fidelity surfaces**
+
+- Fonts and typography: Newsreader and DM Sans families, weights, truncation, and line heights are unchanged.
+- Spacing and layout rhythm: the five desktop header tracks now share the exact border-box origins and base inset of their row cells; the sequence number and independent star button remain in their original 42px tracks.
+- Colors and visual tokens: unchanged.
+- Image quality and asset fidelity: no image assets participate in the catalog header.
+- Copy and content: unchanged; source and implementation use the same production Paper inventory.
+
+**Comparison history**
+
+- Earlier state: the focused source capture shows all headers visibly offset left from their column content by the missing 8px inset.
+- Revised state: equal-size full-view and focused comparisons show the table hierarchy unchanged and every header aligned with its content column.
+- Primary interactions: the starred row/control semantics and full-row navigation remain unchanged.
+- Browser console: 0 errors, 0 warnings.
+
+The focused comparison was required because the issue is an 8px offset that is not reliably judgeable from the full page alone.
+
+final result: passed
+
 ## Native PDF fit-width regression
 
 - Browser: installed Google Chrome, headed through Playwright
