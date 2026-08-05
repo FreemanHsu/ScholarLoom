@@ -23,8 +23,6 @@ describe("read-only Settings", () => {
         now: () => new Date("2026-07-30T08:05:00.000Z"),
         fixture: false,
         takeawayQualityReleased: false,
-        pdfViewerEngine: "pdfjs",
-        pdfJsRequestPolicy: "range-first",
         pdfOptimization: "lossless-linearization",
         pdfNetwork: {
           strategy: "direct-first-proxy-fallback",
@@ -68,8 +66,7 @@ describe("read-only Settings", () => {
           },
           checkedAt: "2026-07-30T08:00:00.000Z",
         },
-        featureFlags: { takeawayQualityV2: false, pdfJsViewer: true, pdfJsRangeFirst: true,
-          pdfLosslessDelivery: true },
+        featureFlags: { takeawayQualityV2: false, pdfLosslessDelivery: true },
         latestAgentActivity: null,
       },
       agents: [
@@ -96,6 +93,8 @@ describe("read-only Settings", () => {
         proxyScope: "loopback-http-connect",
       } } } },
     });
+    expect(response.json().overview.featureFlags).not.toHaveProperty("pdfJsViewer");
+    expect(response.json().overview.featureFlags).not.toHaveProperty("pdfJsRangeFirst");
     expect(response.body).not.toContain("process.env");
     expect(response.body).not.toContain("TOKEN");
     expect(response.body).not.toContain("SECRET");

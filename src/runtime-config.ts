@@ -9,12 +9,6 @@ export function parsePort(value: string): number {
   return port;
 }
 
-export type PdfJsRequestPolicy = "default" | "range-first";
-
-export function resolvePdfJsRequestPolicy(value: string | undefined): PdfJsRequestPolicy {
-  return value === "range-first" ? "range-first" : "default";
-}
-
 export type PdfProxyConfiguration = {
   url: URL;
   source: "SCHOLARLOOM_PDF_PROXY" | "ALL_PROXY" | "all_proxy";

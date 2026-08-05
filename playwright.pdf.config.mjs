@@ -17,7 +17,7 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "SCHOLARLOOM_PORT=3014 SCHOLARLOOM_PDF_VIEWER=native node --import tsx test/fixtures/pdf-browser-server.ts",
+    command: "SCHOLARLOOM_PORT=3014 node --import tsx test/fixtures/pdf-browser-server.ts",
     url: "http://127.0.0.1:3014/",
     reuseExistingServer: false,
     timeout: 120_000,

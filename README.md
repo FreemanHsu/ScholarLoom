@@ -108,32 +108,11 @@ HTTP 状态、TLS 证书、redirect、大小和 PDF 校验错误不会改走代�
 使用已经过公网校验并固定的目标 IP，TLS SNI 仍使用原域名。`/settings` 展示 effective
 策略与配置来源，但不会显示代理地址或凭据。
 
-原文阅读默认使用 Chromium native PDF viewer。可显式启动尚未发布的 PDF.js reader
-spike；它用于评估无闪烁 Evidence 跳页、fit-width 与加载反馈，不应视为默认阅读器：
-
-```bash
-SCHOLARLOOM_PDF_VIEWER=pdfjs npm start
-```
-
-当前 spike 是 canvas-only，尚未提供文本选择、搜索、打印和完整 accessibility；加载或
-渲染失败时会自动降级 native viewer，新窗口打开原文始终保留。
-
-可独立启用 PDF.js `range-first` request policy；它关闭 streaming 与 auto-fetch，避免
-不需要的完整响应和 Range 请求竞速。默认仍使用 PDF.js 自身策略：
-
-```bash
-SCHOLARLOOM_PDF_VIEWER=pdfjs \
-SCHOLARLOOM_PDFJS_REQUEST_POLICY=range-first \
-npm start
-```
-
-该策略在真实 ViT v2 样本上明显降低首屏流量和时间，在 GPT-3 v4 上基本中性，当前仍
-只用于 gated evaluation。方法与数据见
+原文阅读使用 Chromium native PDF viewer，并通过内容哈希 URL、HTTP Range、ETag 和
+private immutable cache 复用本地 PDF。每次 Evidence 页跳转会 remount iframe 以保证
+Chromium 实际切换到目标页；`view=FitH` 保持适宽，新窗口打开原文始终可用。曾评估的
+embedded PDF.js/range-first reader 已因真实阅读体验不完整而退役，历史数据见
 [PDF.js Request Policy Benchmark](docs/benchmarks/pdfjs-request-policy-2026-08-05.md)。
-
-对应 browser journeys 为 `npm run test:browser:pdfjs` 和
-`npm run test:browser:pdfjs:large`；后者使用独立的 12 MiB、可重建 fixture，不读取
-生产 PDF。
 
 可选的 lossless delivery pipeline 使用 qpdf 把大于等于 1 MiB、尚未 linearized 的
 原文生成到 `derived/pdf-delivery`。先安装 qpdf，再显式启用：
@@ -145,10 +124,9 @@ SCHOLARLOOM_PDF_OPTIMIZATION=lossless-linearization npm start
 
 原始 PDF 始终保留在 `originals/` 且不被修改；工具缺失、输出校验失败、页数变化或
 体积膨胀超过 2% 时继续交付 original。默认 snapshot 不包含优化版，恢复后会从
-original 自动重建。该开关与 `SCHOLARLOOM_PDF_VIEWER` 相互独立。
+original 自动重建。
 关闭开关后，Workspace 与版本跳转会立即恢复交付 original；既有 derived 文件仍只是
 可重建缓存，不会因曾经生成过而绕过 opt-in。
-真实 throttled browser journey 可用 `npm run test:browser:pdfjs:linearized` 运行。
 固定的真实 Paper Version corpus 可用 `npm run benchmark:pdf-delivery` 运行；它只在
 系统临时目录保存下载内容，输出 ignored JSON 报告，不读取生产 data root。当前结论与
 复现步骤见 [PDF Delivery Corpus Benchmark](docs/benchmarks/pdf-delivery-corpus-2026-08-05.md)。

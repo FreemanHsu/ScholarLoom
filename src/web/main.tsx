@@ -34,8 +34,6 @@ import { EvidenceInspector, type EvidenceInspectorModel } from "./evidence-inspe
 import { RepositoryPanel, type RepositoryAssociation } from "./repository-panel.js";
 import { SettingsPage } from "./settings-page.js";
 import { pdfViewerUrl } from "./pdf-viewer-url.js";
-import { PdfReader, type PdfViewerEngine } from "./pdf-reader.js";
-import type { PdfJsRequestPolicy } from "../runtime-config.js";
 import type { SettingsSnapshot } from "../settings/settings-snapshot.js";
 import "./styles.css";
 
@@ -244,7 +242,6 @@ type Workspace = {
   };
   processing: null | { jobId: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null };
   repositories: RepositoryAssociation[];
-  viewer: { engine: PdfViewerEngine; requestPolicy: PdfJsRequestPolicy };
 };
 type Proposal = ConversationProposal & { oneClickEligible: boolean };
 type ReviewProposal = {
@@ -2959,8 +2956,7 @@ function PaperWorkspace(props: {
     {panelKind === "source" && <aside className="pdf-pane workbench-source">
         <div className="pdf-toolbar"><span>PDF · p. {route.page}</span>
           <a href={pdfSrc} target="_blank" rel="noreferrer">新窗口打开原文</a></div>
-        <PdfReader engine={workspace.viewer.engine} requestPolicy={workspace.viewer.requestPolicy}
-          url={openedPdfUrl} page={route.page} /></aside>}
+        <iframe key={pdfSrc} title="原始 PDF" src={pdfSrc} data-viewer-engine="native" /></aside>}
         </div>
       </section>
     </div>

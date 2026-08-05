@@ -49,7 +49,7 @@ module with a small interface, not a separately deployed service.
 | Validation | Zod | Shared request, event, and Codex structured-output contracts |
 | Database | SQLite in WAL mode through `better-sqlite3` | Local durability, transactions, FTS5, no database daemon |
 | Migrations | Ordered raw SQL migrations | The reviewed SQL contract remains authoritative; no ORM schema shadow |
-| PDF | PDF.js extraction plus a native Chromium viewer stopgap; embedded PDF.js is gated | Ship reliable page-level reading first without prematurely replacing native selection, search, print, and download |
+| PDF | Server-side PDF.js extraction plus Chromium native viewer | Preserve native selection, search, print, accessibility, and cached Range delivery |
 | Search | Separate curated and working SQLite FTS5 projections | Entry Agent cannot accidentally query Paper-working rows |
 | AI runtime | Installed Codex CLI through `codex exec` | Matches the product constraint and reuses local Codex authentication |
 | Progress | Server-Sent Events | One-way job and conversation progress without WebSocket complexity |
@@ -532,60 +532,16 @@ advances to page 2 while the rendered document stays on page 1. Chromium's exter
 scripting surface has no supported page-navigation message, so iframe remount remains the
 intentional default despite its brief page-1 flash.
 
-`SCHOLARLOOM_PDF_VIEWER=pdfjs` enables a runtime-gated PDF.js spike behind the `PdfReader`
-seam. It dynamically loads PDF.js and its worker, keeps one document alive across Evidence
-navigation, replaces the previous canvas before rendering the target page, recalculates
-fit-width through `ResizeObserver`, exposes loading progress, and automatically falls back
-to the target page in the native viewer after a load or render failure. The external native
-new-window action remains available in every mode. The runtime flag is observable through
-the read-only Settings snapshot and Paper Workspace response; native remains the fallback
-when the flag is absent or invalid.
+An embedded PDF.js canvas reader and a `range-first` transport policy were evaluated and
+removed on 2026-08-05. Although one ViT sample improved under throttling, the real Hunyuan3D
+v5 journey exposed only one current-page canvas, loaded about 3.4 MB of a 6.51 MB PDF for page
+1 plus a 432 KB browser chunk and 1.26 MB worker, and lacked continuous-page reading, text
+selection, search, print, and document-content accessibility. Paper Workspace and Settings no
+longer expose a viewer seam or request-policy flags. Server-side PDF.js remains in use for
+extraction, structural validation, and deterministic Visual Evidence rendering. Historical
+measurements remain in `docs/benchmarks/pdfjs-request-policy-2026-08-05.md`.
 
-The headed Chrome A4/Letter fixture measured a 230 ms first render and 80 ms p95 across 60
-page transitions, with one PDF request, about 9.6 MB observed JS heap, and 0.68 seconds of
-main-thread task time across those transitions. A separate deterministic 12,588,462-byte
-fixture rendered its first page in 0.29–0.39 seconds across repeated runs, with 6.5–6.9 MB
-page-target heap growth and 0.15–0.16 seconds of page-target task time. It issued one full
-`200` request plus one 5.6 KB tail
-`Range` request. Range transport therefore works, but this non-linearized fixture still
-transferred the complete original before rendering; PDF.js did not reduce first-open bytes.
-Chrome page-target metrics exclude the PDF.js worker process, so these are lower bounds.
-
-`SCHOLARLOOM_PDFJS_REQUEST_POLICY=range-first` adds a second, independently observable
-runtime gate inside the PDF.js reader seam. It passes `disableStream: true` and
-`disableAutoFetch: true` to PDF.js; missing or unknown values preserve the library default.
-The Paper Workspace carries the effective request policy and the read-only Settings snapshot
-reports whether it is active. It has no effect when the native reader is selected.
-
-A fresh-session headed Chrome A/B on two pinned original Paper Versions used the same
-2 MiB/s, 40 ms profile and clicked Evidence page 2 after first render. GPT-3 v4 was neutral:
-1.904 s default versus 1.914 s range-first, with 411,052 completed response-body bytes in
-both modes. ViT v2 improved from 3.408 s and a completed full 3.74 MB response to 1.906 s
-and 467,014 completed Range bytes. Its Evidence transition changed from 53 ms to 79 ms,
-still below the 250 ms gate. These single-run diagnostics justify retaining the policy but
-not promoting it; far-page navigation, idle traffic, repeat distributions, and worker-inclusive
-CPU/RSS remain open. See `docs/benchmarks/pdfjs-request-policy-2026-08-05.md`.
-
-The build adds a lazy 432 KB PDF.js chunk (128 KB gzip) and a 1.26 MB worker asset. This is a
-**go** for continued feature-flagged evaluation and a **no-go** for default replacement. All
-of the following promotion gates must pass before changing the default:
-
-1. On a versioned corpus of at least 20 real Papers spanning 1–100 MiB, scanned/text PDFs,
-   embedded/subset fonts, and linearized/non-linearized files, first-page p95 is at most
-   1.5 seconds on the documented reference Mac and no Paper falls back unexpectedly.
-2. Thirty Evidence/Back cycles produce no stale page, no extra PDF download, and page-render
-   p95 at most 250 ms; fit-width differs from available width by at most 2 CSS pixels before
-   and after narrow/wide pane resizes.
-3. A PDF of at least 10 MiB stays below 64 MiB page-target heap growth and 1 second of
-   page-target task time for first render; worker-inclusive RSS/CPU must also be measured and
-   assigned a threshold before release.
-4. Automated parity journeys prove selectable text, in-document search, print, and an
-   accessibility tree containing document text. The current canvas-only spike fails all four
-   capability gates; the visible native new-window action is an escape hatch, not parity.
-5. PDF.js plus worker remain lazy-loaded, their combined uncompressed build output stays below
-   2 MiB, and any load/render failure reaches the correctly targeted native viewer.
-
-PDF.js does not compress original PDF bytes. The separate, opt-in
+Server-side PDF.js validation does not compress original PDF bytes. The separate, opt-in
 `SCHOLARLOOM_PDF_OPTIMIZATION=lossless-linearization` pipeline uses the
 `PdfDeliveryOptimizer` seam and a production qpdf adapter. It evaluates only source PDFs of
 at least 1 MiB, skips already-linearized sources, and selects a candidate only after qpdf
@@ -619,10 +575,10 @@ were eligible and all nine sampled source/delivery page renders matched; qpdf re
 total bytes by 0.60%-3.08%. However, headed Chrome A/B samples showed GPT-3 v4 at
 1.900 s original versus 1.906 s linearized and ViT v2 at 3.414 s versus 3.411 s under the
 same 2 MiB/s, 40 ms profile. ViT completed the full response before first render in both
-modes. Lossless linearization therefore remains opt-in and is not evidence for promoting
-PDF.js. The subsequent streaming/autofetch spike is recorded separately in
-`docs/benchmarks/pdfjs-request-policy-2026-08-05.md`; it found a material ViT improvement
-without changing source bytes, but remains opt-in on the current evidence.
+modes. Lossless linearization therefore remains opt-in and is not evidence for replacing
+the native reader. The subsequent streaming/autofetch experiment is recorded separately in
+`docs/benchmarks/pdfjs-request-policy-2026-08-05.md`; its runtime implementation was retired
+after the broader reading experience failed acceptance.
 
 New callers submit `{ "reference": "..." }`; `{ "arxivUrl": "..." }` remains a
 compatibility input. Direct PDF acquisition validates DNS and every redirect before

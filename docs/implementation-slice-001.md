@@ -103,7 +103,7 @@ as a non-activating reconciliation Proposal.
 ### Increment 3 — Paper workspace
 
 - Paper list and Paper workspace read models.
-- Summary-first view and optional PDF.js split pane.
+- Summary-first view and Chromium native PDF split pane.
 - SSE status transitions and actionable retry states.
 - Summary Evidence Anchor click-to-page.
 

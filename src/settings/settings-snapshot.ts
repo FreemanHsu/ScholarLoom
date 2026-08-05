@@ -21,7 +21,6 @@ import { PDF_RENDERER_LIMITS, PDF_RENDER_SETTINGS } from "../storage/pdf-page-re
 import { VISUAL_EVIDENCE_LIMITS } from "../storage/visual-evidence-shim.js";
 import { PAPER_RESOLVER_VERSION, type PaperResolverMode } from "../storage/paper-resolver.js";
 import { PAPER_LOOKUP_NORMALIZATION_VERSION } from "../domain/paper-organization.js";
-import type { PdfJsRequestPolicy } from "../runtime-config.js";
 
 export type SettingsRuntime = {
   host: "127.0.0.1" | "::1";
@@ -31,8 +30,6 @@ export type SettingsRuntime = {
   takeawayQualityReleased: boolean;
   agentMessageTimeoutMs?: number;
   entryResolverMode?: PaperResolverMode;
-  pdfViewerEngine?: "native" | "pdfjs";
-  pdfJsRequestPolicy?: PdfJsRequestPolicy;
   pdfOptimization?: "off" | "lossless-linearization";
   pdfNetwork?: PdfNetworkSettings;
   now?: () => Date;
@@ -84,8 +81,6 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
       fixture: runtime.fixture,
       featureFlags: {
         takeawayQualityV2: runtime.takeawayQualityReleased,
-        pdfJsViewer: runtime.pdfViewerEngine === "pdfjs",
-        pdfJsRangeFirst: runtime.pdfViewerEngine === "pdfjs" && runtime.pdfJsRequestPolicy === "range-first",
         pdfLosslessDelivery: runtime.pdfOptimization === "lossless-linearization",
       },
       codex: runtime.codexRuntimeStatus(),

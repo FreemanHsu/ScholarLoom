@@ -84,13 +84,13 @@ describe("paper ingestion lifecycle", () => {
     expect(workspace.json()).toMatchObject({
       paper: { title: "Fixture Paper", version: 2 },
       pdf: { pageCount: 2, url: expect.stringMatching(/^\/api\/artifacts\/[0-9a-f]{64}\/pdf$/) },
-      viewer: { engine: "native", requestPolicy: "default" },
       summary: {
         status: "active",
         readStatus: "read",
         claims: [{ claim: "Table 1 reports accuracy 91.2.", evidence: { page: 2, verified: true } }],
       },
     });
+    expect(workspace.json()).not.toHaveProperty("viewer");
     expect(workspace.json().summary.markdownPath).toMatch(/library\/papers\/fixture-paper\/summary-v2-r1\.md$/);
 
     const versionPdf = await app.inject({ method: "GET", url: `/api/paper-versions/${workspace.json().paper.versionId}/pdf` });

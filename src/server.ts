@@ -1,12 +1,11 @@
 import { createApp, type PaperSource } from "./app.js";
-import { createFixturePdf, createLargeFixturePdf, fixtureSummary, prepareFixtureRepository } from "./adapters/fixture.js";
+import { createFixturePdf, fixtureSummary, prepareFixtureRepository } from "./adapters/fixture.js";
 import { GitRepositoryAdapter } from "./adapters/git-repository.js";
 import { ArxivPaperSource } from "./adapters/arxiv.js";
 import { DirectPdfSource } from "./adapters/direct-pdf.js";
 import { CodexCliRunner } from "./adapters/codex-cli.js";
 import { existsSync } from "node:fs";
-import { parsePort, requireLoopbackHost, resolvePdfJsRequestPolicy,
-  resolvePdfProxyConfiguration } from "./runtime-config.js";
+import { parsePort, requireLoopbackHost, resolvePdfProxyConfiguration } from "./runtime-config.js";
 import { assertDataRootWritable, DATA_MANIFEST_NAME, defaultDataRoot, initializeDataRoot, openDataRoot } from "./storage/layout.js";
 import { acquireRuntimeLock } from "./storage/runtime-lock.js";
 import { join } from "node:path";
@@ -23,9 +22,6 @@ import { VisualEvidenceStore } from "./storage/visual-evidence-store.js";
 import { MINIMUM_CODEX_VERSION } from "./agent/agent-configuration.js";
 
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
-const largePdfFixture = fixture && process.env.SCHOLARLOOM_FIXTURE_PDF === "large";
-const pdfViewerEngine = process.env.SCHOLARLOOM_PDF_VIEWER === "pdfjs" ? "pdfjs" : "native";
-const pdfJsRequestPolicy = resolvePdfJsRequestPolicy(process.env.SCHOLARLOOM_PDFJS_REQUEST_POLICY);
 const pdfOptimization = process.env.SCHOLARLOOM_PDF_OPTIMIZATION === "lossless-linearization";
 const takeawayQualityReleased = process.env.SCHOLARLOOM_TAKEAWAY_V2_RELEASED === "1";
 const entryResolverMode = ["off", "shadow", "enabled"].includes(
@@ -99,7 +95,7 @@ const fixtureSelectionRunner: TakeawaySelectionRunner = {
 };
 const paperSource: PaperSource = fixture ? {
   async resolve(arxivId) { return { arxivId, latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
-  async fetchPdf() { return largePdfFixture ? createLargeFixturePdf() : createFixturePdf(); },
+  async fetchPdf() { return createFixturePdf(); },
 } : new ArxivPaperSource();
 const pdfProxy = fixture ? null : resolvePdfProxyConfiguration(process.env);
 const directPdfSource = fixture ? {
@@ -132,7 +128,7 @@ try {
     entryResolverMode,
     ...(pdfOptimization ? { pdfOptimization: { strategy: "lossless-linearization" as const } } : {}),
     settingsRuntime: {
-      host, port, startedAt, fixture, takeawayQualityReleased, pdfViewerEngine, pdfJsRequestPolicy,
+      host, port, startedAt, fixture, takeawayQualityReleased,
       pdfOptimization: pdfOptimization ? "lossless-linearization" : "off",
       pdfNetwork: pdfProxy ? {
         strategy: "direct-first-proxy-fallback",

@@ -1,19 +1,12 @@
 # PDF.js Request Policy Benchmark - 2026-08-05
 
-## Decision
+## Final decision
 
-Keep native Chromium as the default reader. Keep PDF.js `range-first` separately
-opt-in while expanding the corpus, but retain the implementation: it removed the
-full-response race and materially improved first render for the affected ViT sample
-without regressing the GPT-3 sample.
-
-Enable the spike with both flags:
-
-```bash
-SCHOLARLOOM_PDF_VIEWER=pdfjs \
-SCHOLARLOOM_PDFJS_REQUEST_POLICY=range-first \
-npm start
-```
+This is a historical experiment record. The embedded PDF.js reader and `range-first`
+runtime flags were removed after a real Hunyuan3D v5 reading journey showed that the
+canvas-only implementation exposed only one current page and delivered a worse overall
+experience than Chromium native viewer. The earlier ViT transport improvement did not
+justify retaining an incomplete reader.
 
 `range-first` maps to PDF.js `disableStream: true` and `disableAutoFetch: true`.
 The installed PDF.js 6.1.200 contract states that streaming must also be disabled
@@ -52,35 +45,10 @@ the existing 250 ms promotion threshold.
 
 ## Consequences
 
-- Retain `range-first` behind its own runtime flag; do not couple it to qpdf delivery.
-- Do not promote PDF.js or range-first from two single-run samples. Repeat across the
-  versioned 20-Paper promotion corpus, including far-page navigation and idle traffic.
-- Measure worker-inclusive RSS/CPU before release. The current CDP values cover only
-  the page target.
-- Keep native fallback and native new-window access. Request-policy improvement does
-  not provide text selection, search, print, or document accessibility.
-
-## Reproduction
-
-Start one mode at a time, with lossless delivery disabled so both modes receive the
-same original bytes:
-
-```bash
-SCHOLARLOOM_BENCHMARK_ARXIV_ID=2010.11929 \
-SCHOLARLOOM_BENCHMARK_PDF_OPTIMIZATION=off \
-SCHOLARLOOM_PORT=3018 \
-npm run benchmark:pdf-delivery:serve
-
-SCHOLARLOOM_BENCHMARK_ARXIV_ID=2010.11929 \
-SCHOLARLOOM_BENCHMARK_PDF_OPTIMIZATION=off \
-SCHOLARLOOM_PDFJS_REQUEST_POLICY=range-first \
-SCHOLARLOOM_PORT=3018 \
-npm run benchmark:pdf-delivery:serve
-```
-
-For each server, use a fresh Playwright CLI session:
-
-```bash
-$HOME/.codex/skills/playwright/scripts/playwright_cli.sh --session pdfjs-policy open http://127.0.0.1:3018/ --headed
-$HOME/.codex/skills/playwright/scripts/playwright_cli.sh --session pdfjs-policy run-code --filename src/benchmark/pdf-first-render.playwright.mjs
-```
+- Chromium native viewer is the sole browser reader.
+- The removed environment variables and dedicated benchmark/browser commands are no
+  longer accepted operational interfaces.
+- `pdfjs-dist` remains a server-side dependency for extraction, PDF validation, and
+  deterministic page rendering; this retirement concerns only the embedded browser reader.
+- Lossless qpdf delivery remains an independent opt-in pipeline and continues to fall
+  back to immutable original bytes.

@@ -66,27 +66,13 @@ render work, not PDF byte layout, dominates the observed first page.
 - Keep the qpdf pipeline available for gated evaluation: it preserved sampled
   rendering and reduced total bytes for all three eligible sources.
 - Do not use the synthetic attached-payload fixture as evidence of real-Paper speedup.
-- The follow-up PDF.js request-policy spike is complete. `disableStream: true` plus
-  `disableAutoFetch: true` prevented ViT's initial full response from racing Range
-  requests and improved its first render, while GPT-3 remained neutral. The policy
-  remains opt-in pending repeated and far-page measurements; see
+- The follow-up PDF.js request-policy spike found a ViT transport improvement but failed
+  broader reading acceptance on Hunyuan3D v5. Its embedded reader and runtime policy were
+  removed; see the historical
   [PDF.js Request Policy Benchmark](pdfjs-request-policy-2026-08-05.md).
 
 ## Reproduction
 
 ```bash
 npm run benchmark:pdf-delivery
-npm run build
-SCHOLARLOOM_BENCHMARK_ARXIV_ID=2005.14165 npm run benchmark:pdf-delivery:serve
 ```
-
-In another terminal, open the printed local URL with Playwright CLI, then run:
-
-```bash
-$HOME/.codex/skills/playwright/scripts/playwright_cli.sh --session pdf-corpus open http://127.0.0.1:3018/ --headed
-$HOME/.codex/skills/playwright/scripts/playwright_cli.sh --session pdf-corpus run-code --filename src/benchmark/pdf-first-render.playwright.mjs
-```
-
-Set `SCHOLARLOOM_BENCHMARK_PDF_OPTIMIZATION=off` on the server command for the
-original baseline. The server accepts only corpus IDs, uses a temporary data root,
-listens on `127.0.0.1`, and deletes its runtime root on shutdown.

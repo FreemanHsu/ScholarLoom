@@ -39,8 +39,6 @@ export function SettingsPage({ snapshot, error }: { snapshot: SettingsSnapshot |
           detail={overview.fixture ? "Fixture runtime" : "Production runtime"} mono />
         <OverviewCard label="Feature flags" value="实验功能"
           detail={`Takeaway Quality V2 ${overview.featureFlags.takeawayQualityV2 ? "已启用" : "未启用"} · ` +
-            `PDF.js Reader ${overview.featureFlags.pdfJsViewer ? "已启用" : "未启用"} · ` +
-            `PDF.js Range-first ${overview.featureFlags.pdfJsRangeFirst ? "已启用" : "未启用"} · ` +
             `Lossless PDF Delivery ${overview.featureFlags.pdfLosslessDelivery ? "已启用" : "未启用"}`} />
         <OverviewCard label="最近 Agent 活动"
           value={overview.latestAgentActivity?.taskKind ?? "暂无记录"}

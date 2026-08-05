@@ -57,15 +57,12 @@ Evidence navigation. It was rejected: keeping the frame stable and changing only
 `#page=2` updated the iframe's DOM `src`, but Chromium continued rendering page 1. The
 permanent regression therefore inspects the native viewer's actual current page, not only
 the outer URL. Remounting remains the correctness-preserving native-viewer behavior; a
-flash-free transition is a PDF.js evaluation criterion rather than a private Chromium
-integration.
+flash-free transition remains unavailable through Chromium's private viewer surface.
 
-## Feature-flagged PDF.js spike
+## Retired embedded PDF.js spike
 
-- Enable: `SCHOLARLOOM_PDF_VIEWER=pdfjs`
-- Browser: installed Google Chrome, headed through Playwright
-- Automated command: `npm run test:browser:pdfjs`
-- Artifacts: `output/playwright/pdfjs-spike/test-results/`
+This historical spike was evaluated in installed Google Chrome through headed Playwright.
+Its runtime flags and dedicated browser commands have since been removed.
 
 The spike keeps a single lazily loaded PDF.js document and renders one fit-width canvas.
 It removes the previous canvas before an Evidence page render, exposes loading progress,
@@ -81,8 +78,7 @@ Observed on the two-page A4/Letter fixture:
 - JS heap after the transition run: 9.6 MB; main-thread task time across the run: 0.68 s;
 - build assets: lazy PDF.js chunk 432 KB (128 KB gzip), worker 1.26 MB.
 
-The independent large-PDF journey (`npm run test:browser:pdfjs:large`) uses a deterministic
-12,588,462-byte PDF and observed:
+The retired independent large-PDF journey used a deterministic 12,588,462-byte PDF and observed:
 
 - first render: 0.29–0.39 seconds across repeated runs;
 - requests: one complete `200` plus one 5.6 KB tail `Range 206`;
@@ -92,8 +88,8 @@ The independent large-PDF journey (`npm run test:browser:pdfjs:large`) uses a de
 The result verifies Range compatibility but also shows that this non-linearized PDF transfers
 all original bytes before first render. It does not demonstrate compression or byte savings.
 
-The lossless delivery journey (`npm run test:browser:pdfjs:linearized`) enabled qpdf 12.3.2
-and throttled Chrome to 2 MiB/s with 40 ms latency. qpdf produced 12,589,790 bytes from the
+The retired lossless-delivery browser journey enabled qpdf 12.3.2 and throttled Chrome to
+2 MiB/s with 40 ms latency. qpdf produced 12,589,790 bytes from the
 12,588,462-byte original. Page 1 rendered in 1.41 seconds after a 64 KiB leading Range and a
 6.8 KiB tail Range, while the complete representation was still in progress. Isolated
 renderer checks produced identical image hashes for both A4 and Letter pages before and after
@@ -111,15 +107,14 @@ The follow-up request-policy spike compared PDF.js default behavior with `disabl
 `disableAutoFetch` in fresh headed Chrome sessions. GPT-3 v4 remained neutral at 1.904 s versus
 1.914 s and 411,052 completed response-body bytes in both modes. ViT v2 improved from 3.408 s
 with the complete 3.74 MB response finished to 1.906 s with 467,014 completed Range bytes.
-Its Evidence page-2 transition changed from 53 ms to 79 ms. This is a strong transport result
-for the affected sample, but only a two-Paper, single-run diagnostic; range-first remains a
-separate opt-in until repeated corpus and far-page measurements pass.
+Its Evidence page-2 transition changed from 53 ms to 79 ms. This was a strong transport result
+for the affected sample, but only a two-Paper, single-run diagnostic.
 
-Decision: **go** for continued gated evaluation; **no-go** for the default reader. The
-canvas-only spike has no text selection, search, print UI, or document-content accessibility,
-and worker-inclusive resource use plus repeatable cross-device performance remain unmeasured.
-The executable promotion thresholds and parity gates are recorded in `docs/architecture.md`;
-the native viewer remains default and the new-window fallback remains visible.
+Decision: **retire** the embedded reader and request-policy flags. A real Hunyuan3D v5 journey
+showed that the canvas-only reader exposed only one current page, loaded about 3.4 MB of a
+6.51 MB PDF for the first page plus the PDF.js bundle/worker, and still lacked text selection,
+search, print UI, continuous-page reading, and document-content accessibility. Chromium native
+viewer remains the sole browser reader and the new-window action remains visible.
 
 ## Paper Workspace bottom-edge regression
 
