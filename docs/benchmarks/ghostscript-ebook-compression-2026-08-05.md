@@ -6,7 +6,8 @@ Do **not** integrate Ghostscript `-dPDFSETTINGS=/ebook` into the derived PDF
 delivery pipeline. The six-Paper corpus reduced total bytes by 81.52%, but zero
 candidates passed the quality gates. Several outputs omitted complete scholarly
 figures while retaining their captions, one contained a bad indirect reference,
-four changed extracted text, and two changed page geometry.
+five changed extracted text, two changed page geometry, and one changed annotation
+semantics.
 
 The benchmark runner remains available for evaluating a future strategy with
 explicit image-only controls. Originals remain immutable and no Ghostscript output
@@ -38,21 +39,23 @@ creates a new PDF from marking operations rather than modifying the source in pl
 
 ## Corpus results
 
-| Paper Version | Original | `/ebook` | Reduction | First run | Structural | Text | Geometry | Decision |
-|---|---:|---:|---:|---:|---|---|---|---|
-| Attention v7 | 2,215,244 B | 215,117 B | 90.29% | 330 ms | pass | fail | pass | no-go |
-| BERT v2 | 775,166 B | 152,180 B | 80.37% | 203 ms | pass | fail | fail | no-go |
-| GPT-3 v4 | 6,768,044 B | 2,022,625 B | 70.12% | 2,822 ms | pass | pass | pass | no-go |
-| LLaMA v1 | 726,566 B | 195,628 B | 73.07% | 240 ms | pass | fail | fail | no-go |
-| ViT v2 | 3,743,814 B | 537,107 B | 85.65% | 776 ms | **fail** | n/a | n/a | no-go |
-| Hunyuan3D v5 | 6,512,838 B | 709,958 B | 89.10% | 8,298 ms | pass | fail | pass | no-go |
-| **Total** | **20,741,672 B** | **3,832,615 B** | **81.52%** | **12,670 ms** | 5/6 | 2/6 | 4/6 | **0/6 go** |
+| Paper Version | Original | `/ebook` | Reduction | First run | Structural | Text | Geometry | Annotations | Decision |
+|---|---:|---:|---:|---:|---|---|---|---|---|
+| Attention v7 | 2,215,244 B | 215,117 B | 90.29% | 352 ms | pass | fail | pass | pass | no-go |
+| BERT v2 | 775,166 B | 152,180 B | 80.37% | 214 ms | pass | fail | fail | pass | no-go |
+| GPT-3 v4 | 6,768,044 B | 2,022,625 B | 70.12% | 2,958 ms | pass | pass | pass | pass | no-go |
+| LLaMA v1 | 726,566 B | 195,628 B | 73.07% | 235 ms | pass | fail | fail | pass | no-go |
+| ViT v2 | 3,743,814 B | 537,107 B | 85.65% | 801 ms | **fail** | fail | pass | pass | no-go |
+| Hunyuan3D v5 | 6,512,838 B | 709,958 B | 89.10% | 8,428 ms | pass | fail | pass | fail | no-go |
+| **Total** | **20,741,672 B** | **3,832,615 B** | **81.52%** | **12,988 ms** | 5/6 | 1/6 | 4/6 | 5/6 | **0/6 go** |
 
 All six repeated outputs were byte-for-byte deterministic after source-derived XMP
-UUIDs were added. All page counts, outline destinations, annotation semantics, and
-structured-content signals matched for the five structurally valid candidates.
-The destination comparison resolves named and explicit destinations to page/coordinate
-semantics, so Ghostscript object-number rewrites do not create false failures.
+UUIDs were added. Quality auditing was attempted independently of structural
+validation and completed for all six candidates. All page counts, outline
+destinations, and structured-content signals matched; Hunyuan3D changed annotation
+semantics on page 5. The destination comparison resolves named and explicit
+destinations to page/coordinate semantics, so Ghostscript object-number rewrites do
+not create false failures.
 
 ## Rendering findings
 
@@ -66,8 +69,12 @@ acceptable 150 dpi softening:
   remained; SSIM 0.914286.
 - GPT-3 page 67 retained all plots but visibly softened axes, legends, and small
   labels; SSIM 0.899793.
-- ViT produced qpdf's `bad indirect reference (-1 0 R)` warning and was rejected
-  before semantic/render inspection.
+- ViT produced qpdf's `bad indirect reference (-1 0 R)` warning. Its independent
+  quality audit also found extracted-text changes across nine pages; page 18 became
+  almost entirely blank (SSIM 0.883722), while page 21 retained the image grid but
+  lost surrounding text (SSIM 0.978959).
+- Hunyuan3D page 5 retained nearly identical pixels (SSIM 0.999854) but changed
+  annotation semantics, demonstrating why rendered-page parity alone is insufficient.
 
 Ghostscript 10.07.1 was also used to render its own generated PDFs. It reproduced
 the missing figures, confirming that these were absent from the candidate files and

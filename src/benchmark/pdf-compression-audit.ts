@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { getDocument, OPS, type PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { PDFDocument } from "pdf-lib";
 
 import { PdfPageRenderer } from "../storage/pdf-page-renderer.js";
 
@@ -82,6 +83,12 @@ export async function auditPdfCompression(pair: PdfPair): Promise<PdfCompression
 }
 
 async function inspectPdf(bytes: Buffer) {
+  const layoutDocument = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
+  const pageBoxes = layoutDocument.getPages().map((page) => ({
+    mediaBox: page.getMediaBox(),
+    cropBox: page.getCropBox(),
+    rotation: page.getRotation().angle,
+  }));
   const loadingTask = getDocument({
     data: new Uint8Array(bytes),
     standardFontDataUrl,
@@ -96,7 +103,8 @@ async function inspectPdf(bytes: Buffer) {
     const imageCounts: number[] = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
-      geometry.push({ view: page.view, rotate: page.rotate, userUnit: page.userUnit });
+      geometry.push({ view: page.view, rotate: page.rotate, userUnit: page.userUnit,
+        boxes: pageBoxes[pageNumber - 1] });
       const content = await page.getTextContent();
       text.push(content.items.map((item) => "str" in item ? item.str : "").join(" ")
         .normalize("NFKC").replace(/\s+/g, " ").trim());
@@ -113,6 +121,9 @@ async function inspectPdf(bytes: Buffer) {
       document.getMarkInfo(),
       document.getAttachments(),
     ]);
+    const attachmentContents = attachments ? await Promise.all([...attachments.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(async ([id, metadata]) => ({ id, metadata, content: await document.getAttachmentContent(id) }))) : [];
     return {
       pageCount: document.numPages,
       geometry,
@@ -124,7 +135,7 @@ async function inspectPdf(bytes: Buffer) {
         markInfo,
         fieldObjects,
         structureTrees,
-        attachmentNames: attachments ? Object.keys(attachments).sort() : [],
+        attachments: attachmentContents,
       },
     };
   } finally {
@@ -134,12 +145,8 @@ async function inspectPdf(bytes: Buffer) {
 
 async function annotationSemantics(document: PDFDocumentProxy,
   annotation: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const keys = [
-    "annotationType", "subtype", "url", "unsafeUrl", "action", "rect",
-    "fieldName", "fieldType", "fieldValue", "buttonValue", "checkBox", "radioButton",
-    "titleObj", "contentsObj", "hasAppearance", "annotationFlags",
-  ];
-  const semantics = Object.fromEntries(keys.filter((key) => key in annotation).map((key) => [key, annotation[key]]));
+  const semantics = Object.fromEntries(Object.entries(annotation)
+    .filter(([key, value]) => key !== "id" && key !== "ref" && key !== "dest" && typeof value !== "function"));
   if (annotation.dest) semantics.destination = await destinationSemantics(document, annotation.dest);
   return semantics;
 }

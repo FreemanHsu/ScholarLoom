@@ -81,4 +81,37 @@ describe("PDF compression corpus benchmark", () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it("still audits a structurally rejected candidate for complete quality evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scholarloom-compression-structural-audit-"));
+    const bytes = Buffer.from(await createFixturePdf());
+    const imageBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAFAgIAC3+XGQAAAABJRU5ErkJggg==", "base64");
+    try {
+      const report = await benchmarkPdfCompressionCorpus({
+        runtimeRoot: join(root, "runtime"),
+        outputRoot: join(root, "output"),
+        corpus: [{
+          arxivId: "2010.11929", version: 2, title: "ViT", authors: ["Alexey Dosovitskiy"],
+          year: 2020, profile: "image-heavy", pdfUrl: "https://arxiv.org/pdf/2010.11929v2",
+          expectedSha256: createHash("sha256").update(bytes).digest("hex"),
+        }],
+        fetchPdf: async () => bytes,
+        tool: { name: "fixture-pdfwrite", async version() { return "1.0.0"; },
+          async compress(inputPath, outputPath) { await writeFile(outputPath, await readFile(inputPath)); } },
+        validator: { name: "fixture-validator", async version() { return "1.0.0"; },
+          async validate() { return false; } },
+        renderer: { async render() { return { imageBytes }; } },
+      });
+
+      expect(report.samples[0]).toMatchObject({
+        structureValid: false,
+        qualityPassed: true,
+        decision: "no-go",
+        reasons: ["structural-validation-failed", "insufficient-size-reduction"],
+        audit: { passes: true, sampledPages: expect.any(Array) },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

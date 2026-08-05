@@ -101,6 +101,7 @@ export type PdfCompressionCorpusSample = PdfDeliveryCorpusPaper & {
   decision: "go" | "no-go";
   reasons: string[];
   audit: PdfCompressionAudit | null;
+  auditError: string | null;
 };
 
 export async function benchmarkPdfCompressionCorpus(options: {
@@ -183,19 +184,26 @@ async function benchmarkPaper(options: Parameters<typeof benchmarkPdfCompression
     const passesSizeGate = sizeRatio <= PDF_COMPRESSION_BENCHMARK_GATES.maximumSizeRatio;
     await mkdir(outputRoot, { recursive: true });
     await copyFile(outputPath, join(outputRoot, "compressed.pdf"));
-    const audit = structureValid ? await auditPdfCompression({
-      sourceBytes,
-      outputBytes,
-      sourceHash,
-      outputHash,
-      renderRoot: outputRoot,
-      ...(options.renderer ? { renderer: options.renderer } : {}),
-    }) : null;
+    let audit: PdfCompressionAudit | null = null;
+    let auditError: string | null = null;
+    try {
+      audit = await auditPdfCompression({
+        sourceBytes,
+        outputBytes,
+        sourceHash,
+        outputHash,
+        renderRoot: outputRoot,
+        ...(options.renderer ? { renderer: options.renderer } : {}),
+      });
+    } catch (error) {
+      auditError = errorCode(error);
+    }
     const reasons = [
       ...(!deterministic ? ["non-deterministic-output"] : []),
       ...(!structureValid ? ["structural-validation-failed"] : []),
       ...(!passesSizeGate ? ["insufficient-size-reduction"] : []),
       ...(audit && !audit.passes ? ["quality-gate-failed"] : []),
+      ...(!audit ? ["quality-audit-failed"] : []),
     ];
     return {
       ...paper,
@@ -214,6 +222,7 @@ async function benchmarkPaper(options: Parameters<typeof benchmarkPdfCompression
       decision: reasons.length === 0 ? "go" : "no-go",
       reasons,
       audit,
+      auditError,
     };
   } finally {
     await rm(sampleRoot, { recursive: true, force: true });
@@ -222,4 +231,10 @@ async function benchmarkPaper(options: Parameters<typeof benchmarkPdfCompression
 
 function hash(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function errorCode(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (code) return code;
+  return error instanceof Error ? error.message.split(":", 1)[0]!.slice(0, 120) : "unknown";
 }
