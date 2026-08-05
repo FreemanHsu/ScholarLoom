@@ -61,6 +61,43 @@ Final result: passed.
 
 final result: passed
 
+### Iteration 2 — substantial year-rail correction
+
+- Source visual truth: `local Codex attachment (not committed)`
+- Implementation screenshot: `.playwright-cli/page-2026-08-05T12-26-25-068Z.png`
+- Full-view comparison: `output/playwright/paper-library-year-column-v2-comparison.png`
+- Focused catalog comparison: `output/playwright/paper-library-year-column-v2-focused.png`
+- Source and implementation pixels: 2560 × 1318
+- Implementation CSS viewport: 2560 × 1318 at device scale factor 1; no density normalization required
+- State: default `/papers`, 44 real Papers, one starred Paper, LingBot-VA 2.0 row hovered
+
+**Findings**
+
+- [P2] The first correction moved the Year rail only about 30px, which remained visibly too far right in the user's same-size production capture.
+  - Fix: gave Alias a responsive bounded width, changed Original Title to the main flexible track, and gave Year a dedicated `clamp(120px, 10vw, 260px)` rail before Direction. This shifts the Year heading and values substantially left while keeping Direction and Status stable and readable.
+- P0: none.
+- P1: none.
+- Remaining P2: none.
+
+**Required fidelity surfaces**
+
+- Fonts and typography: Newsreader and DM Sans hierarchy, weights, truncation, and line height are unchanged; the narrower title track still preserves single-line catalog scanning.
+- Spacing and layout rhythm: the Year rail now has intentional breathing room on both sides and remains vertically aligned across the header and every Paper row; Alias, Direction, and Status do not overlap.
+- Colors and visual tokens: the warm paper background, muted green hover treatment, and semantic pills are unchanged.
+- Image quality and asset fidelity: no raster or illustrative assets participate in this catalog grid.
+- Copy and content: production content and labels are unchanged; the source and implementation use the same 44-Paper state and hovered second row.
+
+**Comparison history**
+
+- Earlier pass: a small fractional redistribution produced an approximately 30px shift and was rejected by the user as still visibly off-center.
+- Revised pass: the equal-size full-view and focused comparisons show a materially left-shifted Year rail, with Direction staying adjacent and Status remaining at the far right.
+- Primary interaction: second row hover remains continuous across the row; the star control remains independently actionable.
+- Browser console: 0 errors, 0 warnings after the production restart.
+
+The focused comparison was required because the correction concerns the horizontal relationship among Original Title, Year, and Direction, which is difficult to judge precisely from the full page alone.
+
+final result: passed
+
 ## Native PDF fit-width regression
 
 - Browser: installed Google Chrome, headed through Playwright
