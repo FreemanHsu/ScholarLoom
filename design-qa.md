@@ -1,6 +1,6 @@
 # Paper Workspace Design QA
 
-- Source target: `local Codex-generated image (not committed)`
+- Source target: local Codex-generated image (not committed)
 - Implementation capture: `.playwright-cli/page-2026-08-03T14-17-41-040Z.png`
 - Combined comparison: `output/playwright/paper-workspace-comparison.png`
 - Viewport: 1440 × 1024
@@ -30,7 +30,7 @@ Final result: passed.
 
 ## Paper Library year-column alignment
 
-- Source visual truth: `local Codex attachment (not committed)`
+- Source visual truth: local Codex attachment (not committed)
 - Implementation screenshot: `.playwright-cli/page-2026-08-05T12-03-50-822Z.png`
 - Full-view comparison: `output/playwright/paper-library-year-column-comparison.png`
 - Focused catalog comparison: `output/playwright/paper-library-year-column-focused.png`
@@ -63,7 +63,7 @@ final result: passed
 
 ### Iteration 2 — substantial year-rail correction
 
-- Source visual truth: `local Codex attachment (not committed)`
+- Source visual truth: local Codex attachment (not committed)
 - Implementation screenshot: `.playwright-cli/page-2026-08-05T12-26-25-068Z.png`
 - Full-view comparison: `output/playwright/paper-library-year-column-v2-comparison.png`
 - Focused catalog comparison: `output/playwright/paper-library-year-column-v2-focused.png`
@@ -100,7 +100,7 @@ final result: passed
 
 ### Iteration 3 — catalog header and row alignment
 
-- Source visual truth: `local Codex attachment (not committed)`
+- Source visual truth: local Codex attachment (not committed)
 - Implementation screenshot: `.playwright-cli/page-2026-08-05T12-40-50-225Z.png`
 - Full-view comparison: `output/playwright/paper-library-header-alignment-comparison.png`
 - Focused table comparison: `output/playwright/paper-library-header-alignment-focused.png`
@@ -233,7 +233,7 @@ viewer remains the sole browser reader and the new-window action remains visible
 
 ## Paper Workspace bottom-edge regression
 
-- Source visual truth: `local Codex attachment (not committed)`
+- Source visual truth: local Codex attachment (not committed)
 - Implementation screenshot: `.playwright-cli/page-2026-08-04T06-02-12-125Z.png`
 - Full-view comparison: `output/playwright/paper-workspace-bottom-gap-comparison.png`
 - Focused bottom-edge comparison: `output/playwright/paper-workspace-bottom-gap-focused.png`
@@ -267,8 +267,8 @@ Final result: passed.
 
 ## Hunyuan3D Summary regression
 
-- User reference: `local Codex attachment (not committed)`
-- Detail reference: `local Codex attachment (not committed)`
+- User reference: local Codex attachment (not committed)
+- Detail reference: local Codex attachment (not committed)
 - Implementation capture: `.playwright-cli/page-2026-08-03T14-49-01-884Z.png`
 - Combined comparison: `output/playwright/paper-workspace-regression-comparison.png`
 - Viewport: 2048 × 1054
@@ -291,7 +291,7 @@ Final result: passed.
 
 ## Key Claims heading regression
 
-- Source visual truth: `local Codex attachment (not committed)`
+- Source visual truth: local Codex attachment (not committed)
 - Desktop implementation: `.playwright-cli/page-2026-08-04T06-08-48-210Z.png`
 - Desktop focused crop: `output/playwright/key-claims-heading-fixed.png`
 - Focused comparison: `output/playwright/key-claims-heading-comparison.png`

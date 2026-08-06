@@ -2,8 +2,8 @@
 
 ## Visual truth
 
-- Reference: `local Codex-generated image (not committed)`
-- Implementation: `local Codex worktree (not committed)`
+- Reference: local Codex-generated image (not committed)
+- Implementation: local Playwright capture (not committed)
 - Desktop viewport: 1440 × 1024, device pixel ratio 1
 - Reference source: 1487 × 1058, aspect-fit into the 1440 × 1024 comparison canvas
 - State: `/papers`, 全部论文，单条 fixture 论文，已星标，目录行 hover

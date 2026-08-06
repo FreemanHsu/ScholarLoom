@@ -24,7 +24,7 @@ assets/images/          Figures and diagrams used by notes
 ```
 
 Original PDFs live outside the vault under `../originals/papers/`. Application-owned
-templates and the `paper-reading` Skill live in `$HOME/Projects/ScholarLoom`.
+templates and the `paper-reading` Skill live in the ScholarLoom application repository.
 
 ## Source hierarchy
 

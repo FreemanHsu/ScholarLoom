@@ -15,7 +15,7 @@ describe("SettingsPage", () => {
       configurationVersion: "agent-configuration.v5",
         startedAt: "2026-07-30T08:00:00.000Z",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
-        dataRoot: "$HOME/ScholarLoomData",
+        dataRoot: "/tmp/scholarloom-settings-fixture",
         fixture: false,
         featureFlags: { takeawayQualityV2: false, pdfLosslessDelivery: false },
         latestAgentActivity: {

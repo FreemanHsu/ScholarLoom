@@ -243,3 +243,7 @@ Evidence 要求 CLI 不低于 `0.144.6`，并在每次启动执行 capability ca
 smoke；这会使用网络和 Codex 配额。公开 PDF 仅接受 URL 直接返回的 PDF，不解析 landing
 page、DOI、OpenReview 或登录态链接。仓库不会自动安装依赖或执行论文代码，也不会提交
 下载的 PDF/runtime assets。
+
+## License
+
+ScholarLoom 使用 [MIT License](LICENSE) 开源。
