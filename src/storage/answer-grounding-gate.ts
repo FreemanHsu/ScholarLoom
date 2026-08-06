@@ -119,8 +119,9 @@ export class AnswerGroundingGate {
       const source = this.#sources.get(citation.path);
       if (!source?.citable || source.kind === "conversation" || !citation.quote || citation.quote.length > 500) return citation;
       const lines = readFileSync(this.#resolve(citation.path), "utf8").split(/\r?\n/);
-      const match = locateUniqueLineRange(lines, citation.quote,
-        typeof source.locator?.contentStartLine === "number" ? source.locator.contentStartLine : 1);
+      const contentStartLine = typeof source.locator?.contentStartLine === "number" ? source.locator.contentStartLine : 1;
+      const match = locateUniqueLineRange(lines, citation.quote, contentStartLine) ??
+        (source.kind === "pdf" ? locateUniquePdfDehyphenatedRange(lines, citation.quote, contentStartLine) : null);
       return match ? { ...citation, ...match } : citation;
     });
     return this.verify(repaired);
@@ -237,6 +238,86 @@ function locateUniqueLineRange(lines: string[], quote: string, contentStartLine:
   const first = segmentAtOffset(segments, offset);
   const last = segmentAtOffset(segments, offset + needle.length - 1);
   return first && last ? { lineStart: first.line, lineEnd: last.line } : null;
+}
+
+function locateUniquePdfDehyphenatedRange(lines: string[], quote: string,
+  contentStartLine: number): { lineStart: number; lineEnd: number; quote: string } | null {
+  const firstLineIndex = Math.max(0, contentStartLine - 1);
+  const searchable = lines.slice(firstLineIndex).join("\n").normalize("NFC");
+  const match = locateUniqueNormalizedMatch(searchable, quote);
+  if (!match) return null;
+  const repairedQuote = searchable.slice(match.start, match.end);
+  if (!repairedQuote || repairedQuote.length > 500) return null;
+  const lineStart = firstLineIndex + 1 + countNewlines(searchable, match.start);
+  const lineEnd = firstLineIndex + 1 + countNewlines(searchable, match.end);
+  return { lineStart, lineEnd, quote: repairedQuote };
+}
+
+function locateUniqueNormalizedMatch(value: string, quote: string): { start: number; end: number } | null {
+  const searchable = normalizePdfTextWithOffsets(value);
+  const needle = normalizePdfTextWithOffsets(quote).text;
+  if (!needle) return null;
+  const offset = searchable.text.indexOf(needle);
+  if (offset === -1 || searchable.text.indexOf(needle, offset + 1) !== -1) return null;
+  const first = searchable.offsets[offset];
+  const last = searchable.offsets[offset + needle.length - 1];
+  return first && last ? { start: first.start, end: last.end } : null;
+}
+
+function normalizePdfTextWithOffsets(value: string): {
+  text: string;
+  offsets: Array<{ start: number; end: number }>;
+} {
+  const input = value.normalize("NFC");
+  const characters: Array<{ value: string; start: number; end: number }> = [];
+  for (let index = 0; index < input.length;) {
+    const character = String.fromCodePoint(input.codePointAt(index)!);
+    const end = index + character.length;
+    if (character === "-" && isUnicodeLetter(characters.at(-1)?.value)) {
+      let next = end;
+      while (next < input.length) {
+        const whitespace = String.fromCodePoint(input.codePointAt(next)!);
+        if (!/^\s$/u.test(whitespace)) break;
+        next += whitespace.length;
+      }
+      const following = next < input.length ? String.fromCodePoint(input.codePointAt(next)!) : "";
+      if (next > end && /^\p{Ll}$/u.test(following)) {
+        index = next;
+        continue;
+      }
+    }
+    characters.push({ value: character, start: index, end });
+    index = end;
+  }
+
+  const normalized: typeof characters = [];
+  for (const character of characters) {
+    if (/^\s$/u.test(character.value)) {
+      if (normalized.length === 0) continue;
+      const previous = normalized.at(-1)!;
+      if (previous.value === " ") previous.end = character.end;
+      else normalized.push({ value: " ", start: character.start, end: character.end });
+      continue;
+    }
+    normalized.push(character);
+  }
+  if (normalized.at(-1)?.value === " ") normalized.pop();
+
+  const offsets: Array<{ start: number; end: number }> = [];
+  for (const character of normalized) {
+    for (let index = 0; index < character.value.length; index += 1) {
+      offsets.push({ start: character.start, end: character.end });
+    }
+  }
+  return { text: normalized.map((character) => character.value).join(""), offsets };
+}
+
+function isUnicodeLetter(value: string | undefined): boolean { return Boolean(value && /^\p{L}$/u.test(value)); }
+
+function countNewlines(value: string, end: number): number {
+  let count = 0;
+  for (let index = 0; index < end; index += 1) if (value[index] === "\n") count += 1;
+  return count;
 }
 
 function segmentAtOffset(segments: Array<{ line: number; start: number; end: number }>, offset: number) {

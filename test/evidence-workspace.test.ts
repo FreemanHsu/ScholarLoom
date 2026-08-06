@@ -70,14 +70,20 @@ describe("EvidenceWorkspaceBuilder", () => {
       mkdir(join(workspace, "paper", "pages"), { recursive: true }),
       mkdir(join(workspace, "conversation"), { recursive: true }),
     ]).then(async () => {
-      const paper = "first line\nBounded verbatim evidence.\nEvidence can span\nmultiple extracted lines.\nRepeated evidence. Repeated evidence.\nlast line\n";
+      const paper = "first line\nBounded verbatim evidence.\nEvidence can span\nmultiple extracted lines.\nRepeated evidence. Repeated evidence.\nif the demon- strator detects a mistake\nAmbig- uous repair.\nAmbig- uous repair.\nlast line\n";
+      const summary = "if the demon- strator detects a mistake\n";
       const context = "private conversation context\n";
       await writeFile(join(workspace, "paper", "pages", "page-0001.md"), paper);
+      await writeFile(join(workspace, "paper", "summary.md"), summary);
       await writeFile(join(workspace, "conversation", "recent-messages.md"), context);
-      const hash = await import("node:crypto").then(({ createHash }) => createHash("sha256").update(paper).digest("hex"));
+      const { createHash } = await import("node:crypto");
+      const hash = createHash("sha256").update(paper).digest("hex");
+      const summaryHash = createHash("sha256").update(summary).digest("hex");
       await writeFile(join(workspace, "MANIFEST.json"), JSON.stringify({ sources: [
         { kind: "pdf", path: "paper/pages/page-0001.md", sourceId: "paper-version:1", revision: "extraction:1",
           contentHash: hash, citable: true, locator: { page: 1, elementId: "element:1", contentStartLine: 1 } },
+        { kind: "summary", path: "paper/summary.md", sourceId: "summary:1", revision: "summary:1",
+          contentHash: summaryHash, citable: true },
         { kind: "conversation", path: "conversation/recent-messages.md", sourceId: "snapshot:1",
           contentHash: "ignored", citable: false },
       ] }));
@@ -101,6 +107,15 @@ describe("EvidenceWorkspaceBuilder", () => {
       quote: "Evidence can span multiple extracted lines." }])).toEqual([
       expect.objectContaining({ locator: expect.objectContaining({ lineStart: 3, lineEnd: 4 }) }),
     ]);
+    expect(gate.repair([{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
+      quote: "if the demonstrator detects a mistake" }])).toEqual([
+      expect.objectContaining({ quote: "if the demon- strator detects a mistake",
+        locator: expect.objectContaining({ lineStart: 6, lineEnd: 6 }) }),
+    ]);
+    expect(() => gate.repair([{ kind: "text", path: "paper/summary.md", lineStart: 1, lineEnd: 1,
+      quote: "if the demonstrator detects a mistake" }])).toThrow(/citation-quote-mismatch/);
+    expect(() => gate.repair([{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
+      quote: "Ambiguous repair." }])).toThrow(/citation-quote-mismatch/);
     expect(() => gate.repair([{ kind: "text", path: "paper/pages/page-0001.md", lineStart: 1, lineEnd: 1,
       quote: "Repeated evidence." }])).toThrow(/citation-quote-mismatch/);
   });
