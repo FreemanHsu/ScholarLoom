@@ -9,6 +9,8 @@ ScholarLoom 把论文导入、证据化阅读、持续讨论和长期知识组�
 
 > ScholarLoom 仍处于早期开发阶段，当前面向单用户、本地优先的研究工作流。数据格式、界面和 Agent 行为仍可能调整。
 
+![ScholarLoom 研究首页：知识检索、继续阅读和任务状态](docs/assets/screenshots/research-home.png)
+
 ## 为什么是 ScholarLoom
 
 论文研究往往分散在 PDF 阅读器、聊天工具、GitHub 和笔记软件中。摘要与讨论难以核验，高价值结论停留在聊天历史里，随着材料增长，研究者也越来越依赖自己的短期记忆。
@@ -25,6 +27,28 @@ ScholarLoom 的目标是让每个结论都能回到证据，让一次阅读产�
 - **知识沉淀**：从讨论中提出 Takeaway，由用户确认后写入长期知识，而不是静默污染知识库。
 - **论文组织**：按 Domain、Research Direction、Topic 和 Alias 组织论文并维护可审查的目录。
 - **代码关联**：手动关联 GitHub 仓库并固定 commit；系统不会自动执行论文代码。
+
+## 界面预览
+
+### 论文库与研究方向
+
+论文库集中展示 Alias、原始标题、年份、研究方向和处理状态，并支持搜索、筛选、星标与按 Domain 浏览。
+
+![ScholarLoom 论文库：论文目录、研究方向和状态筛选](docs/assets/screenshots/paper-library.png)
+
+### Summary 与原文对照
+
+Paper Workspace 把结构化 Summary、Evidence Anchor 和固定版本 PDF 放在同一阅读界面中，便于从技术结论直接回到原文核验。
+
+![ScholarLoom Paper Workspace：Summary 与 PDF 原文对照阅读](docs/assets/screenshots/paper-reading.png)
+
+### 冻结上下文与证据化讨论
+
+每个 Conversation 冻结创建时的论文、Summary 与代码快照。回答展示经过校验的 Evidence Receipt，并可提出需要用户确认的 Takeaway。
+
+![ScholarLoom Discussion：冻结上下文、证据引用和 Takeaway Proposal](docs/assets/screenshots/paper-discussion.png)
+
+以上截图来自当前本地部署，界面可能随项目演进而调整。
 
 ## 工作方式
 
@@ -50,7 +74,7 @@ ScholarLoom 按职责划分本地数据：
 | `state/scholarloom.sqlite3` | 任务、关系、队列与检索等运行状态 |
 | `derived/`、`cache/` | 可从权威数据重建的派生产物 |
 
-生产数据位于代码仓库之外。默认数据根是 `$HOME/ScholarLoomData`，仓库不会保存真实论文、个人知识、对话或运行状态。
+生产数据位于代码仓库之外。默认数据根是 `$HOME/ScholarLoomData`，ScholarLoom 运行时不会把真实论文、个人知识、对话或运行状态写入代码仓库。
 
 ## 快速开始
 
