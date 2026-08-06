@@ -2,7 +2,7 @@
 
 - Status: Implemented and verified
 - Date: 2026-07-31
-- Parent design: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
+- Parent design: [`paper-organization-feature-design.md`](../paper-organization-feature-design.md)
 - Depends on:
   [`implementation-slice-007-batch-decisions-topic-lifecycle.md`](implementation-slice-007-batch-decisions-topic-lifecycle.md)
 

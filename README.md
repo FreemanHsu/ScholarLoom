@@ -21,13 +21,14 @@
 AI 的完整工作协议见 [`AGENTS.md`](AGENTS.md)。
 
 已固化的 MVP 产品范围见 [`docs/PRD.md`](docs/PRD.md)。
+完整文档入口见 [`docs/README.md`](docs/README.md)。
 
 v1 数据层级、不变量和生命周期见 [`docs/data-model.md`](docs/data-model.md)，
 统一领域术语见 [`CONTEXT.md`](CONTEXT.md)。
 
 系统模块与运行拓扑见 [`docs/architecture.md`](docs/architecture.md)，第一条纵向切片见
-[`docs/implementation-slice-001.md`](docs/implementation-slice-001.md)，外部设计评审记录见
-[`docs/fable-review-2026-07-19.md`](docs/fable-review-2026-07-19.md)。
+[`docs/plans/implementation-slice-001.md`](docs/plans/implementation-slice-001.md)，外部设计评审记录见
+[`docs/archive/reviews/fable-review-2026-07-19.md`](docs/archive/reviews/fable-review-2026-07-19.md)。
 
 Paper Alias、Research Direction、Paper Catalog 与组织建议的正式功能设计见
 [`docs/paper-organization-feature-design.md`](docs/paper-organization-feature-design.md)。

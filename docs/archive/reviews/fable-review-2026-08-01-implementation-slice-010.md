@@ -1,9 +1,6 @@
 # Fable Review: Implementation Slice 010
 
 - Date: 2026-08-01
-- Canvas: `640dd587-a26d-45ba-9cb4-1d90c35a80bf`
-- Prompt node: `e22e8a4e-2306-4271-8f8c-d342a3e86baa`
-- Response node: `8b552df2-e303-49c2-a6f2-335461d704a1`
 - Model: `claude-fable-5`
 - Verdict: Sound architecture, not implementable as written pending one owner decision
 

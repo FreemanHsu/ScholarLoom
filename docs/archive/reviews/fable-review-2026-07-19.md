@@ -31,5 +31,5 @@ A second physical SQLite database for Entry Agent retrieval was rejected for v1.
 would complicate the single-write recovery boundary. The curated-only shadow FTS table
 provides the required mechanical corpus separation within one database.
 
-See [`adr/0005-recoverable-writes-and-curated-entry-retrieval.md`](adr/0005-recoverable-writes-and-curated-entry-retrieval.md)
+See [`adr/0005-recoverable-writes-and-curated-entry-retrieval.md`](../../adr/0005-recoverable-writes-and-curated-entry-retrieval.md)
 for the binding architectural decision.

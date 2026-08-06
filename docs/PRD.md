@@ -8,7 +8,7 @@
 - AI 执行环境：Codex CLI；允许将论文、代码和对话上下文发送给云端模型
 - v1 数据契约：[`docs/data-model.md`](data-model.md)
 - v1 系统架构：[`docs/architecture.md`](architecture.md)
-- 第一条实现切片：[`docs/implementation-slice-001.md`](implementation-slice-001.md)
+- 第一条实现切片：[`docs/plans/implementation-slice-001.md`](plans/implementation-slice-001.md)
 - 前端信息架构：[`docs/frontend-information-architecture.md`](frontend-information-architecture.md)
 
 ## 1. 产品摘要

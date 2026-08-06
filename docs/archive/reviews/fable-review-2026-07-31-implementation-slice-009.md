@@ -1,15 +1,11 @@
 # Fable Review: Implementation Slice 009
 
 - Date: 2026-07-31
-- Recovery Canvas: `b08b3014-bb9d-4ba3-bd16-824ad831193a`
-- Prompt node: `47e51b6f-dfbd-4b8a-8f4e-38a02265f8a0`
-- Response node: `262c7584-f9cc-4927-9c0f-458862073bed`
 - Model: `claude-fable-5`
 - Verdict: Conditionally approvable; do not implement as written
 
-The original continuation Canvas produced two empty `running` child nodes after a
-600-second timeout. The review was recovered in a fresh minimal-context Canvas
-using the same fixed model. No fallback model was used.
+The original continuation timed out. The review was recovered with fresh minimal
+context using the same fixed model; no fallback model was used.
 
 ## Major product conflict
 

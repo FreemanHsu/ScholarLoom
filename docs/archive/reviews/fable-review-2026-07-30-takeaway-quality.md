@@ -1,7 +1,7 @@
 # External Takeaway Quality design review record — 2026-07-30
 
 This record captures a three-round external Claude Fable 5 review of
-[`implementation-slice-002-takeaway-quality.md`](implementation-slice-002-takeaway-quality.md).
+[`implementation-slice-002-takeaway-quality.md`](../../plans/implementation-slice-002-takeaway-quality.md).
 A sanitized design brief, repository contracts, and aggregate runtime counts were
 shared. No production Paper content, Proposal text, credentials, or personal knowledge
 was sent.

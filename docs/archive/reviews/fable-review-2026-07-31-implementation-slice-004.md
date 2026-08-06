@@ -2,7 +2,7 @@
 
 - Date: 2026-07-31
 - Reviewer: Claude Fable 5 through Flowith Canvas
-- Target: [`implementation-slice-004-paper-organization-agent.md`](implementation-slice-004-paper-organization-agent.md)
+- Target: [`implementation-slice-004-paper-organization-agent.md`](../../plans/implementation-slice-004-paper-organization-agent.md)
 - Result: approved after two rounds with small blocking specification changes
 
 ## Review progression

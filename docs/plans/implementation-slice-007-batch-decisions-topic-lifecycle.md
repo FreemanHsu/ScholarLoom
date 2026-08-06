@@ -2,7 +2,7 @@
 
 - Status: Implemented and verified
 - Date: 2026-07-31
-- Parent design: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
+- Parent design: [`paper-organization-feature-design.md`](../paper-organization-feature-design.md)
 - Depends on:
   [`implementation-slice-005-organization-workspace.md`](implementation-slice-005-organization-workspace.md),
   [`implementation-slice-006-taxonomy-bootstrap-backfill.md`](implementation-slice-006-taxonomy-bootstrap-backfill.md)
@@ -300,7 +300,5 @@ Implemented on 2026-07-31. Verification completed with:
 - snapshot creation and verification, restore into a new data root, and SQLite
   integrity/foreign-key diagnostics with no authoritative artifacts missing.
 
-Browser artifacts:
-
-- `output/playwright/slice-007-merge-complete.png`;
-- `output/playwright/slice-007-redirect-mobile.png`.
+The screenshots from these journeys were local verification outputs and are not
+versioned documentation.

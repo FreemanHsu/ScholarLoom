@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Date: 2026-08-01
-- Parent design: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
+- Parent design: [`paper-organization-feature-design.md`](../paper-organization-feature-design.md)
 - Depends on: Slice 001 Paper Catalog and Slice 009 Alias automation foundation
 
 ## 1. Outcome
@@ -176,17 +176,15 @@ Acceptance requires:
 
 ## 9. Verification
 
-- `$fable-review` completed on Canvas `640dd587-a26d-45ba-9cb4-1d90c35a80bf`;
-  the owner resolved its only major conflict in favor of universal cross-Paper
-  disambiguation.
+- `$fable-review` completed; the owner resolved its only major conflict in favor of
+  universal cross-Paper disambiguation.
 - `npm test`: 48 files, 255 tests passed.
 - `npm run typecheck`, `npm run build`, and `git diff --check`: passed.
 - Target tests cover Alias-to-Paper scoped retrieval when Summary omits the Alias,
   prompt purity, Preferred-Alias/title collision, forged and stale selections,
   short/common Alias quoting, and broad-retrieval bypass.
 - Real Playwright desktop/mobile journeys confirmed the collision chooser, selected
-  Paper banner, and bypass affordance. Artifacts:
-  `output/playwright/slice-010-entry-alias-resolver.png` and
-  `output/playwright/slice-010-entry-alias-resolver-mobile.png`.
+  Paper banner, and bypass affordance; their local screenshots are intentionally not
+  versioned.
 - Fixture snapshot verification passed SQLite integrity/foreign-key checks and
   restored successfully into a new empty `/tmp` root.

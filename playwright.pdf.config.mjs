@@ -1,7 +1,7 @@
 import { defineConfig } from "playwright/test";
 
 export default defineConfig({
-  testDir: "./browser-test",
+  testDir: "./test/browser",
   testMatch: "pdf-native-viewer.pw.mjs",
   globalTeardown: "./test/fixtures/pdf-browser-teardown.mjs",
   outputDir: "output/playwright/pdf-fit-width/test-results",

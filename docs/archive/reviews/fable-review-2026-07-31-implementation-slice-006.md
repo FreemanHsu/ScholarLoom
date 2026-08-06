@@ -3,13 +3,12 @@
 - Date: 2026-07-31
 - Reviewer: Claude Fable 5 through Flowith Canvas
 - Target:
-  [`implementation-slice-006-taxonomy-bootstrap-backfill.md`](implementation-slice-006-taxonomy-bootstrap-backfill.md)
+  [`implementation-slice-006-taxonomy-bootstrap-backfill.md`](../../plans/implementation-slice-006-taxonomy-bootstrap-backfill.md)
 - Result: accepted after two rounds, with four small pre-implementation conditions
 
 ## Review progression
 
-Round 1 response node: `a558f002-e978-4c1b-8e77-f8ed6d47d5b4`.
-Final response node: `98abdb31-7cd0-4d9e-849a-3dc05d7ea03a`.
+The review completed in two rounds.
 
 Fable confirmed that a separate Paper Taxonomy Agent is justified, but found three
 high-risk ambiguities in the first draft:

@@ -7,9 +7,10 @@
 - Data baseline: [`data-model.md`](data-model.md)
 - Frontend baseline: [`frontend-information-architecture.md`](frontend-information-architecture.md)
 - Vocabulary: [`../CONTEXT.md`](../CONTEXT.md)
-- External review: [`fable-review-2026-07-31-paper-organization.md`](fable-review-2026-07-31-paper-organization.md)
-- Implementation: Slices 1–4D complete as of 2026-08-01; per-slice designs and
-  Fable reviews are recorded in `implementation-slice-004` through `012`.
+- External review: [`archive/reviews/fable-review-2026-07-31-paper-organization.md`](archive/reviews/fable-review-2026-07-31-paper-organization.md)
+- Implementation: Slices 1–4D complete as of 2026-08-01; historical per-slice plans
+  are archived under [`plans/`](plans/), with review summaries under
+  [`archive/reviews/`](archive/reviews/).
 
 ## 1. Purpose
 

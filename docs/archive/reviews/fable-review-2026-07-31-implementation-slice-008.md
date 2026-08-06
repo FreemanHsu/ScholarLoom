@@ -1,9 +1,6 @@
 # Fable Review: Implementation Slice 008
 
 - Date: 2026-07-31
-- Canvas: `4baafd3f-0da1-4ad6-a003-4a32d3558e45`
-- Prompt node: `b80d77ad-f9b3-441a-b047-223a0f4bfb4d`
-- Response node: `6cdad76f-4706-42ae-8dc4-b08d4b9df2d9`
 - Model: `claude-fable-5`
 - Verdict: Accepted with amendments
 

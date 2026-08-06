@@ -1,10 +1,8 @@
 # Fable Review: Implementation Slice 011
 
 - Date: 2026-08-01
-- Review target: [`implementation-slice-011-topic-knowledge-revisions.md`](implementation-slice-011-topic-knowledge-revisions.md)
-- Canvas: `242e3a0b-1cc1-4183-9300-e426b8aa72c4`
+- Review target: [`implementation-slice-011-topic-knowledge-revisions.md`](../../plans/implementation-slice-011-topic-knowledge-revisions.md)
 - Model: `claude-fable-5`
-- Final node: `efdf4a25-3e06-4e6a-a3cc-2fb6fe9d740e`
 
 ## 1. Preliminary findings
 

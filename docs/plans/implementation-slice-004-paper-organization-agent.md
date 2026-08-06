@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Date: 2026-07-31
-- Parent design: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
+- Parent design: [`paper-organization-feature-design.md`](../paper-organization-feature-design.md)
 - Scope: automatic per-Paper organization analysis, independently reviewable Alias/Primary/Secondary Proposals, and Workspace review
 
 ## 1. Outcome

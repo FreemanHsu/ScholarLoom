@@ -6,19 +6,13 @@ excerpts, and implementation evidence were shared. No production vault content,
 credentials, secrets, or personal Paper knowledge was sent.
 
 The resulting feature contract is
-[`paper-organization-feature-design.md`](paper-organization-feature-design.md).
+[`paper-organization-feature-design.md`](../../paper-organization-feature-design.md).
 
 ## Review conversation
 
-- Canvas: `4baafd3f-0da1-4ad6-a003-4a32d3558e45`
-
-| Round | Prompt node | Fable response node | Purpose |
-|---|---|---|---|
-| 1 | `1c593872-6d8b-476f-9a3f-0ca609d3cb1f` | `68166c56-f008-4024-a9de-bed435f2827b` | Initial architecture and interaction critique |
-| 2 | `25a206b7-920f-4a24-8c64-5663abe2e051` | `675ce693-cbc6-40cb-98f2-d987bc67062b` | Repository-backed clarification and design choices |
-| 3 | `c5d2a58e-e91d-446e-ae07-1658235e3946` | `791328da-317f-4183-be8a-a9f2cded1a34` | State-machine, indexing, and migration corrections |
-| 4 | `084afd91-385b-4059-820a-742ad6f4ef84` | `898fa298-ecf9-413f-80d1-e1987b547a21` | Consolidated findings and implementation gates |
-| 5 | `a7d1fb7e-1231-4a84-96ee-785d410ced3b` | `bdd788ea-bc36-4b92-b794-cf45c5798b0b` | Final ReviewDecision/KWR ordering amendment |
+The five review rounds covered initial architecture and interaction critique,
+repository-backed clarification, state-machine and migration corrections,
+implementation gates, and the final ReviewDecision/KWR ordering amendment.
 
 ## Adopted findings
 

@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Date: 2026-08-01
-- Parent design: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
+- Parent design: [`paper-organization-feature-design.md`](../paper-organization-feature-design.md)
 - Depends on: Slice 007 Topic lifecycle and Slice 010 Entry Alias resolver
 
 ## 1. Outcome

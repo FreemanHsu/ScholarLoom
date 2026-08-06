@@ -5,7 +5,7 @@
 - Product contract: [`PRD.md`](PRD.md)
 - Data contract: [`data-model.md`](data-model.md)
 - SQLite design: [`sqlite-schema.sql`](sqlite-schema.sql)
-- First slice: [`implementation-slice-001.md`](implementation-slice-001.md)
+- First slice: [`plans/implementation-slice-001.md`](plans/implementation-slice-001.md)
 
 ## 1. Architectural outcome
 

@@ -2,9 +2,6 @@
 
 - Date: 2026-07-31
 - Reviewer: Claude Fable 5 through `fable-review`
-- Canvas: `4baafd3f-0da1-4ad6-a003-4a32d3558e45`
-- Prompt node: `c171a3b6-6b0c-411b-a7ef-312108067e1b`
-- Response node: `cb55da99-248b-440b-a856-91ca7eaa5961`
 - Verdict: Accepted with amendments; no user-confirmation-level conflict
 
 ## Findings adopted

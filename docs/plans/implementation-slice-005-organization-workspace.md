@@ -2,7 +2,7 @@
 
 - Status: Implemented
 - Date: 2026-07-31
-- Parent design: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
+- Parent design: [`paper-organization-feature-design.md`](../paper-organization-feature-design.md)
 - Depends on: [`implementation-slice-004-paper-organization-agent.md`](implementation-slice-004-paper-organization-agent.md)
 
 ## 1. Outcome

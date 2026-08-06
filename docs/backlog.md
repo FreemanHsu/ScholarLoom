@@ -6,9 +6,9 @@ architecture, and ADRs.
 
 ## Repository discovery and confirmation
 
-Current behavior clones only a complete `https://github.com/owner/repository` URL that
-survives PDF text extraction. Both production Papers currently have no detected
-`PaperCodeLink`.
+Current behavior accepts an explicit complete `https://github.com/owner/repository`
+URL from Paper-derived text or a manual association. Inferred repository discovery
+remains outside the accepted product contract.
 
 Deferred work:
 
@@ -21,5 +21,5 @@ Deferred work:
 - define refresh as a new immutable Repository Snapshot rather than `git pull` mutating
   an existing snapshot.
 
-This item is deferred while the browser information architecture and page logic are
-being designed.
+This item remains deferred until candidate provenance, review semantics, refresh
+behavior, and safe acquisition have an accepted design and testable release gate.

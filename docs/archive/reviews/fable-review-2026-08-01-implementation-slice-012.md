@@ -1,11 +1,8 @@
 # Fable Review: Implementation Slice 012
 
 - Date: 2026-08-01
-- Review target: [`implementation-slice-012-domain-direction-hierarchy.md`](implementation-slice-012-domain-direction-hierarchy.md)
-- Canvas: `d7639dc8-a327-44b4-a7e8-cb8036b54c0f`
+- Review target: [`implementation-slice-012-domain-direction-hierarchy.md`](../../plans/implementation-slice-012-domain-direction-hierarchy.md)
 - Model: `claude-fable-5`
-- Initial node: `199accbc-dda5-40b7-9ae5-7348799f61d5`
-- Final node: `1168d4de-19b9-4bea-94c1-8101cc12a361`
 
 ## 1. Initial findings
 

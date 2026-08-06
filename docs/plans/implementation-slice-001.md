@@ -1,9 +1,9 @@
 # Implementation Slice 001 — One Paper to Retrievable Takeaway
 
 - Status: Ready for implementation planning
-- Architecture: [`architecture.md`](architecture.md)
-- Data contract: [`data-model.md`](data-model.md)
-- Schema: [`sqlite-schema.sql`](sqlite-schema.sql)
+- Architecture: [`architecture.md`](../architecture.md)
+- Data contract: [`data-model.md`](../data-model.md)
+- Schema: [`sqlite-schema.sql`](../sqlite-schema.sql)
 
 ## 1. Outcome
 

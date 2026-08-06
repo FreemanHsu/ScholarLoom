@@ -2,8 +2,8 @@
 
 - Status: Implemented
 - Date: 2026-07-31
-- Parent design: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
-- Review: [`fable-review-2026-07-31-implementation-slice-009.md`](fable-review-2026-07-31-implementation-slice-009.md)
+- Parent design: [`paper-organization-feature-design.md`](../paper-organization-feature-design.md)
+- Review: [`fable-review-2026-07-31-implementation-slice-009.md`](../archive/reviews/fable-review-2026-07-31-implementation-slice-009.md)
 - Depends on:
   [`implementation-slice-006-taxonomy-bootstrap-backfill.md`](implementation-slice-006-taxonomy-bootstrap-backfill.md),
   [`implementation-slice-007-batch-decisions-topic-lifecycle.md`](implementation-slice-007-batch-decisions-topic-lifecycle.md)
@@ -210,9 +210,7 @@ tests, typecheck, build, `git diff --check`, and a real Playwright journey.
 - Target test proves the corrected Wilson gate, disabled state, explicit policy
   enablement, real Alias ReviewDecision/KWR execution, safe undo, permanent
   ineligibility, and immediate suspension.
-- A real Playwright desktop/mobile journey verified the Alias-only Automation panel.
-  Artifacts:
-  `output/playwright/slice-009-alias-automation.png` and
-  `output/playwright/slice-009-alias-automation-mobile.png`.
+- A real Playwright desktop/mobile journey verified the Alias-only Automation panel;
+  its local screenshots are intentionally not versioned.
 - Fixture snapshot verification passed SQLite integrity and foreign-key checks and
   restored successfully into a new empty `/tmp` data root.

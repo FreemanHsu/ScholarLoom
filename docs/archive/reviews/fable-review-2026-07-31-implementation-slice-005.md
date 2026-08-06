@@ -2,7 +2,7 @@
 
 - Date: 2026-07-31
 - Reviewer: Claude Fable 5 through Flowith Canvas
-- Target: [`implementation-slice-005-organization-workspace.md`](implementation-slice-005-organization-workspace.md)
+- Target: [`implementation-slice-005-organization-workspace.md`](../../plans/implementation-slice-005-organization-workspace.md)
 - Result: approved after two rounds
 
 ## Review progression

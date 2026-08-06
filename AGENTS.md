@@ -14,7 +14,7 @@ operations.
 
 ```text
 src/                    TypeScript application and browser UI
-test/                   Vitest integration tests
+test/                   Vitest integration and Playwright browser tests
 docs/                   PRD, data model, architecture, schema, and ADRs
 templates/              Canonical Markdown artifact templates
 skills/                 Versioned application-owned Agent skills
