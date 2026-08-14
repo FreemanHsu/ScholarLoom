@@ -22,8 +22,9 @@ the exact Paper Version, PDF region, Message, or code commit that informed it.
 
 1. A Paper is a stable scholarly-work identity; a Paper Version is immutable.
 2. arXiv, DOI, and conference forms of the same work belong to one Paper.
-3. A new Paper Version is processed only after user confirmation. An explicit arXiv
-   `vN` request is immutable; a bare ID is resolved once to a concrete version.
+3. A new Paper Version may be downloaded and processed as an isolated review candidate,
+   but it becomes current only after user confirmation. An explicit arXiv `vN` request
+   is immutable; a bare ID is resolved once to a concrete version.
 4. Source PDF and Repository Snapshot content never changes in place.
 5. Any derived content used downstream is retained and addressable by revision.
 6. Evidence ultimately resolves to a PDF page/coordinate or fixed code commit/line,
@@ -124,26 +125,43 @@ Extraction Runs, Summary Revisions, and version-specific citation facts. Every
 downstream reference uses a concrete `(source id, source version, resolved_at)`;
 versionless arXiv identity exists only at request parsing time.
 
-The user normally views only the accepted current version. An explicit arXiv `vN`
-URL imports exactly `vN`; a bare arXiv ID resolves to the latest version once and
-then freezes. A version check on Paper open creates a `paper-version-update`
-Proposal when a newer version exists. No update download or derived processing occurs
-until the Proposal is accepted.
+The user normally views the accepted current version, with immutable history available
+in the Paper workspace. An explicit arXiv `vN` URL freezes exactly `vN`; when the Paper
+already exists, a higher version becomes a review Proposal instead of bypassing review.
+A bare arXiv ID resolves once to a concrete version. Paper open and the manual check
+command resolve arXiv metadata; when a newer version exists they persist a fixed
+`paper-version-update` Proposal. There is no scheduler in this slice.
+
+Preparing the Proposal downloads the fixed candidate, extracts it, generates its
+Summary, and persists both a page-level material diff and a best-effort Agent semantic
+digest. These candidate outputs are operational review state: they are not active
+Markdown knowledge or curated-search input. Candidate Summary and Version Diff outputs
+also have immutable historical Artifacts. Digest failure records failed Agent lineage,
+does not block review, and can be retried without rerunning material preparation.
+Only the latest detected arXiv candidate remains pending; older pending candidates are
+superseded. Rejecting a candidate preserves its audit record and does not change Paper.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Detected
     Detected --> Rejected: reject
-    Detected --> Accepted: confirm processing
-    Accepted --> Processing
-    Processing --> Available
+    Detected --> Processing: prepare fixed candidate
+    Processing --> Ready: material diff complete
     Processing --> Failed
     Failed --> Processing: retry
-    Available --> Current: set active
+    Ready --> Rejected: reject
+    Ready --> Current: accept atomically
 ```
 
 The formally published version and arXiv versions may coexist. Date alone does not
 decide which one is current.
+
+Acceptance reserves a recoverable Summary write and Review Decision in one SQLite
+transaction. Completion activates the candidate Paper Version and Summary, supersedes
+the previous active Summary, updates version-scoped metadata, and keeps the previous
+title as a Paper Alias. Existing Conversations retain their frozen old Context Snapshot
+and remain writable. A linked successor freezes the new version and receives the
+accepted Version Diff as discussion context; historical versions are never overwritten.
 
 A direct PDF Paper Version uses `source_type = direct-pdf` and
 `source_version = sha256:<content-hash>`. A known URL returning new bytes creates a
@@ -292,7 +310,9 @@ Context Snapshot containing:
 - Paper Version;
 - Summary Revision;
 - Extraction Run;
-- zero or more Repository Snapshots.
+- zero or more Repository Snapshots;
+- the accepted immutable Version Diff when this is a linked successor after a
+  Paper Version activation;
 - one immutable Knowledge Corpus Manifest containing other papers' active Summary
   Revisions and confirmed knowledge as of Conversation creation.
 

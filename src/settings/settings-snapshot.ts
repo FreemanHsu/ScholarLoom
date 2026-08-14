@@ -10,7 +10,7 @@ import {
   type CodexRuntimeStatus,
 } from "../agent/agent-configuration.js";
 import { AGENT_PROMPT_TEMPLATES } from "../agent/agent-prompts.js";
-import { agenticEvidenceSchema, chatSchema, createSummarySchema, entrySchema } from "../agent/output-contracts.js";
+import { agenticEvidenceSchema, chatSchema, createSummarySchema, createVersionDiffSchema, entrySchema } from "../agent/output-contracts.js";
 import { takeawaySelectionSchema } from "../agent/takeaway-distillation.js";
 import { createPaperOrganizationSchema } from "../agent/paper-organization.js";
 import { codexOutputSchema } from "../agent/codex-output-schema.js";
@@ -224,6 +224,7 @@ function normalizeRecordedTaskKind(taskKind: string, runnerKind: string | null):
 function outputSchema(taskKind: ReturnType<typeof listAgentConfigurations>[number]["taskKind"]): object {
   let schema: object;
   if (taskKind === "paper-summary") schema = createSummarySchema(null);
+  else if (taskKind === "paper-version-diff") schema = createVersionDiffSchema(null);
   else if (taskKind === "agentic-evidence") schema = agenticEvidenceSchema;
   else if (taskKind === "entry-answer") schema = entrySchema;
   else if (taskKind === "paper-organization") {

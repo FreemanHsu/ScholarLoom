@@ -446,7 +446,16 @@ describe("paper ingestion lifecycle", () => {
     const old = await versioned.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v1" } });
     await waitForImport(versioned, old.json().importRequest.id, "failed");
     const newer = await versioned.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
-    await waitForImport(versioned, newer.json().importRequest.id, "succeeded");
+    expect(newer.json().versionProposal).toMatchObject({ candidateVersion: 2 });
+    const prepared = await versioned.inject({ method: "POST",
+      url: `/api/proposals/${encodeURIComponent(newer.json().versionProposal.id)}/prepare`,
+      headers: { "idempotency-key": "prepare-frozen-v2" } });
+    await waitForImport(versioned, prepared.json().importRequest.id, "succeeded");
+    const accepted = await versioned.inject({ method: "POST",
+      url: `/api/proposals/${encodeURIComponent(newer.json().versionProposal.id)}/decisions`,
+      headers: { "content-type": "application/json", "idempotency-key": "accept-frozen-v2" },
+      payload: { action: "accept" } });
+    expect(accepted.statusCode).toBe(201);
     const oldStatus = await versioned.inject({ method: "GET", url: `/api/imports/${old.json().importRequest.id}` });
     await versioned.inject({ method: "POST", url: `/api/jobs/${oldStatus.json().jobs[0].id}/retry`,
       headers: { "idempotency-key": "retry-frozen-v1" } });

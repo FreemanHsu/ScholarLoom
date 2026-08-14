@@ -49,6 +49,7 @@ export type PaperSource = {
 
 export type CodexRunner = {
   runSummary(context: { paperId: string; title: string; pages: Array<{ handle: string; page: number; text: string }> }): Promise<import("./storage/import-store.js").SummaryResult>;
+  runVersionDiff?(context: import("./storage/import-store.js").VersionDiffContext): Promise<import("./storage/import-store.js").VersionDiffResult>;
   runChat?(context: { paperId: string; conversationId: string; content: string;
     sources: import("./storage/import-store.js").ChatSource[]; signal?: AbortSignal }): Promise<import("./storage/import-store.js").ChatResult>;
   runEntry?(context: { question: string; sources: Array<{ handle: string; sourceType: string; sourceId: string; title: string; body: string }> }): Promise<import("./storage/import-store.js").EntryResult>;
@@ -206,7 +207,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   app.get("/api/settings", async () => buildSettingsSnapshot(options.storageLayout, settingsRuntime));
 
   const startImport = (execution: { paper: import("./storage/import-store.js").StoredPaper; arxivId?: string; version: number;
-    importRequest: { id: string }; job: { id: string }; pdfBytes?: Uint8Array }) => {
+    importRequest: { id: string }; job: { id: string }; pdfBytes?: Uint8Array; candidateProposalId?: string }) => {
     let stage: ImportStage = "pdf-download";
     let task: Promise<void>;
     task = Promise.resolve().then(async () => {
@@ -218,6 +219,9 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
           pdfBytes = await options.paperSource.fetchPdf!(execution.arxivId!, execution.version);
         }
         await store.ingestPaper({ paper: execution.paper, pdfBytes,
+          ...(execution.candidateProposalId ? { candidateProposalId: execution.candidateProposalId } : {}),
+          ...(options.codexRunner?.runVersionDiff ? { runVersionDiff: (context: import("./storage/import-store.js").VersionDiffContext) =>
+            options.codexRunner!.runVersionDiff!(context) } : {}),
           onStage(nextStage) { stage = nextStage; },
           runSummary: (context) => options.codexRunner!.runSummary(context) });
         store.finishImport(execution.job.id);
@@ -266,7 +270,8 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
         ...(result.versionProposal ? { versionProposal: true } : {}) });
     }
 
-    const frozen = reference.explicitVersion === null ? store.findFrozenArxiv(reference.arxivId) : null;
+    const existingArxiv = store.findFrozenArxiv(reference.arxivId);
+    const frozen = reference.explicitVersion === null ? existingArxiv : null;
     let resolved: ResolvedPaper;
     try {
       resolved = frozen ? store.getResolvedMetadata(frozen.id)!
@@ -277,6 +282,22 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       return reply.code(failure.status).send({ code: failure.code, detail: failure.detail, importRequest });
     }
     const version = reference.explicitVersion ?? resolved.latestVersion;
+    if (existingArxiv && reference.explicitVersion !== null) {
+      if (version < existingArxiv.version) {
+        const importRequest = store.failImport(pendingImport.id, { code: "historical-version-import-unsupported",
+          detail: "暂不支持把较旧 arXiv 版本作为历史版本导入。" });
+        return reply.code(409).send({ code: "historical-version-import-unsupported", importRequest });
+      }
+      if (version === existingArxiv.version) {
+        const importRequest = store.resolveImportWithoutJob(pendingImport.id, existingArxiv.id, reference.arxivId,
+          { versionId: existingArxiv.versionId, arxivId: reference.arxivId, version });
+        return reply.code(200).send({ importRequest, paper: existingArxiv, replayed: true });
+      }
+      const proposal = store.proposePaperUpdate(existingArxiv, { ...resolved, latestVersion: version });
+      const importRequest = store.resolveImportWithoutJob(pendingImport.id, existingArxiv.id, reference.arxivId,
+        { arxivId: reference.arxivId, version, proposalId: (proposal as { id?: string } | null)?.id ?? null });
+      return reply.code(202).send({ importRequest, paper: existingArxiv, versionProposal: proposal });
+    }
     const processing = Boolean(options.paperSource.fetchPdf && options.codexRunner);
     const { paper, importRequest, job } = store.importPaper({
       originalInput: submitted,
@@ -1136,9 +1157,22 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     }
     const paper = store.findFrozenArxiv(workspacePaper.arxivId)!;
     let updateProposal: unknown = null;
-    try { updateProposal = store.proposePaperUpdate(paper, (await options.paperSource.resolve(workspacePaper.arxivId)).latestVersion); }
+    try { updateProposal = store.proposePaperUpdate(paper, await options.paperSource.resolve(workspacePaper.arxivId)); }
     catch { /* Update checks never make a readable workspace unavailable. */ }
     return { ...(workspace as object), updateProposal };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/papers/:id/check-version", async (request, reply) => {
+    const paper = store.listPapers().find((candidate) => candidate.id === request.params.id);
+    if (!paper) return reply.code(404).send({ code: "paper-not-found" });
+    if (paper.sourceType !== "arxiv" || !paper.arxivId) return reply.code(409).send({ code: "paper-version-check-unsupported" });
+    try {
+      const proposal = store.proposePaperUpdate(paper, await options.paperSource.resolve(paper.arxivId));
+      return reply.code(200).send({ proposal });
+    } catch (error) {
+      const failure = classifyPaperResolutionError(error);
+      return reply.code(failure.status).send({ code: failure.code, detail: failure.detail });
+    }
   });
 
   app.get<{ Params: { id: string } }>("/api/paper-versions/:id/pdf", async (request, reply) => {
@@ -1327,6 +1361,25 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     if (result.execution) {
       startImport(result.execution);
     }
+    return reply.code(result.status).send(result.body);
+  });
+  app.post<{ Params: { id: string } }>("/api/proposals/:id/prepare", async (request, reply) => {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    if (!options.codexRunner || !options.paperSource.fetchPdf) {
+      return reply.code(503).send({ code: "import-runner-unavailable" });
+    }
+    const result = store.preparePaperVersion(request.params.id, key);
+    if (result.execution) startImport(result.execution);
+    return reply.code(result.status).send(result.body);
+  });
+
+  app.post<{ Params: { id: string } }>("/api/proposals/:id/diff/retry", async (request, reply) => {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !key) return reply.code(400).send({ code: "idempotency-key-required" });
+    if (!options.codexRunner?.runVersionDiff) return reply.code(503).send({ code: "import-runner-unavailable" });
+    const result = await store.retryPaperVersionDiff(request.params.id, key, (context) =>
+      options.codexRunner!.runVersionDiff!(context));
     return reply.code(result.status).send(result.body);
   });
   app.post<{ Params: { id: string } }>("/api/proposals/:id/open-source", async (request, reply) => {

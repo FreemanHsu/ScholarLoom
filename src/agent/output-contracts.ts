@@ -33,6 +33,33 @@ export type EntryAnswerStatus =
   | "insufficient_evidence"
   | "conflicting_evidence";
 
+export function createVersionDiffSchema(evidenceHandles: string[] | null) {
+  const evidence = evidenceHandles === null ? { type: "string", minLength: 1 }
+    : { type: "string", enum: evidenceHandles };
+  return { type: "object", additionalProperties: false, required: ["significance", "changes"], properties: {
+    significance: { enum: ["minor", "moderate", "major", "unknown"] },
+    changes: { type: "array", maxItems: 30, items: { type: "object", additionalProperties: false,
+      required: ["category", "summary", "beforeEvidence", "afterEvidence"], properties: {
+        category: { enum: ["method", "experiment", "result", "conclusion", "limitation", "citation", "other"] },
+        summary: { type: "string", minLength: 1, maxLength: 1200 },
+        beforeEvidence: { type: "array", maxItems: 6, uniqueItems: true, items: evidence },
+        afterEvidence: { type: "array", maxItems: 6, uniqueItems: true, items: evidence },
+      } } },
+  } } as const;
+}
+
+export function validateVersionDiffOutput(result: { significance: string; changes: Array<{
+  category: string; summary: string; beforeEvidence: string[]; afterEvidence: string[] }> }, allowedHandles: string[]): void {
+  const allowed = new Set(allowedHandles);
+  if (!["minor", "moderate", "major", "unknown"].includes(result.significance) || result.changes.length > 30) {
+    throw new Error("paper-version-diff-contract-invalid");
+  }
+  for (const change of result.changes) {
+    if (!change.summary.trim() || [...change.beforeEvidence, ...change.afterEvidence].some((handle) => !allowed.has(handle)) ||
+        change.beforeEvidence.length + change.afterEvidence.length === 0) throw new Error("paper-version-diff-evidence-invalid");
+  }
+}
+
 type EntryOutput = {
   answerStatus: EntryAnswerStatus;
   answer: string;

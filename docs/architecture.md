@@ -87,6 +87,7 @@ $HOME/ScholarLoomData/
 ├── scholarloom-data.json         versioned layout manifest
 ├── vault/                        durable Markdown/YAML and independent Git history
 ├── originals/papers/             immutable content-addressed PDFs
+├── originals/artifacts/          immutable historical Agent/summary artifacts
 ├── state/scholarloom.sqlite3     operational authority
 ├── derived/                      rebuildable extraction and Agent artifacts
 ├── cache/repositories/           rebuildable fixed-commit clones
@@ -180,7 +181,20 @@ openPdf(paperVersionId: string): ReadableAsset
 
 It assembles a coherent read model from SQLite and Markdown: current Paper Version,
 active Summary, code status, conversations, confirmed Takeaways, and processing
-state. It does not expose table-shaped repositories.
+state. It also exposes immutable Version History and candidate diff status. It does not
+expose table-shaped repositories.
+
+#### PaperVersionReview
+
+`PaperVersionReview` owns arXiv observation, latest-only candidate supersession, fixed
+Proposal payloads, preparation idempotency, and candidate Job reservation. Candidate
+PDF, Extraction, Summary payload, material diff, and optional semantic digest remain
+isolated in `paper_version_candidates`, immutable candidate Artifacts, and the
+contract-versioned `paper_version_diffs` record until Review accepts them. A linked
+successor copies the accepted diff into its immutable Context Snapshot rather than
+reading mutable review state during later turns. `ImportStore` owns the
+recoverable activation write: Review Decision and write intent are committed before
+Markdown activation, and the expected current version prevents stale acceptance.
 
 #### RepositoryAssociations
 
@@ -380,9 +394,9 @@ process. A successful check for one profile must not imply that the other passed
 
 An application-owned Agent Configuration Registry is the single source for both
 execution and the read-only `/settings` snapshot. Every launch explicitly passes its
-model and `model_reasoning_effort`: Paper Summary uses `gpt-5.6-sol`/`high`; Agentic
-Evidence, Entry Agent, Takeaway Selection, and legacy Paper Chat use
-`gpt-5.6-sol`/`medium`. Agent Run
+model and `model_reasoning_effort`: Paper Summary, Paper Version Diff, and Paper
+Taxonomy use `gpt-5.6-sol`/`high`; Agentic Evidence, Entry Agent, Paper Organization,
+Takeaway Selection, and legacy Paper Chat use `gpt-5.6-sol`/`medium`. Agent Run
 lineage records these values, the observed Codex version, and the configuration
 version when available; historical unknowns are not inferred.
 
@@ -390,7 +404,8 @@ CodexRunner accepts a typed task rather than an arbitrary shell command:
 
 ```ts
 type CodexTask<T> = {
-  kind: "paper-summary" | "paper-chat" | "takeaway-distillation" | "knowledge-proposal" | "entry-answer";
+  kind: "paper-summary" | "paper-version-diff" | "agentic-evidence" | "entry-answer" |
+    "paper-organization" | "paper-taxonomy" | "takeaway-distillation" | "paper-chat";
   contextManifest: ContextManifest;
   instructions: string;
   outputSchema: JsonSchema<T>;
@@ -475,6 +490,7 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | POST | `/api/jobs/:id/retry` | Retry a failed or interrupted import as a new Job attempt |
 | GET | `/api/papers` | List Paper read models |
 | GET | `/api/papers/:id` | Load Paper workspace read model |
+| POST | `/api/papers/:id/check-version` | Resolve arXiv metadata and persist a fixed newer-version Proposal |
 | GET | `/api/papers/:id/repositories` | List current Repository Associations |
 | POST | `/api/papers/:id/repositories` | Idempotently add and confirm a manual GitHub root URL |
 | POST | `/api/papers/:id/repositories/:associationId/confirm` | Confirm a detected candidate and start materialization |
@@ -493,8 +509,10 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | POST | `/api/conversations/:id/restore` | Restore an archived Conversation |
 | GET | `/api/papers/:id/knowledge` | Read pending Proposals and confirmed Takeaways |
 | GET | `/api/proposals` | List reviewable suggestions |
+| POST | `/api/proposals/:id/prepare` | Prepare an isolated Paper Version candidate and its diff |
+| POST | `/api/proposals/:id/diff/retry` | Idempotently reserve and retry the best-effort semantic version digest |
 | POST | `/api/proposals/:id/decisions` | Accept, edit, or reject |
-| POST | `/api/proposals/:id/open-source` | Record the user's source-open click and return a canonical PDF Artifact URL |
+| POST | `/api/proposals/:id/open-source` | Record source-open and return a fixed external arXiv URL or canonical local PDF Artifact URL |
 | POST | `/api/entry-agent/questions` | Query global-curated knowledge |
 | POST | `/api/entry-agent/sources/:type/:id/open` | Record an Entry result source-open event |
 | GET | `/api/metrics/takeaway-distillation` | Read Selection, review, duplicate, coverage, retry, and source-open metrics |

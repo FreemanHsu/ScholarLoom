@@ -250,6 +250,11 @@ type Workspace = {
   };
   processing: null | { jobId: string; state: ImportJobState; progress: number; attempt: number; error: ImportJobError | null };
   repositories: RepositoryAssociation[];
+  versions: Array<{ id: string; sourceType: string; sourceVersion: string; sourceUrl: string;
+    processingStatus: string; current: boolean; acceptedAt: string | null;
+    metadata: { title?: string; authors?: string[]; year?: number } | null;
+    summary: { id: string; status: string } | null; conversationCount: number;
+    proposalId: string | null; preparation: ReviewProposal["preparation"] | null }>;
 };
 type Proposal = ConversationProposal & { oneClickEligible: boolean };
 type ReviewProposal = {
@@ -265,8 +270,15 @@ type ReviewProposal = {
   duplicateAcknowledgementRequired?: boolean;
   sourceConversationHref?: string | null;
   distillationState?: string | null;
+  preparation?: { status: string; materialDiff: null | { beforeVersionId: string; afterVersionId: string;
+    beforePageCount: number; afterPageCount: number; changedRegions: number;
+    changes: Array<{ beforePage: number | null; afterPage: number | null; beforeExcerpt: string | null; afterExcerpt: string | null }> };
+    semanticDiff: null | { significance: "minor" | "moderate" | "major" | "unknown"; changes: Array<{
+      category: string; summary: string; beforeEvidence: string[]; afterEvidence: string[] }> };
+    semanticError: string | null };
   payload: ConversationProposal & { sourceType?: string; currentVersion?: number | string; latestVersion?: number | string;
-    candidateVersionId?: string; error?: string; targetKind?: string; targetPath?: string; validationError?: string };
+    candidateVersion?: number | string; candidateVersionId?: string; sourceUrl?: string;
+    error?: string; targetKind?: string; targetPath?: string; validationError?: string };
 };
 type EntryAnswer = {
   answerStatus: string;
@@ -2227,23 +2239,58 @@ function paperSummaryLabel(paper: Paper): string {
 function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: ReviewProposal[]; error: string | null;
   onNavigate(href: string): void; onRefresh(): Promise<void> }) {
   const [opened, setOpened] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const pending = proposals.filter((proposal) => proposal.reviewStatus === "pending" &&
     !proposal.archivedAt && !isLightweightOrganizationProposal(proposal));
   const openCandidate = async (proposal: ReviewProposal) => {
     const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/open-source`, { method: "POST" });
     if (!response.ok) { setActionError("无法打开候选 PDF，请稍后重试。"); return; }
-    const source = await response.json() as { pdfUrl: string };
-    window.open(source.pdfUrl, "_blank", "noopener,noreferrer");
+    const source = await response.json() as { kind?: string; url?: string; pdfUrl?: string };
+    const href = source.url ?? source.pdfUrl;
+    if (!href) { setActionError("候选来源不可用。"); return; }
+    window.open(href, "_blank", "noopener,noreferrer");
     setOpened((current) => new Set(current).add(proposal.id));
     setActionError(null);
   };
+  const prepareCandidate = async (proposal: ReviewProposal) => {
+    setBusy(proposal.id);
+    const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/prepare`, { method: "POST",
+      headers: { "idempotency-key": `web-version-prepare-${proposal.id}` } });
+    if (!response.ok) {
+      const failure = await response.json() as { code?: string };
+      setActionError(failure.code === "paper-version-update-in-progress" ? "这篇 Paper 已有版本正在准备。"
+        : "无法准备候选版本，请稍后重试。");
+    } else { setActionError(null); await onRefresh(); }
+    setBusy(null);
+  };
+  const retrySemanticDiff = async (proposal: ReviewProposal) => {
+    setBusy(proposal.id);
+    const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/diff/retry`, { method: "POST",
+      headers: { "idempotency-key": `web-version-diff-${proposal.id}-${crypto.randomUUID()}` } });
+    if (!response.ok) setActionError("语义摘要重试失败；material diff 仍可用于审核。");
+    else { setActionError(null); await onRefresh(); }
+    setBusy(null);
+  };
   const acceptCandidate = async (proposal: ReviewProposal) => {
+    setBusy(proposal.id);
     const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/decisions`, { method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": `web-version-${proposal.id}` }, body: JSON.stringify({ action: "accept" }) });
-    if (!response.ok) { setActionError("候选版本尚未通过来源核验，无法确认。"); return; }
+    if (!response.ok) { const failure = await response.json() as { code?: string };
+      setActionError(failure.code === "paper-version-diff-not-ready" ? "版本对比尚未准备完成。" : "候选版本已变化，无法采用。");
+      setBusy(null); return; }
     setActionError(null);
     await onRefresh();
+    setBusy(null);
+  };
+  const rejectCandidate = async (proposal: ReviewProposal) => {
+    setBusy(proposal.id);
+    const response = await fetch(`/api/proposals/${encodeURIComponent(proposal.id)}/decisions`, { method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `web-version-reject-${proposal.id}` },
+      body: JSON.stringify({ action: "reject" }) });
+    if (!response.ok) setActionError("无法忽略该版本；Proposal 可能已变化。");
+    else { setActionError(null); await onRefresh(); }
+    setBusy(null);
   };
   const decideTakeaway = async (proposal: ReviewProposal, action: "accept" | "edit-and-accept" | "reject",
     input: TakeawayDecisionInput = {}) => {
@@ -2289,10 +2336,29 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
         <h2>{proposal.payload.claim ?? (proposal.proposalType === "paper-version-update"
           ? proposal.payload.sourceType === "direct-pdf" ? "检测到新的 PDF 内容版本" : `Paper Version v${proposal.payload.latestVersion} 可用`
           : "需要你的判断")}</h2>
-        <p>{proposal.oneClickEligible ? "证据已满足快速确认条件" : "确认前需要查看完整来源"}</p>
+        {proposal.proposalType !== "paper-version-update" &&
+          <p>{proposal.oneClickEligible ? "证据已满足快速确认条件" : "确认前需要查看完整来源"}</p>}
+        {proposal.proposalType === "paper-version-update" && proposal.payload.sourceType === "arxiv" && <>
+          <p>当前 v{String(proposal.payload.currentVersion)} · 已固定候选 v{String(proposal.payload.candidateVersion ?? proposal.payload.latestVersion)}
+            {proposal.preparation?.status === "ready" ? " · 对比已准备" : " · 尚未替换当前版本"}</p>
+          {proposal.preparation?.status === "processing" && <p className="version-preparing">正在下载、提取并生成版本对比…</p>}
+          {proposal.preparation?.status === "failed" && <p className="inline-alert">候选准备失败，可以安全重试；当前版本未改变。</p>}
+          {proposal.preparation?.materialDiff && <VersionDiffSummary diff={proposal.preparation.materialDiff}
+            semanticDiff={proposal.preparation.semanticDiff} semanticError={proposal.preparation.semanticError}
+            retrying={busy === proposal.id} onRetry={() => void retrySemanticDiff(proposal)} />}
+          <div className="review-actions">
+            <button disabled={busy === proposal.id} onClick={() => void openCandidate(proposal)}>在 arXiv 查看候选</button>
+            {proposal.preparation?.status !== "ready" && proposal.preparation?.status !== "processing" &&
+              <button disabled={busy === proposal.id} onClick={() => void prepareCandidate(proposal)}>准备并比较</button>}
+            {proposal.preparation?.status === "ready" &&
+              <button disabled={busy === proposal.id} onClick={() => void acceptCandidate(proposal)}>采用 v{String(proposal.payload.candidateVersion)}</button>}
+            <button className="ghost" disabled={busy === proposal.id} onClick={() => void rejectCandidate(proposal)}>忽略此版本</button>
+          </div>
+        </>}
         {proposal.proposalType === "paper-version-update" && proposal.payload.sourceType === "direct-pdf" && <div className="review-actions">
           <button onClick={() => void openCandidate(proposal)}>打开候选 PDF</button>
           <button disabled={!opened.has(proposal.id)} onClick={() => void acceptCandidate(proposal)}>确认采用此版本</button>
+          <button className="ghost" onClick={() => void rejectCandidate(proposal)}>忽略此版本</button>
         </div>}
         {proposal.proposalType === "takeaway" && <TakeawayReviewCard proposal={{
           ...proposal.payload, id: proposal.id, claim: proposal.payload.claim ?? "", legacySource: Boolean(proposal.legacySource),
@@ -2319,6 +2385,51 @@ function ReviewCenter({ proposals, error, onNavigate, onRefresh }: { proposals: 
         {proposal.paperId && <button className="text-button" onClick={() => onNavigate(paperHref(proposal.paperId!))}>打开相关 Paper →</button>}
       </article>)}</div>}
   </main>;
+}
+
+function VersionDiffSummary({ diff, semanticDiff, semanticError, retrying, onRetry }: {
+  diff: NonNullable<NonNullable<ReviewProposal["preparation"]>["materialDiff"]>;
+  semanticDiff: NonNullable<ReviewProposal["preparation"]>["semanticDiff"]; semanticError: string | null;
+  retrying: boolean; onRetry(): void;
+}) {
+  return <details className="version-diff" open><summary>v{diff.beforeVersionId.match(/:v(\d+)$/)?.[1] ?? "?"} →
+    v{diff.afterVersionId.match(/:v(\d+)$/)?.[1] ?? "?"} · {diff.changedRegions} 个变更区域</summary>
+    <p>{diff.beforePageCount} 页 → {diff.afterPageCount} 页</p>
+    {semanticDiff && <section className="version-semantic-diff"><strong>语义变化：{semanticDiff.significance}</strong>
+      {semanticDiff.changes.length === 0 ? <p>没有检测到影响理解的语义变化。</p> : <ul>{semanticDiff.changes.map((change, index) =>
+        <li key={`${change.category}:${index}`}><span>{change.category}</span>{change.summary}
+          <VersionEvidenceLinks label="旧版证据" evidence={change.beforeEvidence}
+            versionId={diff.beforeVersionId} expectedPrefix="before" />
+          <VersionEvidenceLinks label="新版证据" evidence={change.afterEvidence}
+            versionId={diff.afterVersionId} expectedPrefix="after" />
+        </li>)}</ul>}</section>}
+    {semanticError && <p className="version-diff-note">语义摘要暂不可用；material diff 已完成，不阻塞采用。
+      <button className="text-button" disabled={retrying} onClick={onRetry}>重试语义摘要</button></p>}
+    <ol>{diff.changes.map((change, index) => <li key={`${change.beforePage}:${change.afterPage}:${index}`}>
+      <strong>{change.beforePage ? `v旧 p.${change.beforePage}` : "新增"} → {change.afterPage ? `v新 p.${change.afterPage}` : "删除"}</strong>
+      <span className="version-evidence-links">
+        {change.beforePage && <a target="_blank" rel="noopener noreferrer"
+          href={`/api/paper-versions/${encodeURIComponent(diff.beforeVersionId)}/pdf#page=${change.beforePage}`}>打开旧版 p.{change.beforePage}</a>}
+        {change.afterPage && <a target="_blank" rel="noopener noreferrer"
+          href={`/api/paper-versions/${encodeURIComponent(diff.afterVersionId)}/pdf#page=${change.afterPage}`}>打开新版 p.{change.afterPage}</a>}
+      </span>
+      {change.beforeExcerpt && <p><del>{change.beforeExcerpt}</del></p>}
+      {change.afterExcerpt && <p><ins>{change.afterExcerpt}</ins></p>}
+    </li>)}</ol>
+  </details>;
+}
+
+function VersionEvidenceLinks({ label, evidence, versionId, expectedPrefix }: {
+  label: string; evidence: string[]; versionId: string; expectedPrefix: "before" | "after";
+}) {
+  return <span className="version-semantic-evidence"><small>{label}：</small>
+    {evidence.length === 0 ? <small>未提供</small> : evidence.map((handle, index) => {
+      const match = handle.match(new RegExp(`^${expectedPrefix}:pdf-page:(\\d+)$`));
+      return match ? <a key={`${handle}:${index}`} target="_blank" rel="noopener noreferrer"
+        href={`/api/paper-versions/${encodeURIComponent(versionId)}/pdf#page=${match[1]}`}>p.{match[1]}</a>
+        : <code key={`${handle}:${index}`}>{handle}</code>;
+    })}
+  </span>;
 }
 
 function isLightweightOrganizationProposal(proposal: Pick<ReviewProposal, "proposalType">): boolean {
@@ -2716,6 +2827,7 @@ function PaperWorkspace(props: {
   const [showArchivedConversations, setShowArchivedConversations] = useState(false);
   const [organizationOpen, setOrganizationOpen] = useState(false);
   const [organizationStatus, setOrganizationStatus] = useState<string | null>(null);
+  const [versionCheckBusy, setVersionCheckBusy] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(true);
   const [activeSummarySection, setActiveSummarySection] = useState(0);
   const [summaryWidth, setSummaryWidth] = useState(50);
@@ -2748,6 +2860,16 @@ function PaperWorkspace(props: {
       anchor: mode === "reading" ? route.anchor : null });
   const panelKind = route.mode === "knowledge" ? "knowledge"
     : route.mode === "discussion" && !route.pdfOpen ? "discussion" : "source";
+  const checkVersion = async () => {
+    setVersionCheckBusy(true);
+    const response = await fetch(`/api/papers/${encodeURIComponent(workspace.paper.id)}/check-version`, { method: "POST" });
+    if (response.ok) {
+      const result = await response.json() as { proposal: unknown | null };
+      setOrganizationStatus(result.proposal ? "检测到新的 arXiv 版本，已加入审核中心。" : "当前已经是最新 arXiv 版本。");
+      await props.onOrganizationChanged();
+    } else setOrganizationStatus("版本检查暂时不可用。");
+    setVersionCheckBusy(false);
+  };
   const pdfVersionId = props.conversation?.contextSnapshot?.paperVersionId ?? workspace.paper.versionId;
   const defaultPdfUrl = pdfVersionId === workspace.paper.versionId && workspace.pdf
     ? workspace.pdf.url
@@ -2806,6 +2928,8 @@ function PaperWorkspace(props: {
         target="_blank" rel="noopener noreferrer">
         {workspace.paper.sourceType === "arxiv" ? `arXiv v${workspace.paper.version}` : "公开 PDF"} · 打开来源
         <ArrowSquareOutIcon aria-hidden="true" size={15} weight="bold" /></a>
+        {workspace.paper.sourceType === "arxiv" && <button type="button" className="code-status repository-summary"
+          disabled={versionCheckBusy} onClick={() => void checkVersion()}>{versionCheckBusy ? "检查中…" : "检查新版本"}</button>}
         <button type="button" className="code-status repository-summary" onClick={() => setOrganizationOpen(true)}>
           <PencilSimpleIcon aria-hidden="true" size={15} weight="bold" />编辑别名与方向</button>
         <button type="button" className="code-status repository-summary"
@@ -2826,6 +2950,14 @@ function PaperWorkspace(props: {
       onRemove={props.onRemoveRepository} />}
     {organizationStatus && <div className="inline-alert" role="status">{organizationStatus}</div>}
     {props.error && <div className="inline-alert">{props.error}</div>}
+    <details className="version-history"><summary>Version History · {workspace.versions.length}</summary>
+      <div>{workspace.versions.map((version) => <article key={version.id} className={version.current ? "current" : undefined}>
+        <div><strong>{version.sourceVersion}</strong>{version.current && <span>Current</span>}</div>
+        <p>{version.processingStatus} · {version.summary?.status ?? "Summary 未激活"} · {version.conversationCount} 个 Conversation</p>
+        {version.preparation?.materialDiff && <small>{version.preparation.materialDiff.changedRegions} 个变更区域</small>}
+        <a href={version.sourceUrl} target="_blank" rel="noopener noreferrer">打开固定来源</a>
+      </article>)}</div>
+    </details>
     <div className="paper-workbench" ref={workbenchRef}
       style={{ gridTemplateColumns: `${summaryWidth}% 10px minmax(0, ${100 - summaryWidth}%)` }}>
       <section className={`summary-workbench ${outlineCollapsed ? "outline-collapsed" : "outline-expanded"}`}>
@@ -2945,6 +3077,9 @@ function PaperWorkspace(props: {
               if (title) void props.onManageConversation("rename", title); }}
             onToggleArchive={() => void props.onManageConversation(
               props.conversation!.conversation.status === "archived" ? "restore" : "archive")} /></header>
+          {props.conversation.contextSnapshot && props.conversation.contextSnapshot.paperVersionId !== workspace.paper.versionId &&
+            <div className="conversation-version-notice" role="status"><span>此讨论基于旧 Paper Version；当前 Paper 已更新到 v{workspace.paper.version}。</span>
+              <button onClick={() => void props.onContinueConversation()}>基于当前版本延续讨论</button></div>}
           <div className="message-timeline">{props.conversation.messages.map((message) => {
             const messageProposals = discussionProposals.filter((proposal) => proposal.source.messageId === message.id);
             const openInlineEvidence = (page: number) => props.onNavigate(paperHref(workspace.paper.id, { mode: "discussion",

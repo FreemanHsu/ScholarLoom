@@ -122,6 +122,7 @@ CREATE TABLE paper_versions (
     pdf_artifact_id TEXT REFERENCES artifacts(id) ON DELETE RESTRICT,
     source_content_hash TEXT,
     source_media_type TEXT,
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
     accepted_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -452,6 +453,7 @@ CREATE TABLE context_snapshots (
     extraction_run_id TEXT NOT NULL REFERENCES extraction_runs(id) ON DELETE RESTRICT,
     repositories_json TEXT NOT NULL CHECK (json_valid(repositories_json)),
     knowledge_corpus_manifest_id TEXT NOT NULL REFERENCES knowledge_corpus_manifests(id) ON DELETE RESTRICT,
+    version_diff_json TEXT CHECK (version_diff_json IS NULL OR json_valid(version_diff_json)),
     created_at TEXT NOT NULL
 ) STRICT;
 
@@ -643,7 +645,7 @@ CREATE TABLE message_citations (
     id TEXT PRIMARY KEY,
     message_id TEXT NOT NULL REFERENCES messages(id),
     ordinal INTEGER NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('pdf_anchor', 'summary_locator', 'repo_lines', 'message')),
+    kind TEXT NOT NULL CHECK (kind IN ('pdf_anchor', 'summary_locator', 'repo_lines', 'message', 'version_diff')),
     source_handle TEXT NOT NULL,
     locator_json TEXT NOT NULL CHECK (json_valid(locator_json)),
     verification_status TEXT NOT NULL CHECK (verification_status IN ('verified', 'unverified')),
@@ -782,6 +784,50 @@ CREATE TABLE proposals (
 CREATE UNIQUE INDEX uq_pending_proposal_fingerprint
     ON proposals(fingerprint)
     WHERE state = 'pending';
+
+CREATE TABLE paper_version_diffs (
+    id TEXT PRIMARY KEY,
+    before_version_id TEXT NOT NULL REFERENCES paper_versions(id) ON DELETE RESTRICT,
+    after_version_id TEXT NOT NULL REFERENCES paper_versions(id) ON DELETE RESTRICT,
+    contract_version TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'ready', 'failed')),
+    material_diff_json TEXT CHECK (material_diff_json IS NULL OR json_valid(material_diff_json)),
+    semantic_diff_json TEXT CHECK (semantic_diff_json IS NULL OR json_valid(semantic_diff_json)),
+    semantic_error TEXT,
+    agent_run_id TEXT REFERENCES agent_runs(job_run_id) ON DELETE RESTRICT,
+    artifact_id TEXT REFERENCES artifacts(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (before_version_id, after_version_id, contract_version)
+) STRICT;
+
+CREATE TABLE paper_version_candidates (
+    proposal_id TEXT PRIMARY KEY REFERENCES proposals(id) ON DELETE RESTRICT,
+    paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE RESTRICT,
+    before_version_id TEXT NOT NULL REFERENCES paper_versions(id) ON DELETE RESTRICT,
+    candidate_version_id TEXT NOT NULL UNIQUE REFERENCES paper_versions(id) ON DELETE RESTRICT,
+    summary_id TEXT,
+    summary_artifact_id TEXT REFERENCES artifacts(id) ON DELETE RESTRICT,
+    version_diff_id TEXT REFERENCES paper_version_diffs(id) ON DELETE RESTRICT,
+    extraction_run_id TEXT REFERENCES extraction_runs(id) ON DELETE RESTRICT,
+    read_status TEXT,
+    structured_json TEXT CHECK (structured_json IS NULL OR json_valid(structured_json)),
+    skill_content_hash TEXT,
+    agent_run_id TEXT REFERENCES agent_runs(job_run_id) ON DELETE RESTRICT,
+    material_diff_json TEXT CHECK (material_diff_json IS NULL OR json_valid(material_diff_json)),
+    semantic_diff_json TEXT CHECK (semantic_diff_json IS NULL OR json_valid(semantic_diff_json)),
+    semantic_error TEXT,
+    preparation_status TEXT NOT NULL CHECK (
+        preparation_status IN ('detected', 'processing', 'ready', 'failed', 'rejected', 'superseded', 'accepted')
+    ),
+    prepared_at TEXT,
+    accepted_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX paper_version_candidates_paper_status
+    ON paper_version_candidates(paper_id, preparation_status, updated_at);
 
 CREATE TABLE source_open_events (
     id TEXT PRIMARY KEY,

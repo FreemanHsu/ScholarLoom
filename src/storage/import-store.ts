@@ -51,6 +51,7 @@ import {
 } from "./paper-resolver.js";
 import { TopicKnowledgeStore } from "./topic-knowledge-store.js";
 import { PdfDeliveryOptimizer, type PdfLinearizationTool } from "./pdf-delivery-optimizer.js";
+import { PaperVersionReview } from "./paper-version-review.js";
 
 const standardFontDataUrl = `${join(dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json")), "standard_fonts")}/`;
 
@@ -103,13 +104,24 @@ export type SummaryResult = {
   claims: Array<{ voice: "authors-claim" | "paper-evidence" | "agent-assessment"; claim: string; sourceHandle: string }>;
   readStatus: "abstract" | "skimmed" | "read";
 };
+export type VersionDiffResult = {
+  significance: "minor" | "moderate" | "major" | "unknown";
+  changes: Array<{ category: "method" | "experiment" | "result" | "conclusion" | "limitation" | "citation" | "other";
+    summary: string; beforeEvidence: string[]; afterEvidence: string[] }>;
+};
+export type VersionDiffContext = {
+  paperId: string;
+  before: { versionId: string; pages: Array<{ handle: string; page: number; text: string }> };
+  after: { versionId: string; pages: Array<{ handle: string; page: number; text: string }> };
+  materialDiff: { beforePageCount: number; afterPageCount: number; changedRegions: number };
+};
 export type ChatResult = {
   answer: string;
   citations: Array<{ sourceHandle: string; locator: string }>;
 };
 export type ChatSource = {
   handle: string;
-  type: "pdf" | "summary" | "code" | "message";
+  type: "pdf" | "summary" | "code" | "message" | "version-diff";
   text: string;
   locator: string;
 };
@@ -143,7 +155,8 @@ type ImportStatus = {
 };
 
 type ImportJobHandle = { id: string; attempt: number; state: ImportJobState };
-type ImportExecution = { paper: StoredPaper; arxivId?: string; version: number; importRequest: StoredImportRequest; job: ImportJobHandle };
+type ImportExecution = { paper: StoredPaper; arxivId?: string; version: number; importRequest: StoredImportRequest;
+  job: ImportJobHandle; candidateProposalId?: string };
 type RetryImportResult = { ok: true; execution: ImportExecution; replayed: boolean } |
   { ok: false; code: "job-not-found" | "job-not-retryable" | "job-already-active" | "idempotency-key-conflict" };
 
@@ -162,6 +175,7 @@ export class ImportStore {
   readonly #paperTaxonomy: PaperTaxonomyStore;
   readonly #paperOrganizationBatches: PaperOrganizationBatchStore;
   readonly #paperResolver: PaperResolver;
+  readonly #paperVersionReview: PaperVersionReview;
   readonly #topicKnowledge: TopicKnowledgeStore;
   readonly #agentExecutionMetadata: AgentExecutionMetadataProvider | undefined;
   readonly #pdfDeliveryOptimizer: PdfDeliveryOptimizer | null;
@@ -226,6 +240,7 @@ export class ImportStore {
     this.#paperOrganizationBatches = new PaperOrganizationBatchStore(
       this.#database, this.#now, this.#paperOrganization);
     this.#paperResolver = new PaperResolver(this.#database);
+    this.#paperVersionReview = new PaperVersionReview(this.#database, this.#now);
     this.#knowledgeWriter.recover();
     this.#paperOrganization.rebuildCatalog();
     this.#topicKnowledge.recover();
@@ -238,6 +253,8 @@ export class ImportStore {
   async ingestPaper(input: {
     paper: StoredPaper;
     pdfBytes: Uint8Array;
+    candidateProposalId?: string;
+    runVersionDiff?(context: VersionDiffContext): Promise<VersionDiffResult>;
     onStage?: (stage: Exclude<ImportStage, "pdf-download">) => void;
     runSummary(context: { paperId: string; title: string; pages: Array<{ handle: string; page: number; text: string }> }): Promise<SummaryResult>;
   }): Promise<void> {
@@ -346,6 +363,80 @@ export class ImportStore {
     const relativePath = join("library", "papers", slug, `summary-${summaryVersion}-r1.md`);
     const targetPath = join(this.#knowledgeRoot, relativePath);
     const skillHash = createHash("sha256").update(readFileSync(join(process.cwd(), "skills/paper-reading/SKILL.md"))).digest("hex");
+    if (input.candidateProposalId) {
+      const candidate = this.#database.prepare(`SELECT before_version_id FROM paper_version_candidates
+        WHERE proposal_id=? AND candidate_version_id=?`).get(input.candidateProposalId, versionId) as
+        { before_version_id: string } | undefined;
+      if (!candidate) throw new Error("paper-version-candidate-missing");
+      const beforePages = (this.#database.prepare(`SELECT d.page_number,d.text_content FROM extraction_runs e
+        JOIN document_elements d ON d.extraction_run_id=e.id AND d.element_type='page'
+        WHERE e.paper_version_id=? AND e.status='succeeded' ORDER BY d.page_number,d.ordinal`)
+        .all(candidate.before_version_id) as Array<{ page_number: number; text_content: string }>);
+      const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+      const count = Math.max(beforePages.length, pages.length);
+      const changes = Array.from({ length: count }, (_, index) => {
+        const before = beforePages[index];
+        const after = pages[index];
+        if (normalize(before?.text_content ?? "") === normalize(after?.text ?? "")) return null;
+        return { beforePage: before?.page_number ?? null, afterPage: after?.page ?? null,
+          beforeExcerpt: before?.text_content.slice(0, 360) ?? null, afterExcerpt: after?.text.slice(0, 360) ?? null,
+          beforeSource: before ? { versionId: candidate.before_version_id, page: before.page_number } : null,
+          afterSource: after ? { versionId, page: after.page } : null };
+      }).filter(Boolean);
+      const materialDiff = { beforeVersionId: candidate.before_version_id, afterVersionId: versionId,
+        beforePageCount: beforePages.length, afterPageCount: pages.length, changedRegions: changes.length, changes };
+      const versionDiffContext: VersionDiffContext = { paperId: input.paper.id,
+        before: { versionId: candidate.before_version_id, pages: beforePages.map((page) =>
+          ({ handle: `before:pdf-page:${page.page_number}`, page: page.page_number, text: page.text_content })) },
+        after: { versionId, pages: pages.map((page) => ({ ...page, handle: `after:${page.handle}` })) },
+        materialDiff: { beforePageCount: beforePages.length,
+          afterPageCount: pages.length, changedRegions: changes.length } };
+      let semanticDiff: VersionDiffResult | null = null;
+      let semanticError: string | null = "semantic-digest-unavailable";
+      let semanticAgentRunId: string | null = null;
+      if (input.runVersionDiff) {
+        try {
+          semanticDiff = await input.runVersionDiff(versionDiffContext);
+          semanticAgentRunId = this.#recordAgentRun("paper-version-diff", input.paper.id, null,
+            versionDiffContext, semanticDiff, null);
+          semanticError = null;
+        } catch (error) {
+          semanticError = "paper-version-semantic-diff-failed";
+          this.#recordAgentFailure("paper-version-diff", input.paper.id, versionDiffContext, semanticError);
+        }
+      }
+      const candidateSummaryArtifactId = this.#storeArtifact(`artifact:candidate-summary:${summaryId}`,
+        "paper-summary-candidate", Buffer.from(JSON.stringify(structured)), "json", "agent-run", agentRunId, artifactId, true);
+      const versionDiffId = `paper-version-diff:${candidate.before_version_id}:${versionId}:v1`;
+      const diffArtifactId = this.#storeArtifact(`artifact:${versionDiffId}`, "paper-version-diff",
+        Buffer.from(JSON.stringify({ contractVersion: "paper-version-diff.v1", materialDiff, semanticDiff, semanticError })),
+        "json", "agent-run", semanticAgentRunId ?? agentRunId, artifactId, true);
+      this.#database.transaction(() => {
+        this.#database.prepare(`INSERT INTO paper_version_diffs
+          (id,before_version_id,after_version_id,contract_version,status,material_diff_json,semantic_diff_json,
+            semantic_error,agent_run_id,artifact_id,created_at,updated_at)
+          VALUES (?,?,?,'paper-version-diff.v1','ready',?,?,?,?,?,?,?)
+          ON CONFLICT(before_version_id,after_version_id,contract_version) DO UPDATE SET
+            status='ready',material_diff_json=excluded.material_diff_json,
+            semantic_diff_json=excluded.semantic_diff_json,semantic_error=excluded.semantic_error,
+            agent_run_id=excluded.agent_run_id,artifact_id=excluded.artifact_id,updated_at=excluded.updated_at`)
+          .run(versionDiffId, candidate.before_version_id, versionId, JSON.stringify(materialDiff),
+            semanticDiff ? JSON.stringify(semanticDiff) : null, semanticError, semanticAgentRunId,
+            diffArtifactId, now, now);
+        this.#database.prepare(`UPDATE paper_version_candidates SET summary_id=?,extraction_run_id=?,read_status=?,
+          summary_artifact_id=?,version_diff_id=?,structured_json=?,skill_content_hash=?,agent_run_id=?,
+          material_diff_json=?,semantic_diff_json=?,semantic_error=?,
+          preparation_status=CASE WHEN preparation_status='processing' THEN 'ready' ELSE preparation_status END,
+          prepared_at=?,updated_at=? WHERE proposal_id=?`)
+          .run(summaryId, extractionId, result.readStatus, candidateSummaryArtifactId, versionDiffId,
+            JSON.stringify(structured), skillHash, agentRunId,
+            JSON.stringify(materialDiff), semanticDiff ? JSON.stringify(semanticDiff) : null, semanticError,
+            now, now, input.candidateProposalId);
+        this.#database.prepare("UPDATE paper_versions SET processing_status='available',updated_at=? WHERE id=?")
+          .run(now, versionId);
+      })();
+      return;
+    }
     const markdown = renderSummary({ summaryId, paper: input.paper, versionId, extractionId, agentRunId, skillHash, result: structured, date: now.slice(0, 10) });
     const markdownHash = createHash("sha256").update(markdown).digest("hex");
     const stagedPath = `${targetPath}.staged`;
@@ -371,7 +462,9 @@ export class ImportStore {
       { target_path: string; staged_path: string; result_hash: string; phase: string; payload_json: string };
     const payload = JSON.parse(row.payload_json) as { summaryId: string; paperId: string; paperTitle: string; versionId: string; extractionId: string; markdown?: string;
       readStatus: string; relativePath: string; markdownHash: string; structured: SummaryResult; skillHash: string;
-      claims: Array<{ evidenceAnchorId: string }>; agentRunId: string; now: string };
+      claims: Array<{ evidenceAnchorId: string }>; agentRunId: string; now: string; expectedCurrentVersionId?: string;
+      activationDecision?: { proposalId: string; idempotencyKey: string; decisionId: string; body: unknown;
+        arxivId?: string; metadata: { title: string; authors: string[]; year: number } } };
     let phase = row.phase;
     const targetPath = this.#knowledgePath(row.target_path);
     const stagedPath = this.#knowledgePath(row.staged_path);
@@ -419,7 +512,7 @@ export class ImportStore {
       this.#storeArtifact(`artifact:${payload.summaryId}`, "paper-summary", readFileSync(targetPath), "md", "agent-run", payload.agentRunId, pdfArtifact);
       this.#database.transaction(() => {
         this.#database.prepare(`INSERT INTO summary_revisions(id,paper_id,paper_version_id,extraction_run_id,revision,status,read_status,markdown_path,markdown_hash,structured_json,skill_path,skill_content_hash,created_at,agent_run_id,canonical_sections_hash)
-          VALUES (?,?,?,?,1,'active',?,?,?,?, 'skills/paper-reading/SKILL.md',?,?,?,?) ON CONFLICT(id) DO NOTHING`)
+          VALUES (?,?,?,?,1,'superseded',?,?,?,?, 'skills/paper-reading/SKILL.md',?,?,?,?) ON CONFLICT(id) DO NOTHING`)
           .run(payload.summaryId, payload.paperId, payload.versionId, payload.extractionId, payload.readStatus, payload.relativePath,
             payload.markdownHash, JSON.stringify(payload.structured), payload.skillHash, payload.now, payload.agentRunId,
             canonicalSectionHash(payload.structured));
@@ -437,18 +530,75 @@ export class ImportStore {
         { current_version_id: string }).current_version_id;
       const acceptedCandidate = this.#database.prepare(`SELECT 1 FROM proposals WHERE paper_id=? AND proposal_type='paper-version-update'
         AND review_status='accepted' AND json_extract(payload_json,'$.candidateVersionId')=? LIMIT 1`).get(payload.paperId, payload.versionId);
-      const activateVersion = currentVersion === payload.versionId || Boolean(acceptedCandidate);
+      const activationSnapshotMatches = !payload.expectedCurrentVersionId || currentVersion === payload.expectedCurrentVersionId;
+      if (payload.activationDecision && !acceptedCandidate && !activationSnapshotMatches) {
+        this.#paperVersionReview.supersede(payload.activationDecision.proposalId);
+        this.#database.transaction(() => {
+          this.#database.prepare("UPDATE summary_revisions SET status='superseded' WHERE id=?").run(payload.summaryId);
+          this.#database.prepare("DELETE FROM curated_search_documents WHERE source_type='summary' AND source_id=?")
+            .run(payload.summaryId);
+          this.#database.prepare("UPDATE index_outbox SET state='complete',completed_at=? WHERE projection='global-curated' AND source_id=? AND operation='upsert'")
+            .run(payload.now, payload.summaryId);
+          this.#database.prepare("UPDATE knowledge_write_requests SET phase='complete',updated_at=? WHERE id=?")
+            .run(new Date().toISOString(), writeId);
+          this.#database.prepare("UPDATE paper_versions SET processing_status='available',updated_at=? WHERE id=?")
+            .run(payload.now, payload.versionId);
+        })();
+        return;
+      }
+      const activateVersion = currentVersion === payload.versionId ||
+        (Boolean(acceptedCandidate) || Boolean(payload.activationDecision)) && activationSnapshotMatches;
+      if (activateVersion && payload.activationDecision && !acceptedCandidate) {
+        const activationDecision = payload.activationDecision;
+        if (!this.#writePaperManifest(payload.paperId, payload.paperTitle, payload.versionId,
+          payload.summaryId, payload.now, false)) return;
+        this.#database.transaction(() => {
+          const proposalChanged = this.#database.prepare(`UPDATE proposals SET review_status='accepted',decided_at=?
+            WHERE id=? AND review_status='pending'`).run(payload.now, activationDecision.proposalId).changes;
+          const candidateChanged = this.#database.prepare(`UPDATE paper_version_candidates
+            SET preparation_status='accepted',accepted_at=?,updated_at=?
+            WHERE proposal_id=? AND preparation_status='ready'`).run(payload.now, payload.now,
+              activationDecision.proposalId).changes;
+          const replay = this.#database.prepare("SELECT 1 FROM review_decisions WHERE proposal_id=? AND idempotency_key=?")
+            .get(activationDecision.proposalId, activationDecision.idempotencyKey);
+          if ((!replay && (proposalChanged !== 1 || candidateChanged !== 1))) {
+            throw new Error("paper-version-proposal-already-decided");
+          }
+          this.#database.prepare(`INSERT OR IGNORE INTO review_decisions
+            (id,proposal_id,action,idempotency_key,result_json,created_at) VALUES (?,?,'accept',?,?,?)`)
+            .run(activationDecision.decisionId, activationDecision.proposalId,
+              activationDecision.idempotencyKey, JSON.stringify(activationDecision.body), payload.now);
+          this.#database.prepare("UPDATE paper_versions SET accepted_at=?,updated_at=? WHERE id=?")
+            .run(payload.now, payload.now, payload.versionId);
+          if (activationDecision.arxivId) this.#database.prepare(`UPDATE paper_external_identities SET metadata_json=?
+            WHERE paper_id=? AND identity_type='arxiv'`).run(JSON.stringify(activationDecision.metadata), payload.paperId);
+        })();
+      }
+      if (activateVersion && !this.#writePaperManifest(payload.paperId, payload.paperTitle, payload.versionId,
+        payload.summaryId, payload.now)) return;
       this.#database.transaction(() => {
-        this.#database.prepare(`INSERT INTO curated_search_documents(id,source_type,source_id,title,body,updated_at)
+        if (activateVersion) {
+          this.#database.prepare("UPDATE summary_revisions SET status='superseded' WHERE paper_id=? AND id<>? AND status='active'")
+            .run(payload.paperId, payload.summaryId);
+          this.#database.prepare("UPDATE summary_revisions SET status='active' WHERE id=?").run(payload.summaryId);
+          this.#database.prepare(`DELETE FROM curated_search_documents WHERE source_type='summary' AND source_id IN
+            (SELECT id FROM summary_revisions WHERE paper_id=? AND id<>?)`).run(payload.paperId, payload.summaryId);
+        } else {
+          this.#database.prepare("UPDATE summary_revisions SET status='superseded' WHERE id=?").run(payload.summaryId);
+        }
+        if (activateVersion) this.#database.prepare(`INSERT INTO curated_search_documents(id,source_type,source_id,title,body,updated_at)
           VALUES (?,'summary',?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET title=excluded.title,body=excluded.body,updated_at=excluded.updated_at`)
-          .run(`curated:${payload.summaryId}`, payload.summaryId, payload.paperTitle, payload.structured.sections.map((section) => section.body).join("\n"), payload.now);
+          .run(`curated:${payload.summaryId}`, payload.summaryId, payload.paperTitle,
+            payload.structured.sections.map((section) => section.body).join("\n"), payload.now);
+        else this.#database.prepare("DELETE FROM curated_search_documents WHERE source_type='summary' AND source_id=?")
+          .run(payload.summaryId);
         this.#database.prepare("UPDATE projection_state SET last_successful_at=?,updated_at=? WHERE projection='global-curated'").run(payload.now, payload.now);
         this.#database.prepare("UPDATE index_outbox SET state='complete',completed_at=? WHERE projection='global-curated' AND source_id=? AND operation='upsert'")
           .run(payload.now, payload.summaryId);
         this.#database.prepare("UPDATE knowledge_write_requests SET phase='complete',updated_at=? WHERE id=?").run(new Date().toISOString(), writeId);
         this.#database.prepare("UPDATE paper_versions SET processing_status='available',updated_at=? WHERE id=?").run(payload.now, payload.versionId);
-        if (activateVersion) this.#database.prepare("UPDATE papers SET current_version_id=?,updated_at=? WHERE id=?")
-          .run(payload.versionId, payload.now, payload.paperId);
+        if (activateVersion) this.#database.prepare("UPDATE papers SET current_version_id=?,title=?,updated_at=? WHERE id=?")
+          .run(payload.versionId, payload.paperTitle, payload.now, payload.paperId);
         if (activateVersion) {
           try {
             this.#database.prepare(`INSERT INTO paper_organization_triggers
@@ -461,32 +611,74 @@ export class ImportStore {
           }
         }
       })();
-      if (activateVersion) this.#writePaperManifest(payload.paperId, payload.paperTitle, payload.versionId, payload.summaryId, payload.now);
     }
   }
 
-  #writePaperManifest(paperId: string, title: string, versionId: string, summaryId: string, now: string): void {
+  #writePaperManifest(paperId: string, title: string, versionId: string, summaryId: string, now: string,
+    advance = true): boolean {
     const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "paper";
-    const relativePath = join("library", "papers", slug, "paper.md");
+    const priorManifest = this.#database.prepare("SELECT markdown_path,markdown_hash FROM paper_manifests WHERE paper_id=?")
+      .get(paperId) as { markdown_path: string; markdown_hash: string } | undefined;
+    const relativePath = priorManifest?.markdown_path ?? join("library", "papers", slug, "paper.md");
     const target = join(this.#knowledgeRoot, relativePath);
     const identity = this.#database.prepare(`SELECT identity_type,normalized_value,metadata_json FROM paper_external_identities
       WHERE paper_id=? ORDER BY CASE identity_type WHEN 'arxiv' THEN 0 ELSE 1 END,created_at LIMIT 1`).get(paperId) as
       { identity_type: string; normalized_value: string; metadata_json: string };
-    const metadata = JSON.parse(identity.metadata_json) as { authors: string[]; year: number };
+    const versionMetadata = this.#database.prepare("SELECT metadata_json FROM paper_versions WHERE id=? AND paper_id=?")
+      .get(versionId, paperId) as { metadata_json: string | null } | undefined;
+    const metadata = JSON.parse(versionMetadata?.metadata_json ?? identity.metadata_json) as { authors: string[]; year: number };
+    const existingAliases = this.#database.prepare(`SELECT name,alias_kind,preferred FROM paper_aliases
+      WHERE paper_id=? ORDER BY preferred DESC,ordinal`).all(paperId) as
+      Array<{ name: string; alias_kind: string; preferred: number }>;
+    const historicalTitles = (this.#database.prepare(`SELECT metadata_json FROM paper_versions
+      WHERE paper_id=? AND id<>? AND metadata_json IS NOT NULL ORDER BY created_at`).all(paperId, versionId) as
+      Array<{ metadata_json: string }>).map((row) => (JSON.parse(row.metadata_json) as { title?: string }).title)
+      .filter((value): value is string => Boolean(value?.trim()));
+    const seenAliases = new Set<string>();
+    const aliases = [...existingAliases.map((alias) => ({ name: alias.name, kind: alias.alias_kind,
+      preferred: alias.preferred === 1 })), ...historicalTitles.map((name) => ({ name, kind: "user-defined", preferred: false }))]
+      .filter((alias) => {
+        const normalized = alias.name.trim().toLocaleLowerCase();
+        if (!normalized || normalized === title.trim().toLocaleLowerCase() || seenAliases.has(normalized)) return false;
+        seenAliases.add(normalized);
+        return true;
+      });
+    const directions = (this.#database.prepare(`SELECT topic_id,assignment_role FROM paper_direction_assignments
+      WHERE paper_id=? ORDER BY CASE assignment_role WHEN 'primary' THEN 0 ELSE 1 END,topic_id`).all(paperId) as
+      Array<{ topic_id: string; assignment_role: "primary" | "secondary" }>).map((direction) =>
+      ({ topicId: direction.topic_id, role: direction.assignment_role }));
     const summaryPath = this.#database.prepare("SELECT markdown_path FROM summary_revisions WHERE id=?").pluck().get(summaryId) as string;
-    const markdown = `---\nid: "${paperId}"\ntype: paper\ntitle: "${title}"\nauthors: ${JSON.stringify(metadata.authors)}\nyear: ${metadata.year}\nvenue: null\nexternal_identities:\n  ${identity.identity_type}: "${identity.normalized_value}"\nacquisition_status: ingested\norigin: manual-import\ncurrent_version_id: "${versionId}"\ncurrent_summary_revision_id: "${summaryId}"\npaper_code_links: []\nread_status: read\nstatus: active\naliases: []\ndirections: []\ntopics: []\nconcepts: []\ntags: []\ncreated: ${now.slice(0, 10)}\nupdated: ${now.slice(0, 10)}\n---\n\n# ${title}\n\n## Current reading\n\n- Current Paper Version: ${versionId}\n- Active Paper Summary: [[${summaryPath.replace(/\.md$/, "")}]]\n\n## Confirmed Takeaways\n\n| Takeaway | Active revision | Evidence | Status |\n|---|---|---|---|\n`;
+    const markdown = `---\nid: "${paperId}"\ntype: paper\ntitle: "${title}"\nauthors: ${JSON.stringify(metadata.authors)}\nyear: ${metadata.year}\nvenue: null\nexternal_identities:\n  ${identity.identity_type}: "${identity.normalized_value}"\nacquisition_status: ingested\norigin: manual-import\ncurrent_version_id: "${versionId}"\ncurrent_summary_revision_id: "${summaryId}"\npaper_code_links: []\nread_status: read\nstatus: active\naliases: ${JSON.stringify(aliases)}\ndirections: ${JSON.stringify(directions)}\ntopics: []\nconcepts: []\ntags: []\ncreated: ${now.slice(0, 10)}\nupdated: ${now.slice(0, 10)}\n---\n\n# ${title}\n\n## Current reading\n\n- Current Paper Version: ${versionId}\n- Active Paper Summary: [[${summaryPath.replace(/\.md$/, "")}]]\n\n## Confirmed Takeaways\n\n| Takeaway | Active revision | Evidence | Status |\n|---|---|---|---|\n`;
     const hash = createHash("sha256").update(markdown).digest("hex");
-    const writeId = `knowledge-write:paper-manifest:${paperId}`;
+    const writeId = `knowledge-write:paper-manifest:${paperId}:${versionId}`;
     this.#database.prepare(`INSERT INTO knowledge_write_requests(id,request_type,target_path,staged_path,result_hash,phase,created_at,updated_at,payload_json)
       VALUES (?,'paper-manifest',?,?,?,'reserved',?,?,?) ON CONFLICT(id) DO NOTHING`)
-      .run(writeId, relativePath, `${relativePath}.staged`, hash, now, now, JSON.stringify({ paperId, versionId, summaryId }));
-    const phase = (this.#database.prepare("SELECT phase FROM knowledge_write_requests WHERE id=?").get(writeId) as { phase: string }).phase;
-    if (phase === "complete") return;
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(`${target}.staged`, markdown, "utf8");
-    this.#database.prepare("UPDATE knowledge_write_requests SET phase='staged',updated_at=? WHERE id=?").run(now, writeId);
+      .run(writeId, relativePath, `${relativePath}.staged`, hash, now, now,
+        JSON.stringify({ paperId, versionId, summaryId, expectedHash: priorManifest?.markdown_hash ?? null }));
+    let phase = (this.#database.prepare("SELECT phase FROM knowledge_write_requests WHERE id=?").get(writeId) as { phase: string }).phase;
+    if (phase === "complete") return true;
+    if (phase === "conflicted" || phase === "failed") return false;
+    if (phase === "reserved") {
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(`${target}.staged`, markdown, "utf8");
+      this.#database.prepare("UPDATE knowledge_write_requests SET phase='staged',updated_at=? WHERE id=?").run(now, writeId);
+      phase = "staged";
+    }
+    if (!advance) {
+      if (phase === "staged" && existsSync(target)) {
+        const actualHash = createHash("sha256").update(readFileSync(target)).digest("hex");
+        if (actualHash !== hash && actualHash !== (priorManifest?.markdown_hash ?? null)) {
+          this.#createWriteConflict(writeId, paperId, relativePath, hash, actualHash);
+          return false;
+        }
+      }
+      return true;
+    }
     this.#advanceManifestWrite(writeId);
-    this.#paperOrganization.rebuildCatalog({ targetPath: relativePath, resultHash: hash });
+    const completed = (this.#database.prepare("SELECT phase FROM knowledge_write_requests WHERE id=?")
+      .get(writeId) as { phase: string }).phase === "complete";
+    if (completed) this.#paperOrganization.rebuildCatalog({ targetPath: relativePath, resultHash: hash });
+    return completed;
   }
 
   #advanceManifestWrite(writeId: string): void {
@@ -497,12 +689,14 @@ export class ImportStore {
     if (row.phase === "staged") {
       if (existsSync(targetPath)) {
         const actualHash = createHash("sha256").update(readFileSync(targetPath)).digest("hex");
-        if (actualHash !== row.result_hash) {
-          const { paperId } = JSON.parse(row.payload_json) as { paperId: string };
+        const { paperId, expectedHash } = JSON.parse(row.payload_json) as { paperId: string; expectedHash?: string | null };
+        if (actualHash !== row.result_hash && actualHash !== expectedHash) {
           this.#createWriteConflict(writeId, paperId, row.target_path, row.result_hash, actualHash);
           return;
         }
-        if (existsSync(stagedPath)) unlinkSync(stagedPath);
+        if (actualHash === row.result_hash) {
+          if (existsSync(stagedPath)) unlinkSync(stagedPath);
+        } else renameSync(stagedPath, targetPath);
       } else renameSync(stagedPath, targetPath);
       this.#database.prepare("UPDATE knowledge_write_requests SET phase='renamed',updated_at=? WHERE id=?").run(new Date().toISOString(), writeId);
     }
@@ -543,6 +737,29 @@ export class ImportStore {
       WHERE paper_id=? AND job_type='paper-import' ORDER BY attempt DESC,queued_at DESC,id DESC LIMIT 1`).get(id) as
       { id: string; state: string; progress: number; attempt: number; error_json: string | null } | undefined;
     const pdfArtifact = extraction ? await this.getPdfArtifactForVersion(versionId) : null;
+    const versions = (this.#database.prepare(`SELECT v.id,v.source_type,v.source_version,v.source_url,v.processing_status,
+      v.accepted_at,v.metadata_json,s.id summary_id,s.status summary_status,
+      (SELECT count(*) FROM context_snapshots cs WHERE cs.paper_version_id=v.id) conversation_count,
+      c.proposal_id,c.preparation_status,c.material_diff_json,c.semantic_diff_json,c.semantic_error
+      FROM paper_versions v
+      LEFT JOIN summary_revisions s ON s.id=(SELECT revision.id FROM summary_revisions revision
+        WHERE revision.paper_version_id=v.id ORDER BY revision.revision DESC,revision.created_at DESC,revision.id DESC LIMIT 1)
+      LEFT JOIN paper_version_candidates c ON c.candidate_version_id=v.id
+      WHERE v.paper_id=? ORDER BY v.created_at DESC,v.id DESC`).all(id) as Array<{
+        id: string; source_type: string; source_version: string; source_url: string; processing_status: string;
+        accepted_at: string | null; metadata_json: string | null; summary_id: string | null; summary_status: string | null;
+        conversation_count: number; proposal_id: string | null; preparation_status: string | null;
+        material_diff_json: string | null; semantic_diff_json: string | null; semantic_error: string | null;
+      }>).map((item) => ({ id: item.id, sourceType: item.source_type, sourceVersion: item.source_version,
+        sourceUrl: item.source_url, processingStatus: item.processing_status, current: item.id === versionId,
+        acceptedAt: item.accepted_at, metadata: item.metadata_json ? JSON.parse(item.metadata_json) as unknown : null,
+        summary: item.summary_id ? { id: item.summary_id, status: item.summary_status } : null,
+        conversationCount: item.conversation_count,
+        proposalId: item.proposal_id,
+        preparation: item.preparation_status ? { status: item.preparation_status,
+          materialDiff: item.material_diff_json ? JSON.parse(item.material_diff_json) as unknown : null,
+          semanticDiff: item.semantic_diff_json ? JSON.parse(item.semantic_diff_json) as unknown : null,
+          semanticError: item.semantic_error } : null }));
     return {
       paper: { ...paper, versionId },
       pdf: extraction && pdfArtifact ? { pageCount: extraction.page_count,
@@ -552,6 +769,7 @@ export class ImportStore {
       processing: latestJob ? { jobId: latestJob.id, state: requireImportJobState(latestJob.state), progress: latestJob.progress,
         attempt: latestJob.attempt, error: parseStoredImportError(latestJob.error_json) } : null,
       repositories: this.#repositoryAssociations.list(id),
+      versions,
     };
   }
 
@@ -658,10 +876,12 @@ export class ImportStore {
     paperId: string; conversationId: string; content: string; sources: ChatSource[];
   }) => Promise<ChatResult>, retryUserMessageId: string | null = null): Promise<unknown | null> {
     const conversation = this.#database.prepare(`SELECT c.paper_id,c.active_context_snapshot_id,c.status,c.snapshot_integrity,
-      cs.paper_version_id,cs.summary_revision_id,cs.extraction_run_id,cs.repositories_json
+      c.continued_from_conversation_id,
+      cs.paper_version_id,cs.summary_revision_id,cs.extraction_run_id,cs.repositories_json,cs.version_diff_json
       FROM conversations c JOIN context_snapshots cs ON cs.id=c.active_context_snapshot_id WHERE c.id=?`).get(conversationId) as
       { paper_id: string; active_context_snapshot_id: string; status: string; snapshot_integrity: string;
-        paper_version_id: string; summary_revision_id: string; extraction_run_id: string; repositories_json: string } | undefined;
+        continued_from_conversation_id: string | null; paper_version_id: string; summary_revision_id: string;
+        extraction_run_id: string; repositories_json: string; version_diff_json: string | null } | undefined;
     if (!conversation) return null;
     if (conversation.status !== "active") throw new Error("conversation-archived");
     if (conversation.snapshot_integrity !== "frozen") throw new Error("conversation-legacy-read-only");
@@ -682,6 +902,10 @@ export class ImportStore {
     const summarySections = (JSON.parse(summary.structured_json) as { sections?: Array<{ key: string; title: string; body: string }> }).sections ?? [];
     const history = this.#database.prepare(`SELECT id,role,content FROM messages WHERE conversation_id=? ORDER BY ordinal,created_at,id`)
       .all(conversationId) as Array<{ id: string; role: string; content: string }>;
+    const versionDiff = conversation.version_diff_json ? JSON.parse(conversation.version_diff_json) as {
+      id: string; beforeVersionId: string; afterVersionId: string; contractVersion: string;
+      materialDiff: unknown; semanticDiff: unknown; semanticError: string | null; artifactId: string | null;
+    } : null;
     const sources = [
       ...pages.map((page) => ({ handle: `pdf-page:${page.page_number}`, type: "pdf" as const, text: page.text_content,
         locator: `p. ${page.page_number}`, evidenceAnchorId: page.evidence_anchor_id })),
@@ -692,6 +916,9 @@ export class ImportStore {
         locator: `${file.relative_path}:${file.start_line}-${file.end_line}` })),
       ...history.map((message) => ({ handle: `message:${message.id}`, type: "message" as const, text: message.content,
         locator: message.id, messageId: message.id })),
+      ...(versionDiff ? [{ handle: `version-diff:${versionDiff.id}`, type: "version-diff" as const,
+        text: JSON.stringify(versionDiff), locator: `${versionDiff.beforeVersionId} → ${versionDiff.afterVersionId}`,
+        versionDiffId: versionDiff.id, artifactId: versionDiff.artifactId }] : []),
     ];
     const chatContext = { paperId: conversation.paper_id, conversationId, content, sources };
     const now = new Date().toISOString();
@@ -759,6 +986,8 @@ export class ImportStore {
       if (source.type === "summary") return { type: "summary", summaryRevisionId: source.summaryRevisionId,
         sectionKey: source.sectionKey, locator: citation.locator };
       if (source.type === "message") return { type: "message", conversationId, messageId: source.messageId, locator: citation.locator };
+      if (source.type === "version-diff") return { type: "version-diff", versionDiffId: source.versionDiffId,
+        artifactId: source.artifactId, locator: citation.locator };
       const file = code.find((candidate) => `code:${candidate.repository.id}:${candidate.relative_path}` === source.handle)!;
       return { type: "code", commitSha: file.repository.commitSha, path: file.relative_path,
         startLine: file.start_line, endLine: file.end_line, locator: citation.locator };
@@ -787,7 +1016,7 @@ export class ImportStore {
         (id,message_id,ordinal,kind,source_handle,locator_json,verification_status) VALUES (?,?,?,?,?,?,'verified')`)
         .run(`message-citation:${assistantMessageId}:${index + 1}`, assistantMessageId, index + 1,
           citation.type === "pdf" ? "pdf_anchor" : citation.type === "summary" ? "summary_locator"
-            : citation.type === "message" ? "message" : "repo_lines",
+            : citation.type === "message" ? "message" : citation.type === "version-diff" ? "version_diff" : "repo_lines",
           output.citations[index]!.sourceHandle, JSON.stringify(citation)));
       this.#database.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(completedAt, conversationId);
       this.#database.prepare("INSERT INTO durable_events(scope,event_type,data_json,created_at) VALUES (?,'message-complete',?,?)")
@@ -869,9 +1098,11 @@ export class ImportStore {
 
   decideProposal(proposalId: string, idempotencyKey: string, action: "accept" | "edit-and-accept" | "reject" = "accept",
     reviewInput: TakeawayReviewInput = {}): { status: number; body: unknown; execution?: ImportExecution } {
-    const existing = this.#database.prepare("SELECT result_json FROM review_decisions WHERE idempotency_key=?").get(idempotencyKey) as
-      { result_json: string } | undefined;
-    if (existing) return { status: 200, body: JSON.parse(existing.result_json) as unknown };
+    const existing = this.#database.prepare("SELECT proposal_id,result_json FROM review_decisions WHERE idempotency_key=?")
+      .get(idempotencyKey) as { proposal_id: string; result_json: string } | undefined;
+    if (existing) return existing.proposal_id === proposalId
+      ? { status: 200, body: JSON.parse(existing.result_json) as unknown }
+      : { status: 409, body: { code: "idempotency-key-conflict" } };
     const proposal = this.#database.prepare(`SELECT p.proposal_type,p.paper_id,p.payload_json,p.review_status,p.one_click_eligible,
       c.snapshot_integrity FROM proposals p LEFT JOIN messages m ON m.id=p.source_message_id
       LEFT JOIN conversations c ON c.id=m.conversation_id WHERE p.id=?`).get(proposalId) as
@@ -953,7 +1184,7 @@ export class ImportStore {
       }
       const now = this.#now().toISOString();
       const decisionId = `review-decision:${randomUUID()}`;
-      const rejectedPayload = JSON.parse(proposal.payload_json) as { claim?: string };
+      const rejectedPayload = JSON.parse(proposal.payload_json) as { claim?: string; candidateVersionId?: string };
       const liveDuplicateIds = proposal.proposal_type === "takeaway" && rejectedPayload.claim
         ? liveDuplicateRevisionIds(this.#database, proposal.paper_id, rejectedPayload.claim) : [];
       const body = { reviewDecision: { id: decisionId, action: "reject", reason: reviewInput.rejectReason ?? null },
@@ -963,6 +1194,13 @@ export class ImportStore {
           SET live_duplicate_warning=?,live_duplicate_ids_json=?,updated_at=? WHERE proposal_id=?`)
           .run(liveDuplicateIds.length > 0 ? 1 : 0, JSON.stringify(liveDuplicateIds), now, proposalId);
         this.#database.prepare("UPDATE proposals SET review_status='rejected',decided_at=? WHERE id=? AND review_status='pending'").run(now, proposalId);
+        if (proposal.proposal_type === "paper-version-update" && rejectedPayload.candidateVersionId) {
+          this.#database.prepare(`UPDATE paper_version_candidates SET preparation_status='rejected',updated_at=?
+            WHERE proposal_id=? AND preparation_status<>'accepted'`).run(now, proposalId);
+          this.#database.prepare(`UPDATE paper_versions SET processing_status='rejected',updated_at=?
+            WHERE id=? AND id<>(SELECT current_version_id FROM papers WHERE id=?)`)
+            .run(now, rejectedPayload.candidateVersionId, proposal.paper_id);
+        }
         this.#database.prepare("INSERT INTO review_decisions(id,proposal_id,action,idempotency_key,result_json,created_at) VALUES (?,?,'reject',?,?,?)")
           .run(decisionId, proposalId, idempotencyKey, JSON.stringify(body), now);
       })();
@@ -972,8 +1210,11 @@ export class ImportStore {
       return { status: 409, body: { code: "LEGACY_PROVENANCE" } };
     }
     if (proposal.proposal_type === "paper-version-update") {
-      const payload = JSON.parse(proposal.payload_json) as { candidateVersionId?: string };
+      const payload = JSON.parse(proposal.payload_json) as { candidateVersionId?: string; sourceType?: string };
       if (!payload.candidateVersionId) return { status: 409, body: { code: "paper-version-candidate-missing" } };
+      if (payload.sourceType === "arxiv") {
+        return this.#acceptPreparedArxivVersion(proposalId, proposal.paper_id, idempotencyKey, proposal.payload_json);
+      }
       const candidate = this.#database.prepare(`SELECT v.id,v.paper_id,v.source_version,v.source_url,j.id job_id,j.import_request_id,j.attempt
         FROM paper_versions v JOIN import_requests i ON json_extract(i.frozen_input_json,'$.versionId')=v.id
         JOIN job_runs j ON j.import_request_id=i.id AND j.job_type='paper-import'
@@ -1057,6 +1298,96 @@ export class ImportStore {
     return { status: 201, body: write.body };
   }
 
+  #acceptPreparedArxivVersion(proposalId: string, paperId: string, idempotencyKey: string, payloadJson: string):
+    { status: number; body: unknown } {
+    const payload = JSON.parse(payloadJson) as { candidateVersionId: string; currentVersionId?: string;
+      candidateVersion?: number; metadata?: { title: string; authors: string[]; year: number }; arxivId?: string; sourceUrl?: string };
+    const candidate = this.#database.prepare(`SELECT c.summary_id,c.extraction_run_id,c.read_status,c.structured_json,
+      c.skill_content_hash,c.agent_run_id,c.material_diff_json,c.preparation_status,d.status version_diff_status,
+      v.source_version,v.metadata_json,v.source_url
+      FROM paper_version_candidates c JOIN paper_versions v ON v.id=c.candidate_version_id
+      LEFT JOIN paper_version_diffs d ON d.id=c.version_diff_id
+      WHERE c.proposal_id=? AND c.candidate_version_id=?`).get(proposalId, payload.candidateVersionId) as {
+      summary_id: string | null; extraction_run_id: string | null; read_status: string | null; structured_json: string | null;
+      skill_content_hash: string | null; agent_run_id: string | null; material_diff_json: string | null;
+      preparation_status: string; version_diff_status: string | null; source_version: string;
+      metadata_json: string | null; source_url: string;
+    } | undefined;
+    if (!candidate || candidate.preparation_status !== "ready" || !candidate.summary_id || !candidate.extraction_run_id ||
+        !candidate.read_status || !candidate.structured_json || !candidate.skill_content_hash || !candidate.agent_run_id ||
+        !candidate.material_diff_json) return { status: 409, body: { code: "paper-version-diff-not-ready" } };
+    if (candidate.version_diff_status !== "ready") {
+      return { status: 409, body: { code: candidate.version_diff_status === "running"
+        ? "paper-version-diff-retry-in-progress" : "paper-version-diff-not-ready" } };
+    }
+    const currentVersionId = (this.#database.prepare("SELECT current_version_id FROM papers WHERE id=?").get(paperId) as
+      { current_version_id: string }).current_version_id;
+    if (!payload.currentVersionId || currentVersionId !== payload.currentVersionId) {
+      this.#paperVersionReview.supersede(proposalId);
+      return { status: 409, body: { code: "paper-version-proposal-stale" } };
+    }
+    const metadata = candidate.metadata_json ? JSON.parse(candidate.metadata_json) as { title: string; authors: string[]; year: number }
+      : payload.metadata;
+    if (!metadata) return { status: 409, body: { code: "paper-version-metadata-missing" } };
+    const structured = JSON.parse(candidate.structured_json) as SummaryResult & {
+      claims: Array<SummaryResult["claims"][number] & { evidenceAnchorId: string; page: number }> };
+    const now = this.#now().toISOString();
+    const version = payload.candidateVersion ?? Number.parseInt(candidate.source_version.replace(/^v/, ""), 10);
+    const paper: StoredPaper = { id: paperId, ...(payload.arxivId ? { arxivId: payload.arxivId } : {}),
+      title: metadata.title, authors: metadata.authors, year: metadata.year, version,
+      versionId: payload.candidateVersionId, versionLabel: candidate.source_version, sourceType: "arxiv",
+      sourceUrl: candidate.source_url, starred: false };
+    const slug = metadata.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "paper";
+    const relativePath = join("library", "papers", slug, `summary-${candidate.source_version}-r1.md`);
+    const markdown = renderSummary({ summaryId: candidate.summary_id, paper, versionId: payload.candidateVersionId,
+      extractionId: candidate.extraction_run_id, agentRunId: candidate.agent_run_id, skillHash: candidate.skill_content_hash,
+      result: structured, date: now.slice(0, 10) });
+    const markdownHash = createHash("sha256").update(markdown).digest("hex");
+    const writeId = `knowledge-write:${candidate.summary_id}`;
+    const decisionId = `review-decision:${randomUUID()}`;
+    const body = { reviewDecision: { id: decisionId, action: "accept" },
+      paperVersion: { id: payload.candidateVersionId, sourceVersion: candidate.source_version } };
+    const writePayload = { summaryId: candidate.summary_id, paperId, paperTitle: metadata.title,
+      versionId: payload.candidateVersionId, expectedCurrentVersionId: payload.currentVersionId,
+      extractionId: candidate.extraction_run_id, markdown, readStatus: candidate.read_status, relativePath,
+      markdownHash, structured, skillHash: candidate.skill_content_hash, agentRunId: candidate.agent_run_id,
+      claims: structured.claims, now, activationDecision: { proposalId, idempotencyKey, decisionId, body,
+        ...(payload.arxivId ? { arxivId: payload.arxivId } : {}), metadata } };
+    try {
+      this.#database.transaction(() => {
+        const stillPending = this.#database.prepare(`SELECT 1 FROM proposals p JOIN paper_version_candidates c ON c.proposal_id=p.id
+          WHERE p.id=? AND p.review_status='pending' AND c.preparation_status='ready'`).get(proposalId);
+        if (!stillPending) throw new Error("paper-version-proposal-already-decided");
+        this.#database.prepare(`INSERT INTO knowledge_write_requests
+          (id,request_type,target_path,staged_path,result_hash,phase,created_at,updated_at,payload_json)
+          VALUES (?,'summary',?,?,?,'reserved',?,?,?) ON CONFLICT(id) DO NOTHING`)
+          .run(writeId, relativePath, `${relativePath}.staged`, markdownHash, now, now, JSON.stringify(writePayload));
+      })();
+    } catch (error) {
+      return { status: 409, body: { code: error instanceof Error ? error.message : "paper-version-activation-conflict" } };
+    }
+    const reservedWrite = this.#database.prepare("SELECT phase,payload_json FROM knowledge_write_requests WHERE id=?")
+      .get(writeId) as { phase: string; payload_json: string };
+    const reservedPayload = JSON.parse(reservedWrite.payload_json) as { activationDecision?: { idempotencyKey?: string } };
+    if (reservedPayload.activationDecision?.idempotencyKey !== idempotencyKey) {
+      return { status: 409, body: { code: "idempotency-key-conflict" } };
+    }
+    if (reservedWrite.phase === "conflicted") return { status: 409, body: { code: "knowledge-write-conflicted" } };
+    if (reservedWrite.phase === "failed") this.#database.prepare(`UPDATE knowledge_write_requests
+      SET phase='reserved',error_code=NULL,updated_at=? WHERE id=?`).run(now, writeId);
+    const stagedPath = this.#knowledgePath(`${relativePath}.staged`);
+    const resumablePhase = reservedWrite.phase === "failed" ? "reserved" : reservedWrite.phase;
+    if (resumablePhase === "reserved") {
+      mkdirSync(dirname(stagedPath), { recursive: true });
+      writeFileSync(stagedPath, markdown, "utf8");
+      this.#database.prepare("UPDATE knowledge_write_requests SET phase='staged',updated_at=? WHERE id=?").run(now, writeId);
+    }
+    this.#advanceSummaryWrite(writeId);
+    const activated = this.#database.prepare("SELECT 1 FROM review_decisions WHERE proposal_id=? AND idempotency_key=?")
+      .get(proposalId, idempotencyKey);
+    return activated ? { status: 201, body } : { status: 409, body: { code: "knowledge-write-conflicted" } };
+  }
+
   isDirectVersionProposal(proposalId: string): boolean {
     const row = this.#database.prepare("SELECT proposal_type,payload_json FROM proposals WHERE id=?").get(proposalId) as
       { proposal_type: string; payload_json: string } | undefined;
@@ -1064,7 +1395,9 @@ export class ImportStore {
       (JSON.parse(row.payload_json) as { sourceType?: string }).sourceType === "direct-pdf");
   }
 
-  async issueProposalSourceOpen(proposalId: string): Promise<{ pdfUrl: string; page: number } | null> {
+  async issueProposalSourceOpen(proposalId: string): Promise<
+    { kind: "external"; url: string; version: number } |
+    { kind: "artifact"; url: string; pdfUrl: string; page: number; versionId: string } | null> {
     const row = this.#database.prepare(`SELECT p.payload_json,cs.paper_version_id source_version_id
       FROM proposals p
       LEFT JOIN messages m ON m.id=p.source_message_id
@@ -1072,7 +1405,13 @@ export class ImportStore {
       WHERE p.id=? AND p.review_status='pending'`).get(proposalId) as
       { payload_json: string; source_version_id: string | null } | undefined;
     if (!row) return null;
-    const payload = JSON.parse(row.payload_json) as { sourceHandles?: string[]; receiptIds?: string[]; candidateVersionId?: string };
+    const payload = JSON.parse(row.payload_json) as { sourceHandles?: string[]; receiptIds?: string[]; candidateVersionId?: string;
+      sourceType?: string; sourceUrl?: string; candidateVersion?: number };
+    if (payload.sourceType === "arxiv" && payload.sourceUrl && payload.candidateVersion) {
+      this.#database.prepare("INSERT INTO source_open_events(id,proposal_id,source_handle,opened_at) VALUES (?,?,?,?)")
+        .run(`source-open:${randomUUID()}`, proposalId, `arxiv:v${payload.candidateVersion}`, this.#now().toISOString());
+      return { kind: "external", url: payload.sourceUrl, version: payload.candidateVersion };
+    }
     if (payload.candidateVersionId) {
       const candidate = this.#database.prepare("SELECT id FROM paper_versions WHERE id=?").get(payload.candidateVersionId);
       if (!candidate) return null;
@@ -1092,12 +1431,13 @@ export class ImportStore {
   }
 
   async #recordProposalSourceOpen(proposalId: string, versionId: string, sourceHandle: string,
-    page: number): Promise<{ pdfUrl: string; page: number } | null> {
+    page: number): Promise<{ kind: "artifact"; url: string; pdfUrl: string; page: number; versionId: string } | null> {
     const artifact = await this.getPdfArtifactForVersion(versionId);
     if (!artifact) return null;
     this.#database.prepare("INSERT INTO source_open_events(id,proposal_id,source_handle,opened_at) VALUES (?,?,?,?)")
       .run(`source-open:${randomUUID()}`, proposalId, sourceHandle, this.#now().toISOString());
-    return { pdfUrl: `/api/artifacts/${artifact.contentHash}/pdf#page=${page}`, page };
+    const url = `/api/artifacts/${artifact.contentHash}/pdf#page=${page}`;
+    return { kind: "artifact", url, pdfUrl: url, page, versionId };
   }
 
   async answerEntry(question: string, runEntry: (context: { question: string; sources: Array<{
@@ -1342,14 +1682,17 @@ export class ImportStore {
   listProposals(): unknown[] {
     return (this.#database.prepare(`SELECT p.id,p.proposal_type,p.paper_id,p.review_status,p.one_click_eligible,
       p.created_at,p.archived_at,p.payload_json,c.snapshot_integrity,c.id source_conversation_id,
-      j.state distillation_state
+      j.state distillation_state,vc.preparation_status,vc.material_diff_json,vc.semantic_diff_json,vc.semantic_error
       FROM proposals p LEFT JOIN messages m ON m.id=p.source_message_id
       LEFT JOIN conversations c ON c.id=m.conversation_id
       LEFT JOIN job_runs j ON j.id=json_extract(p.payload_json,'$.distillationJobRunId')
+      LEFT JOIN paper_version_candidates vc ON vc.proposal_id=p.id
       ORDER BY p.created_at,p.id`).all() as Array<{
       id: string; proposal_type: string; review_status: string; paper_id: string | null; one_click_eligible: number;
       created_at: string; archived_at: string | null; payload_json: string; snapshot_integrity: string | null;
       source_conversation_id: string | null; distillation_state: string | null;
+      preparation_status: string | null; material_diff_json: string | null; semantic_diff_json: string | null;
+      semantic_error: string | null;
     }>).map((row) => {
       const payload = JSON.parse(row.payload_json) as { claim?: string };
       const liveDuplicateIds = row.paper_id && payload.claim
@@ -1362,6 +1705,10 @@ export class ImportStore {
         sourceConversationHref: row.paper_id && row.source_conversation_id
           ? `/papers/${encodeURIComponent(row.paper_id)}/conversations/${encodeURIComponent(row.source_conversation_id)}` : null,
         distillationState: row.distillation_state,
+        ...(row.preparation_status ? { preparation: { status: row.preparation_status,
+          materialDiff: row.material_diff_json ? JSON.parse(row.material_diff_json) as unknown : null,
+          semanticDiff: row.semantic_diff_json ? JSON.parse(row.semantic_diff_json) as unknown : null,
+          semanticError: row.semantic_error } } : {}),
         createdAt: row.created_at, archivedAt: row.archived_at, payload,
       };
     });
@@ -1380,7 +1727,8 @@ export class ImportStore {
     return this.#database.transaction(() => {
       this.#database.prepare("DELETE FROM curated_search_documents").run();
       const summaries = this.#database.prepare(`SELECT s.id,p.title,s.markdown_path,s.markdown_hash FROM summary_revisions s
-        JOIN papers p ON p.id=s.paper_id WHERE s.status='active' ORDER BY s.id`).all() as
+        JOIN papers p ON p.id=s.paper_id
+        WHERE s.status='active' AND s.paper_version_id=p.current_version_id ORDER BY s.id`).all() as
         Array<{ id: string; title: string; markdown_path: string; markdown_hash: string }>;
       for (const summary of summaries) {
         const markdown = this.#readAuthoritativeMarkdown(summary.id, summary.markdown_path, summary.markdown_hash);
@@ -1442,8 +1790,8 @@ export class ImportStore {
     const pendingIndex = (this.#database.prepare("SELECT count(*) count FROM index_outbox WHERE state='pending'").get() as { count: number }).count;
     const artifactGaps = (this.#database.prepare("SELECT storage_ref,retention_class FROM artifacts").all() as
       Array<{ storage_ref: string; retention_class: string }>).filter((row) => !existsSync(join(this.#artifactRoot, row.storage_ref)));
-    const missingArtifacts = artifactGaps.filter((row) => row.retention_class === "irreplaceable").map((row) => row.storage_ref);
-    const missingRebuildableArtifacts = artifactGaps.filter((row) => row.retention_class !== "irreplaceable").map((row) => row.storage_ref);
+    const missingArtifacts = artifactGaps.filter((row) => row.retention_class !== "rebuildable").map((row) => row.storage_ref);
+    const missingRebuildableArtifacts = artifactGaps.filter((row) => row.retention_class === "rebuildable").map((row) => row.storage_ref);
     const missingMarkdown = [
       ...(this.#database.prepare("SELECT markdown_path FROM summary_revisions").all() as Array<{ markdown_path: string }>),
       ...(this.#database.prepare("SELECT markdown_path FROM takeaway_revisions").all() as Array<{ markdown_path: string }>),
@@ -1475,10 +1823,33 @@ export class ImportStore {
     return jobId;
   }
 
+  #recordAgentFailure(taskKind: AgentTaskKind, paperId: string | null, context: unknown, errorCode: string): string {
+    const now = this.#now().toISOString();
+    const jobId = `job:${randomUUID()}`;
+    const promptHash = createHash("sha256").update(JSON.stringify(context)).digest("hex");
+    const schemaHash = createHash("sha256").update(`${taskKind}:schema:v1`).digest("hex");
+    const execution = this.#agentExecutionMetadata?.(taskKind) ?? null;
+    const failure = { error: { code: errorCode } };
+    this.#database.transaction(() => {
+      this.#database.prepare(`INSERT INTO job_runs(id,job_type,paper_id,state,progress,idempotency_key,input_json,
+        output_json,error_json,queued_at,started_at,completed_at,heartbeat_at)
+        VALUES (?,?,?,'failed',1,?,'{}','{}',?,?,?,?,?)`).run(jobId, taskKind, paperId,
+          `${taskKind}:${jobId}`, JSON.stringify(failure.error), now, now, now, now);
+      this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,reasoning_effort,codex_version,
+        configuration_version,skill_path,skill_content_hash,context_snapshot_id,output_schema_hash,prompt_hash,output_json)
+        VALUES (?,?,?,?,?,?,NULL,NULL,NULL,?,?,?)`).run(jobId, taskKind, execution?.model ?? null,
+          execution?.reasoningEffort ?? null, execution?.codexVersion ?? "unknown", execution?.configurationVersion ?? null,
+          schemaHash, promptHash, JSON.stringify(failure));
+    })();
+    return jobId;
+  }
+
   #storeArtifact(id: string, artifactType: string, bytes: Uint8Array, extension: string, createdByKind: string,
-    createdById: string | null, parentArtifactId: string | null): string {
+    createdById: string | null, parentArtifactId: string | null, snapshotHistorical = false): string {
     const hash = createHash("sha256").update(bytes).digest("hex");
-    const storageRef = join("derived", artifactType, hash.slice(0, 2), `${hash}.${extension}`);
+    const storageRef = snapshotHistorical
+      ? join("originals", "artifacts", artifactType, hash.slice(0, 2), `${hash}.${extension}`)
+      : join("derived", artifactType, hash.slice(0, 2), `${hash}.${extension}`);
     const absolute = join(this.#artifactRoot, storageRef);
     mkdirSync(dirname(absolute), { recursive: true });
     const existingValid = this.#fileMatches(absolute, hash, bytes.byteLength);
@@ -1488,8 +1859,9 @@ export class ImportStore {
       renameSync(staged, absolute);
     }
     this.#database.prepare(`INSERT OR IGNORE INTO artifacts(id,artifact_type,content_hash,storage_ref,media_type,byte_size,created_by_kind,retention_class,integrity_status,created_at,created_by_id)
-      VALUES (?,?,?,?,?,?,?,'historical','verified',?,?)`).run(id, artifactType, hash, storageRef,
-        extension === "json" ? "application/json" : "text/markdown", bytes.byteLength, createdByKind, new Date().toISOString(), createdById);
+      VALUES (?,?,?,?,?,?,?,?, 'verified',?,?)`).run(id, artifactType, hash, storageRef,
+        extension === "json" ? "application/json" : "text/markdown", bytes.byteLength, createdByKind,
+        snapshotHistorical ? "historical" : "rebuildable", new Date().toISOString(), createdById);
     const storedId = (this.#database.prepare("SELECT id FROM artifacts WHERE artifact_type=? AND content_hash=?")
       .get(artifactType, hash) as { id: string }).id;
     if (parentArtifactId) this.#database.prepare(`INSERT OR IGNORE INTO artifact_parents(artifact_id,parent_artifact_id,relationship,ordinal)
@@ -1596,10 +1968,10 @@ export class ImportStore {
         .run(`identity:arxiv:${input.resolved.arxivId}`, paperId, input.resolved.arxivId,
           `https://arxiv.org/abs/${input.resolved.arxivId}`, JSON.stringify({ authors: input.resolved.authors, year: input.resolved.year }), now);
       this.#database.prepare(`INSERT INTO paper_versions
-        (id,paper_id,source_type,source_version,source_url,resolved_at,processing_status,accepted_at,created_at,updated_at)
-        VALUES (?,?, 'arxiv',?,?,?,'accepted',?,?,?) ON CONFLICT(paper_id,source_type,source_version) DO NOTHING`)
+        (id,paper_id,source_type,source_version,source_url,resolved_at,processing_status,accepted_at,created_at,updated_at,metadata_json)
+        VALUES (?,?, 'arxiv',?,?,?,'accepted',?,?,?,?) ON CONFLICT(paper_id,source_type,source_version) DO NOTHING`)
         .run(versionId, paperId, `v${input.version}`, `https://arxiv.org/abs/${input.resolved.arxivId}v${input.version}`,
-          now, now, now, now);
+          now, now, now, now, JSON.stringify({ title: input.resolved.title, authors: input.resolved.authors, year: input.resolved.year }));
       this.#database.prepare("UPDATE papers SET current_version_id=?,updated_at=? WHERE id=?").run(versionId, now, paperId);
 
       const importId = input.importRequestId ?? `import:${randomUUID()}`;
@@ -1666,11 +2038,13 @@ export class ImportStore {
         .run(`identity:direct-pdf:${createHash("sha256").update(input.prepared.sourceIdentity).digest("hex")}`, paperId,
           input.prepared.sourceIdentity, input.prepared.canonicalUrl,
           JSON.stringify({ authors: input.prepared.metadata.authors, year: input.prepared.metadata.year, actualMediaType: input.prepared.mediaType }), now);
-      this.#database.prepare(`INSERT INTO paper_versions(id,paper_id,source_type,source_version,source_url,resolved_at,processing_status,accepted_at,created_at,updated_at,source_content_hash,source_media_type,pdf_artifact_id)
-        VALUES (?,?,'direct-pdf',?,?,?, ?,?,?,?, ?,?,?) ON CONFLICT(id) DO NOTHING`)
+      this.#database.prepare(`INSERT INTO paper_versions(id,paper_id,source_type,source_version,source_url,resolved_at,processing_status,accepted_at,created_at,updated_at,source_content_hash,source_media_type,pdf_artifact_id,metadata_json)
+        VALUES (?,?,'direct-pdf',?,?,?, ?,?,?,?, ?,?,?,?) ON CONFLICT(id) DO NOTHING`)
         .run(versionId, paperId, input.prepared.sourceVersion, input.prepared.canonicalUrl, now,
           changedAtSameUrl ? "detected" : "accepted", changedAtSameUrl ? null : now, now, now,
-          input.prepared.contentHash, input.prepared.mediaType, artifactId);
+          input.prepared.contentHash, input.prepared.mediaType, artifactId,
+          JSON.stringify({ title: input.prepared.metadata.title, authors: input.prepared.metadata.authors,
+            year: input.prepared.metadata.year }));
       if (changedAtSameUrl) this.#database.prepare(`INSERT OR IGNORE INTO proposals(id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
         VALUES (?,'paper-version-update',?,?,'pending',0,?)`).run(`proposal:direct-pdf-version:${paperId}:${input.prepared.contentHash}`,
           paperId, JSON.stringify({ sourceType: "direct-pdf", sourceIdentity: input.prepared.sourceIdentity,
@@ -1725,6 +2099,14 @@ export class ImportStore {
     return { id, status: "pending" };
   }
 
+  resolveImportWithoutJob(importRequestId: string, paperId: string, normalizedInput: string, frozen: unknown): StoredImportRequest {
+    const now = this.#now().toISOString();
+    this.#database.prepare(`UPDATE import_requests SET normalized_input=?,resolution_status='resolved',resolved_paper_id=?,
+      error_code=NULL,error_detail=NULL,completed_at=?,frozen_input_json=? WHERE id=?`)
+      .run(normalizedInput, paperId, now, JSON.stringify(frozen), importRequestId);
+    return { id: importRequestId, paperId, status: "resolved" };
+  }
+
   beginDirectSourceJob(importRequestId: string, sourceIdentity: string): ImportJobHandle {
     const id = `job:${randomUUID()}`;
     const now = this.#now().toISOString();
@@ -1773,10 +2155,12 @@ export class ImportStore {
       { id: string; import_request_id: string; paper_id: string; input_json: string } | undefined;
     if (job) {
       if (error) {
-        const input = JSON.parse(job.input_json) as { versionId?: string };
+        const input = JSON.parse(job.input_json) as { versionId?: string; proposalId?: string };
         const versionId = input.versionId ?? (this.#database.prepare("SELECT current_version_id FROM papers WHERE id=?")
           .get(job.paper_id) as { current_version_id: string }).current_version_id;
         this.#database.prepare("UPDATE paper_versions SET processing_status='failed',updated_at=? WHERE id=?").run(now, versionId);
+        if (input.proposalId) this.#database.prepare(`UPDATE paper_version_candidates
+          SET preparation_status='failed',updated_at=? WHERE proposal_id=?`).run(now, input.proposalId);
       }
       this.#event(job.import_request_id, "job-progress", { jobId: job.id, jobType: "paper-import", state, progress, error: jobError });
     }
@@ -1790,7 +2174,8 @@ export class ImportStore {
       { state: string; import_request_id: string; paper_id: string; input_json: string; resolution_status: string; title: string;
         arxiv_id: string | null; current_version_id: string } | undefined;
     if (!row) return { ok: false, code: "job-not-found" };
-    const input = JSON.parse(row.input_json) as { versionId?: string; arxivId?: string; version?: number; sourceType?: string; canonicalUrl?: string };
+    const input = JSON.parse(row.input_json) as { versionId?: string; arxivId?: string; version?: number; sourceType?: string;
+      canonicalUrl?: string; proposalId?: string };
     const versionId = input.versionId ?? row.current_version_id;
     const versionRow = this.#database.prepare("SELECT source_version,source_type,source_url FROM paper_versions WHERE id=? AND paper_id=?").get(versionId, row.paper_id) as
       { source_version: string; source_type: "arxiv" | "direct-pdf"; source_url: string } | undefined;
@@ -1810,6 +2195,7 @@ export class ImportStore {
       paper, ...(arxivId ? { arxivId } : {}), version,
       importRequest: { id: row.import_request_id, paperId: row.paper_id, status: "resolved" },
       job: { id: replay.id, attempt: replay.attempt, state: requireImportJobState(replay.state) },
+      ...(input.proposalId ? { candidateProposalId: input.proposalId } : {}),
     } };
     if (!isRetryableImportJobState(row.state)) return { ok: false, code: "job-not-retryable" };
     const completed = this.#database.prepare("SELECT 1 FROM job_runs WHERE import_request_id=? AND job_type='paper-import' AND state='succeeded'").get(row.import_request_id);
@@ -1825,11 +2211,15 @@ export class ImportStore {
       .run(retryId, row.import_request_id, row.paper_id, attempt, idempotencyKey,
         JSON.stringify({ ...input, versionId, ...(arxivId ? { arxivId } : {}), version }), now, now, now);
     this.#database.prepare("UPDATE paper_versions SET processing_status='processing',updated_at=? WHERE id=?").run(now, versionId);
+    if (input.proposalId) this.#database.prepare(`UPDATE paper_version_candidates
+      SET preparation_status='processing',semantic_error=NULL,updated_at=?
+      WHERE proposal_id=? AND preparation_status='failed'`).run(now, input.proposalId);
     this.#event(row.import_request_id, "job-progress", { jobId: retryId, jobType: "paper-import", state: "running", progress: 0.1, attempt });
     return { ok: true, replayed: false, execution: {
       paper, ...(arxivId ? { arxivId } : {}), version,
       importRequest: { id: row.import_request_id, paperId: row.paper_id, status: "resolved" },
       job: { id: retryId, attempt, state: "running" },
+      ...(input.proposalId ? { candidateProposalId: input.proposalId } : {}),
     } };
   }
 
@@ -1924,7 +2314,7 @@ export class ImportStore {
       CASE WHEN v.source_type='direct-pdf' THEN COALESCE((SELECT normalized_value FROM paper_external_identities
         WHERE paper_id=p.id AND identity_type='direct-pdf-url' ORDER BY created_at LIMIT 1),v.source_url) ELSE v.source_url END source_url,
       v.source_version,
-      COALESCE((SELECT metadata_json FROM paper_external_identities WHERE paper_id=p.id AND identity_type='arxiv' LIMIT 1),
+      COALESCE(v.metadata_json,(SELECT metadata_json FROM paper_external_identities WHERE paper_id=p.id AND identity_type='arxiv' LIMIT 1),
         (SELECT metadata_json FROM paper_external_identities WHERE paper_id=p.id AND identity_type='direct-pdf-url' ORDER BY created_at LIMIT 1)) metadata_json,
       (SELECT i.normalized_value FROM paper_external_identities i WHERE i.paper_id=p.id AND i.identity_type='arxiv' LIMIT 1) arxiv_id,
       (SELECT j.state FROM job_runs j WHERE j.paper_id=p.id AND j.job_type='paper-import'
@@ -2204,14 +2594,141 @@ export class ImportStore {
     return { arxivId: paper.arxivId, latestVersion: paper.version, title: paper.title, authors: metadata.authors, year: metadata.year };
   }
 
-  proposePaperUpdate(paper: StoredPaper, latestVersion: number): unknown | null {
-    if (latestVersion <= paper.version) return null;
-    const id = `proposal:paper-version-update:${paper.id}:v${latestVersion}`;
-    const now = new Date().toISOString();
-    this.#database.prepare(`INSERT OR IGNORE INTO proposals(id,proposal_type,paper_id,payload_json,review_status,one_click_eligible,created_at)
-      VALUES (?,'paper-version-update',?,?,'pending',1,?)`).run(id, paper.id,
-        JSON.stringify({ currentVersion: paper.version, latestVersion }), now);
-    return { id, proposalType: "paper-version-update", currentVersion: paper.version, latestVersion, reviewStatus: "pending" };
+  proposePaperUpdate(paper: StoredPaper, resolved: ResolvedPaper): unknown | null {
+    if (!paper.arxivId) return null;
+    return this.#paperVersionReview.observe({ paperId: paper.id, arxivId: paper.arxivId,
+      latestVersion: resolved.latestVersion, title: resolved.title, authors: resolved.authors, year: resolved.year });
+  }
+
+  preparePaperVersion(proposalId: string, idempotencyKey: string): { status: number; body: unknown; execution?: ImportExecution } {
+    const result = this.#paperVersionReview.prepare(proposalId, idempotencyKey);
+    if (!result.execution) return { status: result.status, body: result.body };
+    const execution = result.execution;
+    return { status: result.status, body: result.body, execution: {
+      paper: { id: execution.paperId, arxivId: execution.arxivId, title: execution.title,
+        authors: execution.authors, year: execution.year, version: execution.version,
+        versionId: execution.versionId, versionLabel: `v${execution.version}`, sourceType: "arxiv",
+        sourceUrl: execution.sourceUrl, starred: false },
+      arxivId: execution.arxivId, version: execution.version,
+      importRequest: { id: execution.importRequestId, paperId: execution.paperId, status: "resolved" },
+      job: { id: execution.jobId, attempt: 1, state: "running" }, candidateProposalId: proposalId,
+    } };
+  }
+
+  async retryPaperVersionDiff(proposalId: string, idempotencyKey: string,
+    runVersionDiff: (context: VersionDiffContext) => Promise<VersionDiffResult>): Promise<{ status: number; body: unknown }> {
+    const replay = this.#database.prepare(`SELECT id,state,input_json,output_json,error_json FROM job_runs
+      WHERE idempotency_key=?`).get(idempotencyKey) as { id: string; state: string; input_json: string;
+        output_json: string; error_json: string | null } | undefined;
+    if (replay) {
+      const input = JSON.parse(replay.input_json) as { proposalId?: string; retryKind?: string };
+      if (input.proposalId !== proposalId || input.retryKind !== "paper-version-diff") {
+        return { status: 409, body: { code: "idempotency-key-conflict" } };
+      }
+      if (replay.state === "succeeded") return { status: 200, body: JSON.parse(replay.output_json) as unknown };
+      if (["queued", "running"].includes(replay.state)) {
+        return { status: 202, body: { job: { id: replay.id, state: replay.state } } };
+      }
+      return { status: 502, body: { code: "paper-version-semantic-diff-failed",
+        semanticError: "paper-version-semantic-diff-failed" } };
+    }
+    const candidate = this.#database.prepare(`SELECT c.paper_id,c.before_version_id,c.candidate_version_id,
+      c.version_diff_id,c.material_diff_json,c.preparation_status,v.pdf_artifact_id
+      FROM paper_version_candidates c JOIN proposals p ON p.id=c.proposal_id
+      JOIN paper_versions v ON v.id=c.candidate_version_id
+      WHERE c.proposal_id=? AND p.review_status='pending'`).get(proposalId) as {
+        paper_id: string; before_version_id: string; candidate_version_id: string; version_diff_id: string | null;
+        material_diff_json: string | null; preparation_status: string; pdf_artifact_id: string | null;
+      } | undefined;
+    if (!candidate) return { status: 404, body: { code: "paper-version-proposal-not-found" } };
+    if (candidate.preparation_status !== "ready" || !candidate.version_diff_id || !candidate.material_diff_json) {
+      return { status: 409, body: { code: "paper-version-diff-not-ready" } };
+    }
+    const pagesFor = (versionId: string, prefix: "before" | "after") =>
+      (this.#database.prepare(`SELECT d.page_number,d.text_content FROM extraction_runs e
+        JOIN document_elements d ON d.extraction_run_id=e.id AND d.element_type='page'
+        WHERE e.paper_version_id=? AND e.status='succeeded' ORDER BY d.page_number,d.ordinal`).all(versionId) as
+        Array<{ page_number: number; text_content: string }>).map((page) => ({
+        handle: `${prefix}:pdf-page:${page.page_number}`, page: page.page_number, text: page.text_content,
+      }));
+    const materialDiff = JSON.parse(candidate.material_diff_json) as { beforePageCount: number;
+      afterPageCount: number; changedRegions: number };
+    const context: VersionDiffContext = { paperId: candidate.paper_id,
+      before: { versionId: candidate.before_version_id, pages: pagesFor(candidate.before_version_id, "before") },
+      after: { versionId: candidate.candidate_version_id, pages: pagesFor(candidate.candidate_version_id, "after") },
+      materialDiff: { beforePageCount: materialDiff.beforePageCount, afterPageCount: materialDiff.afterPageCount,
+        changedRegions: materialDiff.changedRegions } };
+    const now = this.#now().toISOString();
+    const jobId = `job:${randomUUID()}`;
+    const inputJson = JSON.stringify({ retryKind: "paper-version-diff", proposalId,
+      versionDiffId: candidate.version_diff_id, beforeVersionId: candidate.before_version_id,
+      candidateVersionId: candidate.candidate_version_id });
+    try {
+      this.#database.transaction(() => {
+        const active = this.#database.prepare(`SELECT 1 FROM job_runs WHERE job_type='paper-version-diff'
+          AND state IN ('queued','running') AND json_extract(input_json,'$.retryKind')='paper-version-diff'
+          AND json_extract(input_json,'$.proposalId')=? LIMIT 1`).get(proposalId);
+        if (active) throw new Error("paper-version-diff-retry-in-progress");
+        this.#database.prepare(`INSERT INTO job_runs(id,job_type,paper_id,state,progress,idempotency_key,input_json,
+          output_json,queued_at,started_at,heartbeat_at)
+          VALUES (?,'paper-version-diff',?,'running',.1,?,?,'{}',?,?,?)`)
+          .run(jobId, candidate.paper_id, idempotencyKey, inputJson, now, now, now);
+        this.#database.prepare("UPDATE paper_version_diffs SET status='running',updated_at=? WHERE id=?")
+          .run(now, candidate.version_diff_id);
+      })();
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "paper-version-diff-retry-in-progress";
+      return { status: 409, body: { code } };
+    }
+    const promptHash = createHash("sha256").update(JSON.stringify(context)).digest("hex");
+    const schemaHash = createHash("sha256").update("paper-version-diff:schema:v1").digest("hex");
+    const execution = this.#agentExecutionMetadata?.("paper-version-diff") ?? null;
+    try {
+      const semanticDiff = await runVersionDiff(context);
+      const completedAt = this.#now().toISOString();
+      const body = { semanticDiff, semanticError: null };
+      const artifactPayload = Buffer.from(JSON.stringify({ contractVersion: "paper-version-diff.v1",
+        materialDiff, semanticDiff, semanticError: null }));
+      const artifactHash = createHash("sha256").update(artifactPayload).digest("hex");
+      const artifactId = this.#storeArtifact(`artifact:${candidate.version_diff_id}:${artifactHash}`,
+        "paper-version-diff", artifactPayload, "json", "agent-run", jobId, candidate.pdf_artifact_id, true);
+      this.#database.transaction(() => {
+        const completed = this.#database.prepare(`UPDATE job_runs SET state='succeeded',progress=1,output_json=?,
+          completed_at=?,heartbeat_at=? WHERE id=? AND state='running'`)
+          .run(JSON.stringify(body), completedAt, completedAt, jobId).changes;
+        if (completed !== 1) throw new Error("paper-version-diff-run-not-active");
+        this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,reasoning_effort,codex_version,
+          configuration_version,skill_path,skill_content_hash,context_snapshot_id,output_schema_hash,prompt_hash,output_json)
+          VALUES (?,'paper-version-diff',?,?,?,?,NULL,NULL,NULL,?,?,?)`).run(jobId, execution?.model ?? null,
+            execution?.reasoningEffort ?? null, execution?.codexVersion ?? "unknown", execution?.configurationVersion ?? null,
+            schemaHash, promptHash, JSON.stringify(semanticDiff));
+        this.#database.prepare(`UPDATE paper_version_diffs SET status='ready',semantic_diff_json=?,semantic_error=NULL,
+          agent_run_id=?,artifact_id=?,updated_at=? WHERE id=?`).run(JSON.stringify(semanticDiff), jobId,
+            artifactId, completedAt, candidate.version_diff_id);
+        this.#database.prepare(`UPDATE paper_version_candidates SET semantic_diff_json=?,semantic_error=NULL,updated_at=?
+          WHERE proposal_id=? AND preparation_status='ready'`).run(JSON.stringify(semanticDiff), completedAt, proposalId);
+      })();
+      return { status: 200, body };
+    } catch {
+      const semanticError = "paper-version-semantic-diff-failed";
+      const failedAt = this.#now().toISOString();
+      const failure = { error: { code: semanticError } };
+      this.#database.transaction(() => {
+        const failed = this.#database.prepare(`UPDATE job_runs SET state='failed',progress=1,error_json=?,
+          completed_at=?,heartbeat_at=? WHERE id=? AND state='running'`)
+          .run(JSON.stringify(failure.error), failedAt, failedAt, jobId).changes;
+        if (failed === 1) this.#database.prepare(`INSERT INTO agent_runs(job_run_id,task_kind,model,reasoning_effort,codex_version,
+          configuration_version,skill_path,skill_content_hash,context_snapshot_id,output_schema_hash,prompt_hash,output_json)
+          VALUES (?,'paper-version-diff',?,?,?,?,NULL,NULL,NULL,?,?,?)`).run(jobId, execution?.model ?? null,
+            execution?.reasoningEffort ?? null, execution?.codexVersion ?? "unknown", execution?.configurationVersion ?? null,
+            schemaHash, promptHash, JSON.stringify(failure));
+        this.#database.prepare("UPDATE paper_version_diffs SET status='ready',semantic_error=?,updated_at=? WHERE id=?")
+          .run(semanticError, failedAt, candidate.version_diff_id);
+        this.#database.prepare("UPDATE paper_version_candidates SET semantic_error=?,updated_at=? WHERE proposal_id=?")
+          .run(semanticError, failedAt, proposalId);
+      })();
+      return { status: 502, body: { code: "paper-version-semantic-diff-failed", semanticError } };
+    }
   }
 
   close(): void { this.#database.close(); }

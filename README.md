@@ -70,7 +70,7 @@ ScholarLoom 按职责划分本地数据：
 | 位置 | 职责 |
 | --- | --- |
 | `vault/` | Markdown/YAML 长期知识事实源 |
-| `originals/` | 不可变、按内容寻址的论文原文件 |
+| `originals/` | 不可变、按内容寻址的论文原文件与历史 Artifact |
 | `state/scholarloom.sqlite3` | 任务、关系、队列与检索等运行状态 |
 | `derived/`、`cache/` | 可从权威数据重建的派生产物 |
 

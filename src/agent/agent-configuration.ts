@@ -1,9 +1,10 @@
-export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v5";
+export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v6";
 export const MINIMUM_CODEX_VERSION = "0.144.6";
 export const CODEX_SOL_MODEL = "gpt-5.6-sol";
 
 export type AgentTaskKind =
   | "paper-summary"
+  | "paper-version-diff"
   | "agentic-evidence"
   | "entry-answer"
   | "paper-organization"
@@ -54,6 +55,7 @@ export type AgentConfiguration = {
 
 const configurations: readonly AgentConfiguration[] = [
   configuration("paper-summary", "Paper Summary", "high", 600_000, null),
+  configuration("paper-version-diff", "Paper Version Diff", "high", 300_000, 1),
   configuration("agentic-evidence", "Discussion / Agentic Evidence", "medium", 180_000, 2, true),
   configuration("entry-answer", "Entry Agent", "medium", 600_000, null),
   configuration("paper-organization", "Paper Organization Agent", "medium", 180_000, 1),

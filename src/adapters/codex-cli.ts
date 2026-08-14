@@ -24,8 +24,10 @@ import {
   createChatSchema,
   createEntrySchema,
   createSummarySchema,
+  createVersionDiffSchema,
   validateEntryOutput,
   validateSummaryOutput,
+  validateVersionDiffOutput,
 } from "../agent/output-contracts.js";
 import { takeawaySelectionSchema, type TakeawaySelectionRunner } from "../agent/takeaway-distillation.js";
 import {
@@ -91,6 +93,13 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
     const result = await this.#run<SummaryResult>("paper-summary", createSummarySchema(allowedHandles),
       renderAgentPrompt("paper-summary", { context, skillContent: this.#skill }));
     validateSummaryOutput(result, allowedHandles);
+    return result;
+  }
+  async runVersionDiff(context: Parameters<NonNullable<CodexRunner["runVersionDiff"]>>[0]) {
+    const allowedHandles = [...context.before.pages, ...context.after.pages].map((page) => page.handle);
+    const result = await this.#run<import("../storage/import-store.js").VersionDiffResult>("paper-version-diff",
+      createVersionDiffSchema(allowedHandles), renderAgentPrompt("paper-version-diff", { context }));
+    validateVersionDiffOutput(result, allowedHandles);
     return result;
   }
   runChat(context: Parameters<NonNullable<CodexRunner["runChat"]>>[0]): Promise<ChatResult> {

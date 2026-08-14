@@ -36,6 +36,7 @@ export class ContextSnapshotBuilder {
       .get(continuedFromConversationId, paperId)) return null;
     const conversationId = `conversation:${randomUUID()}`;
     const snapshotId = `context-snapshot:${randomUUID()}`;
+    let frozenVersionDiff: unknown | null = null;
     if (continuedFromConversationId) {
       const parent = this.database.prepare(`SELECT c.status,c.snapshot_integrity,c.active_context_snapshot_id
         FROM conversations c
@@ -67,6 +68,22 @@ export class ContextSnapshotBuilder {
           });
         }
       }
+      const parentVersionId = this.database.prepare(`SELECT cs.paper_version_id FROM conversations c
+        JOIN context_snapshots cs ON cs.id=c.active_context_snapshot_id WHERE c.id=?`).pluck()
+        .get(continuedFromConversationId) as string;
+      const versionDiff = this.database.prepare(`SELECT d.id,d.before_version_id,d.after_version_id,d.contract_version,
+        d.material_diff_json,d.semantic_diff_json,d.semantic_error,d.artifact_id
+        FROM paper_version_diffs d JOIN paper_version_candidates candidate ON candidate.version_diff_id=d.id
+        WHERE d.before_version_id=? AND d.after_version_id=? AND d.status='ready'
+          AND candidate.preparation_status='accepted' ORDER BY d.updated_at DESC LIMIT 1`).get(
+          parentVersionId, candidate.paperVersionId) as { id: string; before_version_id: string; after_version_id: string;
+            contract_version: string; material_diff_json: string; semantic_diff_json: string | null;
+            semantic_error: string | null; artifact_id: string | null } | undefined;
+      if (versionDiff) frozenVersionDiff = { id: versionDiff.id, beforeVersionId: versionDiff.before_version_id,
+        afterVersionId: versionDiff.after_version_id, contractVersion: versionDiff.contract_version,
+        materialDiff: JSON.parse(versionDiff.material_diff_json),
+        semanticDiff: versionDiff.semantic_diff_json ? JSON.parse(versionDiff.semantic_diff_json) : null,
+        semanticError: versionDiff.semantic_error, artifactId: versionDiff.artifact_id };
     }
     this.database.transaction(() => {
       const pageElements = this.database.prepare(`SELECT id,page_number FROM document_elements
@@ -87,9 +104,11 @@ export class ContextSnapshotBuilder {
         VALUES (?,?,?,'新对话','active','frozen',?,?,?)`)
         .run(conversationId, paperId, snapshotId, continuedFromConversationId, timestamp, timestamp);
       this.database.prepare(`INSERT INTO context_snapshots
-        (id,conversation_id,paper_version_id,summary_revision_id,extraction_run_id,repositories_json,created_at,knowledge_corpus_manifest_id)
-        VALUES (?,?,?,?,?,?,?,?)`).run(snapshotId, conversationId, candidate.paperVersionId, candidate.summaryRevisionId,
-          candidate.extractionRunId, JSON.stringify(candidate.frozenRepositories), timestamp, candidate.corpus.id);
+        (id,conversation_id,paper_version_id,summary_revision_id,extraction_run_id,repositories_json,created_at,
+          knowledge_corpus_manifest_id,version_diff_json)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(snapshotId, conversationId, candidate.paperVersionId, candidate.summaryRevisionId,
+          candidate.extractionRunId, JSON.stringify(candidate.frozenRepositories), timestamp, candidate.corpus.id,
+          frozenVersionDiff ? JSON.stringify(frozenVersionDiff) : null);
     })();
     return { conversation: { id: conversationId, paperId, title: "新对话", status: "active",
       snapshotIntegrity: "frozen", continuedFromConversationId }, contextSnapshot: { id: snapshotId,
