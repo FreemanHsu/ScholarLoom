@@ -135,6 +135,8 @@ describe("Agent output contracts", () => {
     expect(AGENT_PROMPT_TEMPLATES["paper-summary"]).toContain("所有 Agent 评价都不要放入 claims");
     expect(AGENT_PROMPT_TEMPLATES["entry-answer"]).toContain("answerStatus 与输出必须一致");
     expect(AGENT_PROMPT_TEMPLATES["agentic-evidence"]).toContain("search → verify → answer");
+    expect(AGENT_PROMPT_TEMPLATES["agentic-evidence"]).toContain("verify_text_citation");
+    expect(AGENT_PROMPT_TEMPLATES["agentic-evidence"]).toContain("逐字复制工具返回的 citation");
     expect(AGENT_PROMPT_TEMPLATES["takeaway-distillation"]).toContain("候选很多不是 multiple-claims 的理由");
     expect(AGENT_PROMPT_TEMPLATES["paper-chat"]).toContain("sourceHandle 与 locator 都必须逐字复制");
   });

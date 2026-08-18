@@ -54,6 +54,13 @@ Final citations include a bounded verbatim quote. `AnswerGroundingGate` maps eac
 citation through `MANIFEST.json`, checks citable scope, source ownership, hash, path,
 line range, and NFC/whitespace-normalized exact substring. It permits one
 deterministic line-location repair from already returned content, then fails closed.
+Before final output, every text citation must pass the Attempt-scoped
+`verify_text_citation` tool. The tool runs the same authority and grounding checks,
+returns a canonical citation for the Agent to copy, and records only a citation hash
+as preflight audit metadata. The Codex adapter also preflights every returned text
+citation itself and replaces it with the canonical result, so correctness does not
+depend on the Agent choosing to call the tool. Failed preflights record only a bounded
+error code. This does not make Activity evidence or weaken the final gate.
 Only final verified citations create Evidence Receipts. Activity is audit/progress,
 not evidence. Assistant Message, zero to three Proposals, Receipts, usage, and success
 transition commit atomically.

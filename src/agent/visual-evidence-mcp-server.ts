@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 
 import { openDataRoot } from "../storage/layout.js";
 import { PdfPageRenderer } from "../storage/pdf-page-renderer.js";
+import { TextCitationPreflight } from "../storage/text-citation-preflight.js";
 import { VisualEvidenceShim } from "../storage/visual-evidence-shim.js";
 import { VisualEvidenceStore } from "../storage/visual-evidence-store.js";
 
@@ -25,8 +26,15 @@ const database = new Database(layout.databasePath);
 database.pragma("foreign_keys = ON");
 const store = new VisualEvidenceStore(layout, database, new PdfPageRenderer());
 const shim = new VisualEvidenceShim({ attemptId: binding.attemptId, runEpoch: binding.runEpoch as number, layout, database, store });
+const textPreflight = new TextCitationPreflight({ attemptId: binding.attemptId, runEpoch: binding.runEpoch as number,
+  layout, database });
 
 const tools = [
+  { name: "verify_text_citation", description: "Validate and canonicalize one final text citation against the Attempt's frozen Evidence Workspace. Call this for every text citation and copy the returned citation exactly into the final output.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["path", "lineStart", "lineEnd", "quote"], properties: {
+      path: { type: "string", minLength: 1 }, lineStart: { type: "integer", minimum: 1 },
+      lineEnd: { type: "integer", minimum: 1 }, quote: { type: "string", minLength: 1, maxLength: 500 },
+    } }, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
   { name: "inspect_pdf_page", description: "Render and inspect one page from the Attempt's frozen PDF source.",
     inputSchema: { type: "object", additionalProperties: false, required: ["sourceId", "page"], properties: {
       sourceId: { type: "string", minLength: 1 }, page: { type: "integer", minimum: 1 },
@@ -53,6 +61,18 @@ async function handleLine(line: string): Promise<void> {
   if (request.method !== "tools/call") return writeError(request.id, -32601, "method-not-found");
   const params = request.params as { name?: unknown; arguments?: unknown } | undefined;
   try {
+    if (params?.name === "verify_text_citation") {
+      if (!plainObject(params.arguments) ||
+          Object.keys(params.arguments).some((key) => !["path", "lineStart", "lineEnd", "quote"].includes(key)) ||
+          typeof params.arguments.path !== "string" || !Number.isInteger(params.arguments.lineStart) ||
+          !Number.isInteger(params.arguments.lineEnd) || typeof params.arguments.quote !== "string") {
+        throw new Error("text-citation-tool-arguments-invalid");
+      }
+      const citation = textPreflight.verify({ path: params.arguments.path,
+        lineStart: params.arguments.lineStart as number, lineEnd: params.arguments.lineEnd as number,
+        quote: params.arguments.quote });
+      return writeResult(request.id, { content: [{ type: "text", text: JSON.stringify(citation) }] });
+    }
     if (params?.name === "budget_status") {
       if (!plainObject(params.arguments) || Object.keys(params.arguments).length !== 0) throw new Error("visual-tool-arguments-invalid");
       return writeResult(request.id, { content: [{ type: "text", text: JSON.stringify(shim.budgetStatus()) }] });

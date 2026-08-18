@@ -52,7 +52,7 @@ describe("read-only Settings", () => {
       loadedAt: "2026-07-30T08:05:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v6",
+        configurationVersion: "agent-configuration.v7",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: layout.root,
         codex: {
@@ -145,7 +145,7 @@ describe("read-only Settings", () => {
         concurrency: 2,
         network: "denied",
         workspace: "frozen-evidence",
-        tools: ["shell", "rg", "file-read", "inspect_pdf_page", "budget_status"],
+        tools: ["shell", "rg", "file-read", "verify_text_citation", "inspect_pdf_page", "budget_status"],
       });
     expect(snapshot.system).toMatchObject({
       storage: {
@@ -248,7 +248,7 @@ describe("read-only Settings", () => {
         model: "gpt-5.6-sol",
         reasoningEffort: "high",
         codexVersion: "0.145.0",
-        configurationVersion: "agent-configuration.v6",
+        configurationVersion: "agent-configuration.v7",
       });
     await app.close();
   });

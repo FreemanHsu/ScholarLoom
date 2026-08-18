@@ -15,10 +15,36 @@ import { createApp } from "../src/app.js";
 import type { AgenticEvidenceRunner } from "../src/agent/agentic-evidence-runner.js";
 import { initializeDataRoot } from "../src/storage/layout.js";
 import { PdfPageRenderer } from "../src/storage/pdf-page-renderer.js";
+import { preflightTextCitations } from "../src/storage/text-citation-preflight.js";
 import { VisualEvidenceShim } from "../src/storage/visual-evidence-shim.js";
 import { VisualEvidenceStore } from "../src/storage/visual-evidence-store.js";
 
 describe("VisualEvidenceShim", () => {
+  it("host-preflights exact final text citations when the Agent skips the tool", async () => {
+    const fixture = await runningAttemptFixture(2);
+    const database = new Database(fixture.layout.databasePath);
+    database.pragma("foreign_keys = ON");
+
+    expect(preflightTextCitations({ attemptId: fixture.attemptId, runEpoch: fixture.runEpoch,
+      layout: fixture.layout, database, citations: [{ kind: "text", path: "paper/pages/page-0002.md",
+        lineStart: 1, lineEnd: 1, quote: "visual page 2" }] })).toEqual([
+      { kind: "text", path: "paper/pages/page-0002.md", lineStart: 10, lineEnd: 10, quote: "visual page 2" },
+    ]);
+    expect(() => preflightTextCitations({ attemptId: fixture.attemptId, runEpoch: fixture.runEpoch,
+      layout: fixture.layout, database, citations: [{ kind: "text", path: "paper/pages/page-0002.md",
+        lineStart: 10, lineEnd: 10, quote: "visual page two" }] })).toThrow("citation-quote-mismatch");
+    expect(database.prepare(`SELECT event_type,count(*) count FROM agent_run_activities
+      WHERE job_run_id=? AND run_epoch=? AND event_type LIKE 'text-citation-preflight%'
+      GROUP BY event_type ORDER BY event_type`).all(fixture.attemptId, fixture.runEpoch)).toEqual([
+      { event_type: "text-citation-preflight", count: 1 },
+      { event_type: "text-citation-preflight-failed", count: 1 },
+    ]);
+
+    await fixture.app.inject({ method: "POST", url: `/api/agent-runs/${encodeURIComponent(fixture.attemptId)}/cancel` });
+    database.close();
+    await fixture.app.close();
+  });
+
   it("counts four unique pages per Attempt while repeated pages are free", async () => {
     const fixture = await runningAttemptFixture(5);
     const database = new Database(fixture.layout.databasePath);
@@ -91,7 +117,7 @@ describe("VisualEvidenceShim", () => {
     await fixture.app.close();
   });
 
-  it("serves the exact two-tool stdio MCP contract with dynamic image content", async () => {
+  it("serves text preflight and the visual tools over the same stdio MCP contract", async () => {
     const fixture = await runningAttemptFixture(5);
     const binding = join(fixture.layout.tmpRoot, "visual-mcp-test-binding.json");
     await writeFile(binding, JSON.stringify({ dataRoot: fixture.layout.root, attemptId: fixture.attemptId,
@@ -113,8 +139,19 @@ describe("VisualEvidenceShim", () => {
       protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
     expect(initialized.result.serverInfo.name).toBe("scholarloom-visual");
     const listed = await request({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
-    expect(listed.result.tools.map((tool: any) => tool.name)).toEqual(["inspect_pdf_page", "budget_status"]);
-    const inspected = await request({ jsonrpc: "2.0", id: 3, method: "tools/call", params: {
+    expect(listed.result.tools.map((tool: any) => tool.name))
+      .toEqual(["verify_text_citation", "inspect_pdf_page", "budget_status"]);
+    const paraphrased = await request({ jsonrpc: "2.0", id: 3, method: "tools/call", params: {
+      name: "verify_text_citation", arguments: { path: "paper/pages/page-0002.md", lineStart: 1, lineEnd: 1,
+        quote: "visual page two" } } });
+    expect(paraphrased.result).toMatchObject({ isError: true,
+      content: [{ type: "text", text: "citation-quote-mismatch" }] });
+    const preflight = await request({ jsonrpc: "2.0", id: 4, method: "tools/call", params: {
+      name: "verify_text_citation", arguments: { path: "paper/pages/page-0002.md", lineStart: 1, lineEnd: 1,
+        quote: "visual page 2" } } });
+    expect(JSON.parse(preflight.result.content[0].text)).toEqual({ kind: "text", path: "paper/pages/page-0002.md",
+      lineStart: 10, lineEnd: 10, quote: "visual page 2" });
+    const inspected = await request({ jsonrpc: "2.0", id: 5, method: "tools/call", params: {
       name: "inspect_pdf_page", arguments: { sourceId: fixture.paperVersionId, page: 2 } } });
     const descriptor = JSON.parse(inspected.result.content[0].text);
     const image = Buffer.from(inspected.result.content[1].data, "base64");
@@ -122,9 +159,14 @@ describe("VisualEvidenceShim", () => {
     expect(image.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
     expect(descriptor).toMatchObject({ sourceId: fixture.paperVersionId, page: 2,
       imageHash: createHash("sha256").update(image).digest("hex"), budget: { used: 1, remaining: 3, limit: 4 } });
-    const budget = await request({ jsonrpc: "2.0", id: 4, method: "tools/call",
+    const budget = await request({ jsonrpc: "2.0", id: 6, method: "tools/call",
       params: { name: "budget_status", arguments: {} } });
     expect(JSON.parse(budget.result.content[0].text)).toEqual({ used: 1, remaining: 3, limit: 4 });
+    const database = new Database(fixture.layout.databasePath);
+    expect(database.prepare(`SELECT count(*) FROM agent_run_activities
+      WHERE job_run_id=? AND run_epoch=? AND event_type='text-citation-preflight'`).pluck()
+      .get(fixture.attemptId, fixture.runEpoch)).toBe(1);
+    database.close();
     child.kill("SIGTERM");
     await new Promise<void>((resolve) => child.once("close", () => resolve()));
     await fixture.app.inject({ method: "POST", url: `/api/agent-runs/${encodeURIComponent(fixture.attemptId)}/cancel` });

@@ -13,8 +13,10 @@ storage model.
 
 ## Decision
 
-The same `codex exec` receives exactly two additional tools over invocation-local
-stdio MCP: `inspect_pdf_page` and `budget_status`. Tool input contains only a
+The visual branch gives the same `codex exec` two tools over the invocation-local
+stdio MCP: `inspect_pdf_page` and `budget_status`. The shared MCP also exposes the
+text-citation preflight required by ADR 0009; it does not expand visual authority.
+Visual tool input contains only a
 manifest-owned Paper Version source ID and 1-based page. Attempt ID and run epoch are
 bound to the per-Attempt shim process and revalidated against SQLite on every call;
 there is no model-visible bearer, path, data root, or generic filesystem MCP surface.

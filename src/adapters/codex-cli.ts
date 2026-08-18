@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import Database from "better-sqlite3";
+
 import type { CodexRunner } from "../app.js";
 import type { ChatResult, EntryResult, SummaryResult } from "../storage/import-store.js";
 import type { AgentActivity, AgenticEvidenceResult, AgenticEvidenceRunner } from "../agent/agentic-evidence-runner.js";
@@ -38,6 +40,7 @@ import {
   type PaperOrganizationRunner,
 } from "../agent/paper-organization.js";
 import type { StorageLayout } from "../storage/layout.js";
+import { preflightTextCitations } from "../storage/text-citation-preflight.js";
 import {
   createPaperTaxonomySchema,
   validatePaperTaxonomyResult,
@@ -228,6 +231,14 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
       const result = JSON.parse(readFileSync(outputPath, "utf8")) as AgenticEvidenceResult;
       const validate = new Ajv({ allErrors: true }).compile(agenticEvidenceSchema);
       if (!validate(result)) throw new Error(`codex-output-invalid:${JSON.stringify(validate.errors)}`);
+      if (this.#storageLayout) {
+        const database = new Database(this.#storageLayout.databasePath);
+        database.pragma("foreign_keys = ON");
+        database.pragma("busy_timeout = 5000");
+        try { result.citations = preflightTextCitations({ attemptId: input.attemptId, runEpoch: input.runEpoch,
+          layout: this.#storageLayout, database, citations: result.citations }); }
+        finally { database.close(); }
+      }
       return result;
     } finally {
       if (bindingPath) rmSync(bindingPath, { force: true });

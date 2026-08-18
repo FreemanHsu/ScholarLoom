@@ -413,7 +413,7 @@ process.stdin.on("end", () => {
     } finally { process.env.PATH = originalPath; }
   });
 
-  it("registers the two-tool visual shim over stdio in the same strict exec", async () => {
+  it("registers the evidence preflight and visual shim over stdio in the same strict exec", async () => {
     const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-visual-mcp-"));
     const layout = initializeDataRoot(join(directory, "data"));
     const workspace = join(directory, "workspace");

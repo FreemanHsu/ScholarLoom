@@ -1,4 +1,4 @@
-export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v6";
+export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v7";
 export const MINIMUM_CODEX_VERSION = "0.144.6";
 export const CODEX_SOL_MODEL = "gpt-5.6-sol";
 
@@ -74,7 +74,7 @@ function configuration(taskKind: AgentTaskKind, displayName: string, reasoningEf
       mode: agentic ? "agentic-evidence" : "structured-one-shot",
       network: "denied",
       workspace: agentic ? "frozen-evidence" : "ephemeral-read-only",
-      tools: agentic ? ["shell", "rg", "file-read", "inspect_pdf_page", "budget_status"] : [],
+      tools: agentic ? ["shell", "rg", "file-read", "verify_text_citation", "inspect_pdf_page", "budget_status"] : [],
       environment: "core-scrubbed",
       ignoresUserConfig: true,
       ignoresUserRules: true,
