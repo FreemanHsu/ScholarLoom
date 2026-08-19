@@ -119,6 +119,37 @@ describe("ArxivPaperSource", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("times out a stalled PDF body read and restarts the full download", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const pdf = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
+    const abortTimes: number[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      if (fetch.mock.calls.length === 1) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/pdf" }),
+          arrayBuffer: async () => await new Promise<ArrayBuffer>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              abortTimes.push(Date.now());
+              reject(init.signal?.reason);
+            }, { once: true });
+          }),
+        } as Response;
+      }
+      return new Response(pdf, { status: 200, headers: { "content-type": "application/pdf" } });
+    });
+    const pending = new ArxivPaperSource({ fetch, sleep: async () => {}, random: () => 0 })
+      .fetchPdf("2607.11643", 1);
+    const resolved = expect(pending).resolves.toEqual(pdf);
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    await resolved;
+    expect(abortTimes).toEqual([120_000]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("does not retry metadata responses that are not transient", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValue(new Response("Not Found", { status: 404 }));
