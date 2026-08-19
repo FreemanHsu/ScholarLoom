@@ -16,8 +16,23 @@ export type PdfTransport = {
   request(input: { url: URL; address: string; connectTimeoutMs: number; signal: AbortSignal }): Promise<PdfTransportResponse>;
 };
 
+type PaperSourceErrorDetails = {
+  httpStatus?: number;
+  retryAfterMs?: number;
+  retryable?: boolean;
+};
+
 export class PaperSourceError extends Error {
-  constructor(readonly code: string, message = code, readonly httpStatus?: number) { super(message); }
+  readonly httpStatus: number | undefined;
+  readonly retryAfterMs: number | undefined;
+  readonly retryable: boolean | undefined;
+
+  constructor(readonly code: string, message = code, details: PaperSourceErrorDetails = {}) {
+    super(message);
+    this.httpStatus = details.httpStatus;
+    this.retryAfterMs = details.retryAfterMs;
+    this.retryable = details.retryable;
+  }
 }
 
 export type DownloadedPdf = {
@@ -76,8 +91,10 @@ export class SafePdfDownloader {
         let addresses: string[];
         try { addresses = await raceAbort(this.#resolve(url.hostname), controller.signal); }
         catch {
-          if (controller.signal.aborted) throw new PaperSourceError("paper-source-timeout");
-          throw new PaperSourceError("paper-source-dns-failed");
+          if (controller.signal.aborted) {
+            throw new PaperSourceError("paper-source-timeout", undefined, { retryable: true });
+          }
+          throw new PaperSourceError("paper-source-dns-failed", undefined, { retryable: true });
         }
         if (!addresses.length || addresses.some((address) => !isPublicAddress(address))) throw new PaperSourceError("unsafe-source-url");
         const outcome = await this.#requestHop(url, addresses, controller);
@@ -118,7 +135,11 @@ export class SafePdfDownloader {
               return { kind: "redirect", location };
             }
             if (response.status < 200 || response.status >= 300) {
-              throw new PaperSourceError("paper-source-http-error", undefined, response.status);
+              const retryAfterMs = retryAfterMilliseconds(response.headers["retry-after"]);
+              throw new PaperSourceError("paper-source-http-error", undefined, {
+                httpStatus: response.status,
+                ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+              });
             }
             const declaredLength = Number(response.headers["content-length"] ?? "0");
             if (Number.isFinite(declaredLength) && declaredLength > this.#maxBytes) throw new PaperSourceError("paper-source-too-large");
@@ -142,9 +163,11 @@ export class SafePdfDownloader {
             }
             if (error instanceof PaperSourceError) throw error;
             if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
-              throw new PaperSourceError("paper-source-timeout");
+              throw new PaperSourceError("paper-source-timeout", undefined, { retryable: true });
             }
-            if (!isRetryableConnectivityError(error)) throw new PaperSourceError("paper-source-transport-error");
+            if (!isRetryableConnectivityError(error)) {
+              throw new PaperSourceError("paper-source-transport-error", undefined, { retryable: false });
+            }
             lastTransportError = error;
           }
         }
@@ -152,8 +175,10 @@ export class SafePdfDownloader {
       if (transportIndex === 0 && this.#proxyTransport && isRetryableConnectivityError(lastTransportError)) continue;
       break;
     }
-    if (transportErrorCode(lastTransportError) === "ETIMEDOUT") throw new PaperSourceError("paper-source-timeout");
-    throw new PaperSourceError("paper-source-transport-error");
+    if (transportErrorCode(lastTransportError) === "ETIMEDOUT") {
+      throw new PaperSourceError("paper-source-timeout", undefined, { retryable: true });
+    }
+    throw new PaperSourceError("paper-source-transport-error", undefined, { retryable: true });
   }
 }
 
@@ -191,6 +216,13 @@ function isRetryableConnectivityError(error: unknown): boolean {
 
 function transportErrorCode(error: unknown): string {
   return error instanceof Error && "code" in error ? String(error.code) : "";
+}
+
+function retryAfterMilliseconds(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  if (/^\d+$/.test(value.trim())) return Number.parseInt(value, 10) * 1_000;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : undefined;
 }
 
 function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {

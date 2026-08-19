@@ -88,12 +88,14 @@ describe("SafePdfDownloader", () => {
     let proxyAttempts = 0;
     const downloader = new SafePdfDownloader({
       resolve: async () => ["203.0.113.10"],
-      transport: { async request() { return response({ status: 503 }); } },
+      transport: { async request() {
+        return response({ status: 503, headers: { "retry-after": "12" } });
+      } },
       proxyTransport: { async request() { proxyAttempts += 1; return response(); } },
     });
 
     await expect(downloader.download("https://papers.example.test/paper.pdf"))
-      .rejects.toMatchObject({ code: "paper-source-http-error", httpStatus: 503 });
+      .rejects.toMatchObject({ code: "paper-source-http-error", httpStatus: 503, retryAfterMs: 12_000 });
     expect(proxyAttempts).toBe(0);
   });
 
@@ -107,7 +109,8 @@ describe("SafePdfDownloader", () => {
       proxyTransport: { async request() { proxyAttempts += 1; return response(); } },
     });
 
-    await expectCode(downloader.download("https://papers.example.test/paper.pdf"), "paper-source-transport-error");
+    await expect(downloader.download("https://papers.example.test/paper.pdf"))
+      .rejects.toMatchObject({ code: "paper-source-transport-error", retryable: false });
     expect(proxyAttempts).toBe(0);
   });
 

@@ -103,7 +103,10 @@ describe("ArxivPaperSource", () => {
   it("retries a transient safe-downloader failure", async () => {
     const pdf = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
     const download = vi.fn()
-      .mockRejectedValueOnce(new PaperSourceError("paper-source-http-error", undefined, 503))
+      .mockRejectedValueOnce(new PaperSourceError("paper-source-http-error", undefined, {
+        httpStatus: 503,
+        retryAfterMs: 12_000,
+      }))
       .mockResolvedValueOnce({ bytes: pdf });
     const waits: number[] = [];
 
@@ -114,11 +117,23 @@ describe("ArxivPaperSource", () => {
     }).fetchPdf("2607.11643", 1)).resolves.toEqual(pdf);
 
     expect(download).toHaveBeenCalledTimes(2);
-    expect(waits).toEqual([3_000]);
+    expect(waits).toEqual([12_000]);
   });
 
   it("does not retry a permanent safe-downloader HTTP failure", async () => {
-    const failure = new PaperSourceError("paper-source-http-error", undefined, 404);
+    const failure = new PaperSourceError("paper-source-http-error", undefined, { httpStatus: 404 });
+    const download = vi.fn().mockRejectedValue(failure);
+    const sleep = vi.fn(async () => undefined);
+
+    await expect(new ArxivPaperSource({ pdfDownloader: { download }, sleep }).fetchPdf("2607.11643", 1))
+      .rejects.toBe(failure);
+
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a permanent safe-downloader transport failure", async () => {
+    const failure = new PaperSourceError("paper-source-transport-error", undefined, { retryable: false });
     const download = vi.fn().mockRejectedValue(failure);
     const sleep = vi.fn(async () => undefined);
 
