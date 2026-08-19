@@ -56,6 +56,34 @@ describe("SafePdfDownloader", () => {
     expect(attempts).toEqual(["direct", "proxy"]);
   });
 
+  it("restarts the download through the proxy when the direct transfer exceeds its attempt budget", async () => {
+    const attempts: string[] = [];
+    const downloader = new SafePdfDownloader({
+      resolve: async () => ["203.0.113.10", "203.0.113.11"],
+      directAttemptTimeoutMs: 5,
+      totalTimeoutMs: 1_000,
+      transport: { async request(input) {
+        attempts.push(`direct:${input.address}`);
+        return response({ body: (async function* () {
+          yield new TextEncoder().encode("%PDF-");
+          await new Promise<void>((_resolve, reject) => {
+            input.signal.addEventListener("abort", () => reject(input.signal.reason), { once: true });
+          });
+        })() });
+      } },
+      proxyTransport: { async request() {
+        attempts.push("proxy");
+        return response();
+      } },
+    });
+
+    await expect(downloader.download("https://papers.example.test/paper.pdf")).resolves.toMatchObject({
+      mediaType: "application/pdf",
+      byteSize: 9,
+    });
+    expect(attempts).toEqual(["direct:203.0.113.10", "proxy"]);
+  });
+
   it("does not use the proxy after receiving an HTTP response", async () => {
     let proxyAttempts = 0;
     const downloader = new SafePdfDownloader({

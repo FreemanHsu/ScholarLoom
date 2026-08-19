@@ -43,6 +43,7 @@ type SafePdfDownloaderOptions = {
   maxBytes?: number;
   connectTimeoutMs?: number;
   totalTimeoutMs?: number;
+  directAttemptTimeoutMs?: number;
 };
 
 export class SafePdfDownloader {
@@ -53,6 +54,7 @@ export class SafePdfDownloader {
   readonly #maxBytes: number;
   readonly #connectTimeoutMs: number;
   readonly #totalTimeoutMs: number;
+  readonly #directAttemptTimeoutMs: number | undefined;
 
   constructor(options: SafePdfDownloaderOptions = {}) {
     this.#resolve = options.resolve ?? resolvePublicAddresses;
@@ -62,6 +64,7 @@ export class SafePdfDownloader {
     this.#maxBytes = options.maxBytes ?? SAFE_PDF_DOWNLOADER_DEFAULTS.maxBytes;
     this.#connectTimeoutMs = options.connectTimeoutMs ?? SAFE_PDF_DOWNLOADER_DEFAULTS.connectTimeoutMs;
     this.#totalTimeoutMs = options.totalTimeoutMs ?? SAFE_PDF_DOWNLOADER_DEFAULTS.totalTimeoutMs;
+    this.#directAttemptTimeoutMs = options.directAttemptTimeoutMs;
   }
 
   async download(input: string): Promise<DownloadedPdf> {
@@ -102,46 +105,81 @@ export class SafePdfDownloader {
     const transports = [this.#transport, ...(this.#proxyTransport ? [this.#proxyTransport] : [])];
     let lastTransportError: unknown;
     for (const [transportIndex, transport] of transports.entries()) {
-      for (const address of addresses) {
-        try {
-          const response = await transport.request({ url, address,
-            connectTimeoutMs: this.#connectTimeoutMs, signal: controller.signal });
-          if ([301, 302, 303, 307, 308].includes(response.status)) {
-            const location = response.headers.location;
-            if (!location) throw new PaperSourceError("paper-source-redirect-invalid");
-            return { kind: "redirect", location };
+      const attempt = linkedAttemptSignal(controller.signal,
+        transportIndex === 0 && this.#proxyTransport ? this.#directAttemptTimeoutMs : undefined);
+      try {
+        for (const address of addresses) {
+          try {
+            const response = await transport.request({ url, address,
+              connectTimeoutMs: this.#connectTimeoutMs, signal: attempt.signal });
+            if ([301, 302, 303, 307, 308].includes(response.status)) {
+              const location = response.headers.location;
+              if (!location) throw new PaperSourceError("paper-source-redirect-invalid");
+              return { kind: "redirect", location };
+            }
+            if (response.status < 200 || response.status >= 300) throw new PaperSourceError("paper-source-http-error");
+            const declaredLength = Number(response.headers["content-length"] ?? "0");
+            if (Number.isFinite(declaredLength) && declaredLength > this.#maxBytes) throw new PaperSourceError("paper-source-too-large");
+            const chunks: Uint8Array[] = [];
+            let size = 0;
+            for await (const chunk of response.body) {
+              size += chunk.byteLength;
+              if (size > this.#maxBytes) { controller.abort(); throw new PaperSourceError("paper-source-too-large"); }
+              chunks.push(chunk);
+            }
+            const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+            const mediaType = (response.headers["content-type"] ?? "").split(";", 1)[0]!.trim().toLowerCase();
+            if (mediaType !== "application/pdf" && mediaType !== "application/octet-stream") throw new PaperSourceError("paper-source-not-pdf");
+            if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new PaperSourceError("paper-source-not-pdf");
+            return { kind: "downloaded", downloaded: { bytes,
+              contentHash: createHash("sha256").update(bytes).digest("hex"), byteSize: bytes.byteLength, mediaType } };
+          } catch (error) {
+            if (attempt.timedOut()) {
+              lastTransportError = transportError("ETIMEDOUT", "direct transfer attempt timeout");
+              break;
+            }
+            if (error instanceof PaperSourceError) throw error;
+            if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+              throw new PaperSourceError("paper-source-timeout");
+            }
+            if (!isRetryableConnectivityError(error)) throw new PaperSourceError("paper-source-transport-error");
+            lastTransportError = error;
           }
-          if (response.status < 200 || response.status >= 300) throw new PaperSourceError("paper-source-http-error");
-          const declaredLength = Number(response.headers["content-length"] ?? "0");
-          if (Number.isFinite(declaredLength) && declaredLength > this.#maxBytes) throw new PaperSourceError("paper-source-too-large");
-          const chunks: Uint8Array[] = [];
-          let size = 0;
-          for await (const chunk of response.body) {
-            size += chunk.byteLength;
-            if (size > this.#maxBytes) { controller.abort(); throw new PaperSourceError("paper-source-too-large"); }
-            chunks.push(chunk);
-          }
-          const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
-          const mediaType = (response.headers["content-type"] ?? "").split(";", 1)[0]!.trim().toLowerCase();
-          if (mediaType !== "application/pdf" && mediaType !== "application/octet-stream") throw new PaperSourceError("paper-source-not-pdf");
-          if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new PaperSourceError("paper-source-not-pdf");
-          return { kind: "downloaded", downloaded: { bytes,
-            contentHash: createHash("sha256").update(bytes).digest("hex"), byteSize: bytes.byteLength, mediaType } };
-        } catch (error) {
-          if (error instanceof PaperSourceError) throw error;
-          if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
-            throw new PaperSourceError("paper-source-timeout");
-          }
-          if (!isRetryableConnectivityError(error)) throw new PaperSourceError("paper-source-transport-error");
-          lastTransportError = error;
         }
-      }
+      } finally { attempt.cleanup(); }
       if (transportIndex === 0 && this.#proxyTransport && isRetryableConnectivityError(lastTransportError)) continue;
       break;
     }
     if (transportErrorCode(lastTransportError) === "ETIMEDOUT") throw new PaperSourceError("paper-source-timeout");
     throw new PaperSourceError("paper-source-transport-error");
   }
+}
+
+function linkedAttemptSignal(parent: AbortSignal, timeoutMs: number | undefined): {
+  signal: AbortSignal;
+  timedOut(): boolean;
+  cleanup(): void;
+} {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let didTimeout = false;
+  const abort = () => controller.abort(parent.reason);
+  if (parent.aborted) abort();
+  else parent.addEventListener("abort", abort, { once: true });
+  if (timeoutMs !== undefined) {
+    timeout = setTimeout(() => {
+      didTimeout = true;
+      controller.abort(transportError("ETIMEDOUT", "direct transfer attempt timeout"));
+    }, timeoutMs);
+  }
+  return {
+    signal: controller.signal,
+    timedOut: () => didTimeout,
+    cleanup() {
+      if (timeout) clearTimeout(timeout);
+      parent.removeEventListener("abort", abort);
+    },
+  };
 }
 
 function isRetryableConnectivityError(error: unknown): boolean {

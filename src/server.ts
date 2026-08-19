@@ -93,11 +93,18 @@ const fixtureSelectionRunner: TakeawaySelectionRunner = {
     } }, usage: { status: "reported", inputTokens: 1200, outputTokens: 180, totalTokens: 1380 } };
   },
 };
+const pdfProxy = fixture ? null : resolvePdfProxyConfiguration(process.env);
+const proxyTransport = pdfProxy ? new HttpConnectPdfTransport(pdfProxy.url) : null;
 const paperSource: PaperSource = fixture ? {
   async resolve(arxivId) { return { arxivId, latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
   async fetchPdf() { return createFixturePdf(); },
-} : new ArxivPaperSource();
-const pdfProxy = fixture ? null : resolvePdfProxyConfiguration(process.env);
+} : new ArxivPaperSource({
+  ...(proxyTransport ? { pdfDownloader: new SafePdfDownloader({
+    proxyTransport,
+    directAttemptTimeoutMs: 15_000,
+    totalTimeoutMs: 120_000,
+  }) } : {}),
+});
 const directPdfSource = fixture ? {
   async prepare(reference: import("./domain/paper-import-reference.js").DirectPdfReference) {
     if (reference.normalizedUrl.includes("not-a-pdf")) throw new PaperSourceError("paper-source-not-pdf");
@@ -109,7 +116,7 @@ const directPdfSource = fixture ? {
       metadata: { title: "Locate Anything Fixture", authors: ["Ada Fixture"], year: 2025 } };
   },
 } : new DirectPdfSource(new SafePdfDownloader({
-  ...(pdfProxy ? { proxyTransport: new HttpConnectPdfTransport(pdfProxy.url) } : {}),
+  ...(proxyTransport ? { proxyTransport } : {}),
 }));
 
 const host = requireLoopbackHost(process.env.SCHOLARLOOM_HOST ?? "127.0.0.1");

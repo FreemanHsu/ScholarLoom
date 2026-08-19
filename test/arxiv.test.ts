@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ArxivPaperSource } from "../src/adapters/arxiv.js";
+import { PaperSourceError } from "../src/adapters/safe-pdf-downloader.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -84,6 +85,35 @@ describe("ArxivPaperSource", () => {
 
     expect(bytes).toEqual(pdf);
     expect(fetch).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([3_000]);
+  });
+
+  it("uses the configured safe downloader for an arXiv PDF", async () => {
+    const pdf = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const download = vi.fn(async () => ({ bytes: pdf }));
+
+    await expect(new ArxivPaperSource({ fetch, pdfDownloader: { download } }).fetchPdf("2607.11643", 1))
+      .resolves.toEqual(pdf);
+
+    expect(download).toHaveBeenCalledWith("https://arxiv.org/pdf/2607.11643v1");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("retries a transient safe-downloader failure", async () => {
+    const pdf = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 55]);
+    const download = vi.fn()
+      .mockRejectedValueOnce(new PaperSourceError("paper-source-timeout"))
+      .mockResolvedValueOnce({ bytes: pdf });
+    const waits: number[] = [];
+
+    await expect(new ArxivPaperSource({
+      pdfDownloader: { download },
+      sleep: async (milliseconds) => { waits.push(milliseconds); },
+      random: () => 0,
+    }).fetchPdf("2607.11643", 1)).resolves.toEqual(pdf);
+
+    expect(download).toHaveBeenCalledTimes(2);
     expect(waits).toEqual([3_000]);
   });
 

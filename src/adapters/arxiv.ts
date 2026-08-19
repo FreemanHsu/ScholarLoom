@@ -1,6 +1,10 @@
 import type { PaperSource, ResolvedPaper } from "../app.js";
+import { PaperSourceError } from "./safe-pdf-downloader.js";
 
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
+const RETRYABLE_PAPER_SOURCE_CODES = new Set([
+  "paper-source-timeout", "paper-source-dns-failed", "paper-source-transport-error", "paper-source-http-error",
+]);
 const USER_AGENT = "ScholarLoom/0.1 (personal research ingestion)";
 const MAX_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = 3_000;
@@ -12,6 +16,7 @@ const PDF_TIMEOUT_MS = 120_000;
 
 type ArxivPaperSourceOptions = {
   fetch?: typeof globalThis.fetch;
+  pdfDownloader?: { download(input: string): Promise<{ bytes: Uint8Array }> };
   sleep?: (milliseconds: number) => Promise<void>;
   random?: () => number;
   now?: () => number;
@@ -29,6 +34,7 @@ class ArxivRequestTimeoutError extends Error {
 
 export class ArxivPaperSource implements PaperSource {
   readonly #fetch: typeof globalThis.fetch;
+  readonly #pdfDownloader: { download(input: string): Promise<{ bytes: Uint8Array }> } | undefined;
   readonly #sleep: (milliseconds: number) => Promise<void>;
   readonly #random: () => number;
   readonly #now: () => number;
@@ -37,6 +43,7 @@ export class ArxivPaperSource implements PaperSource {
 
   constructor(options: ArxivPaperSourceOptions = {}) {
     this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#pdfDownloader = options.pdfDownloader;
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.#random = options.random ?? Math.random;
     this.#now = options.now ?? Date.now;
@@ -61,8 +68,10 @@ export class ArxivPaperSource implements PaperSource {
   }
 
   async fetchPdf(arxivId: string, version: number): Promise<Uint8Array> {
+    const url = `https://arxiv.org/pdf/${encodeURIComponent(arxivId)}v${version}`;
+    if (this.#pdfDownloader) return this.#withRetry(async () => (await this.#pdfDownloader!.download(url)).bytes);
     return this.#withRetry(() => this.#withTimeout(PDF_TIMEOUT_MS, async (signal) => {
-      const response = await this.#request(`https://arxiv.org/pdf/${encodeURIComponent(arxivId)}v${version}`, signal);
+      const response = await this.#request(url, signal);
       const type = response.headers.get("content-type") ?? "";
       if (!type.includes("pdf")) throw new Error("paper-source-invalid-pdf");
       return new Uint8Array(await response.arrayBuffer());
@@ -75,7 +84,8 @@ export class ArxivPaperSource implements PaperSource {
       catch (error) {
         const retryableHttp = error instanceof ArxivHttpError && RETRYABLE_STATUS_CODES.has(error.status);
         const retryableTransport = error instanceof TypeError || error instanceof ArxivRequestTimeoutError;
-        if ((!retryableHttp && !retryableTransport) || attempt >= MAX_ATTEMPTS - 1) throw error;
+        const retryablePaperSource = error instanceof PaperSourceError && RETRYABLE_PAPER_SOURCE_CODES.has(error.code);
+        if ((!retryableHttp && !retryableTransport && !retryablePaperSource) || attempt >= MAX_ATTEMPTS - 1) throw error;
         const backoffMs = RETRY_BACKOFF_MS * (2 ** attempt);
         const jitterMs = Math.floor(this.#random() * RETRY_JITTER_MS);
         const delayMs = Math.max(backoffMs + jitterMs, error instanceof ArxivHttpError ? error.retryAfterMs ?? 0 : 0);
