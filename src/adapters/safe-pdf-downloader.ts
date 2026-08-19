@@ -17,7 +17,7 @@ export type PdfTransport = {
 };
 
 export class PaperSourceError extends Error {
-  constructor(readonly code: string, message = code) { super(message); }
+  constructor(readonly code: string, message = code, readonly httpStatus?: number) { super(message); }
 }
 
 export type DownloadedPdf = {
@@ -117,7 +117,9 @@ export class SafePdfDownloader {
               if (!location) throw new PaperSourceError("paper-source-redirect-invalid");
               return { kind: "redirect", location };
             }
-            if (response.status < 200 || response.status >= 300) throw new PaperSourceError("paper-source-http-error");
+            if (response.status < 200 || response.status >= 300) {
+              throw new PaperSourceError("paper-source-http-error", undefined, response.status);
+            }
             const declaredLength = Number(response.headers["content-length"] ?? "0");
             if (Number.isFinite(declaredLength) && declaredLength > this.#maxBytes) throw new PaperSourceError("paper-source-too-large");
             const chunks: Uint8Array[] = [];

@@ -3,7 +3,7 @@ import { PaperSourceError } from "./safe-pdf-downloader.js";
 
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const RETRYABLE_PAPER_SOURCE_CODES = new Set([
-  "paper-source-timeout", "paper-source-dns-failed", "paper-source-transport-error", "paper-source-http-error",
+  "paper-source-timeout", "paper-source-dns-failed", "paper-source-transport-error",
 ]);
 const USER_AGENT = "ScholarLoom/0.1 (personal research ingestion)";
 const MAX_ATTEMPTS = 3;
@@ -84,7 +84,10 @@ export class ArxivPaperSource implements PaperSource {
       catch (error) {
         const retryableHttp = error instanceof ArxivHttpError && RETRYABLE_STATUS_CODES.has(error.status);
         const retryableTransport = error instanceof TypeError || error instanceof ArxivRequestTimeoutError;
-        const retryablePaperSource = error instanceof PaperSourceError && RETRYABLE_PAPER_SOURCE_CODES.has(error.code);
+        const retryablePaperSource = error instanceof PaperSourceError &&
+          (RETRYABLE_PAPER_SOURCE_CODES.has(error.code) ||
+            (error.code === "paper-source-http-error" && error.httpStatus !== undefined &&
+              RETRYABLE_STATUS_CODES.has(error.httpStatus)));
         if ((!retryableHttp && !retryableTransport && !retryablePaperSource) || attempt >= MAX_ATTEMPTS - 1) throw error;
         const backoffMs = RETRY_BACKOFF_MS * (2 ** attempt);
         const jitterMs = Math.floor(this.#random() * RETRY_JITTER_MS);

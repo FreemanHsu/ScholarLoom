@@ -92,7 +92,8 @@ describe("SafePdfDownloader", () => {
       proxyTransport: { async request() { proxyAttempts += 1; return response(); } },
     });
 
-    await expectCode(downloader.download("https://papers.example.test/paper.pdf"), "paper-source-http-error");
+    await expect(downloader.download("https://papers.example.test/paper.pdf"))
+      .rejects.toMatchObject({ code: "paper-source-http-error", httpStatus: 503 });
     expect(proxyAttempts).toBe(0);
   });
 
