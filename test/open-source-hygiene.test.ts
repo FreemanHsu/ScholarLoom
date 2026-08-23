@@ -20,7 +20,7 @@ describe("open-source repository hygiene", () => {
     const tracked = execFileSync("git", ["ls-files", "-z"])
       .toString("utf8")
       .split("\0")
-      .filter(Boolean);
+      .filter((path) => Boolean(path) && existsSync(path));
     const macHome = new RegExp(["", "Users", "[^/\\s`]+"].join("/"));
     const codexArtifact = new RegExp(
       ["\\.codex", "(?:attachments|generated_images|worktrees)"].join("/"),
@@ -43,7 +43,7 @@ describe("open-source repository hygiene", () => {
     const tracked = execFileSync("git", ["ls-files", "-z"])
       .toString("utf8")
       .split("\0")
-      .filter(Boolean);
+      .filter((path) => Boolean(path) && existsSync(path));
     const trackedMarkdown = tracked.filter((path) => path.endsWith(".md"));
     const ephemeralRootDocs = trackedMarkdown.filter(
       (path) => !path.includes("/") && /^design-qa(?:-papers)?\.md$/.test(path),
@@ -71,7 +71,7 @@ describe("open-source repository hygiene", () => {
     const trackedMarkdown = execFileSync("git", ["ls-files", "-z", "*.md"])
       .toString("utf8")
       .split("\0")
-      .filter(Boolean);
+      .filter((path) => Boolean(path) && existsSync(path));
     const brokenLinks: string[] = [];
 
     for (const path of trackedMarkdown) {

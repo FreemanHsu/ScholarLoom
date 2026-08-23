@@ -26,7 +26,8 @@ import {
   type ImportJobError,
   type ImportJobState,
 } from "../domain/import-job.js";
-import { paperHref, paperOrganizationHref, papersHref, readBrowserRoute, type BrowserRoute,
+import { isCurrentKnowledgeRequest, knowledgePollingDisposition, paperHref, paperOrganizationHref, papersHref,
+  readBrowserRoute, type BrowserRoute,
   type PaperLibraryViewState, type PaperOrganizationViewState } from "./browser-navigation.js";
 import { importMonitor } from "./import-monitor.js";
 import { canConfirmOrganizationAliasDraft, removeOrganizationAliasCandidate }
@@ -327,8 +328,52 @@ type KnowledgeModel = { pendingProposals: Array<Proposal & { reviewStatus: strin
   source: { conversationId: string; messageId: string } }>;
   confirmedTakeaways: Array<{ id: string; claim: string; revision: number; source: { conversationId: string; messageId: string } }> };
 
+type KnowledgeConversationSummary = {
+  id: string;
+  title: string;
+  status: "active" | "archived";
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+};
+type KnowledgeConversationDetail = {
+  id: string;
+  title: string;
+  status: "active" | "archived";
+  createdAt: string;
+  updatedAt: string;
+  messages: Array<{
+    id: string;
+    role: "user" | "assistant";
+    ordinal: number;
+    content: string;
+    answerBasis: "model-knowledge" | "conversation-context" | "curated-evidence" | null;
+    coverage: "supported" | "partial" | "none" | "conflicting" | null;
+    answer: null | { claims: Array<{ text: string; status: string; citationOrdinals: number[] }>;
+      disagreements: string[]; unknowns: string[];
+      retrievalSummary: { searched: boolean; queryCount: number; candidateCount: number; openedSourceCount: number;
+        usedSourceCount: number; budgetExhausted: boolean; projectionStale?: boolean; lastSuccessfulAt?: string | null } };
+    evidenceReceipts: Array<{ id: string; ordinal: number; sourceType: "summary" | "takeaway" | "topic-knowledge";
+      sourceId: string; revisionId: string; contentHash: string; title: string;
+      trustLabel: "generated-from-primary-source" | "user-confirmed";
+      locator: { lineStart: number; lineEnd: number }; quote: string; whySelected: string;
+      available: boolean; unavailableReason: "missing" | "ineligible" | "integrity-withheld" | null; href: string | null }>;
+    createdAt: string;
+  }>;
+};
+type KnowledgeAttempt = {
+  id: string;
+  state: "running" | "succeeded" | "failed" | "canceled" | "interrupted";
+  conversationId: string | null;
+  error: { code: string; detail: string | null } | null;
+};
+
 function App() {
   const [route, setRoute] = useState<BrowserRoute>(() => readBrowserRoute(window.location));
+  const routeRef = useRef(route);
+  const knowledgeRequestGeneration = useRef(0);
+  const knowledgePollingGeneration = useRef(0);
+  const knowledgeCancelKeys = useRef(new Map<string, string>());
   const [papers, setPapers] = useState<Paper[]>([]);
   const [papersLoading, setPapersLoading] = useState(true);
   const [papersError, setPapersError] = useState<string | null>(null);
@@ -352,7 +397,10 @@ function App() {
   const [answer, setAnswer] = useState<string | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [entryQuestion, setEntryQuestion] = useState("");
-  const [entryAnswer, setEntryAnswer] = useState<EntryAnswer | null>(null);
+  const [knowledgeConversations, setKnowledgeConversations] = useState<KnowledgeConversationSummary[]>([]);
+  const [knowledgeConversation, setKnowledgeConversation] = useState<KnowledgeConversationDetail | null>(null);
+  const [knowledgeAttempt, setKnowledgeAttempt] = useState<KnowledgeAttempt | null>(null);
+  const [knowledgeQuestionError, setKnowledgeQuestionError] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversation, setConversation] = useState<ConversationDetail | null>(null);
   const [conversationLineage, setConversationLineage] = useState<ConversationLineage | null>(null);
@@ -366,7 +414,9 @@ function App() {
 
   function navigate(href: string, replace = false) {
     window.history[replace ? "replaceState" : "pushState"](null, "", href);
-    setRoute(readBrowserRoute(window.location));
+    const nextRoute = readBrowserRoute(window.location);
+    routeRef.current = nextRoute;
+    setRoute(nextRoute);
   }
 
   function routeClick(event: React.MouseEvent<HTMLAnchorElement>, href: string) {
@@ -424,6 +474,34 @@ function App() {
       setReviewsError(null);
     } catch (cause) {
       setReviewsError(cause instanceof Error ? cause.message : "审核队列暂时不可用");
+    }
+  };
+
+  const refreshKnowledgeQuestions = async (selectedId: string | null) => {
+    const generation = ++knowledgeRequestGeneration.current;
+    const isCurrent = () => isCurrentKnowledgeRequest(generation, knowledgeRequestGeneration.current,
+      routeRef.current, selectedId);
+    if (isCurrent()) setKnowledgeConversation((current) => current?.id === selectedId ? current : null);
+    try {
+      const listResponse = await fetch("/api/knowledge-conversations?view=active");
+      if (!listResponse.ok) throw new Error("知识问答暂时不可用");
+      const listBody = await listResponse.json() as { conversations: KnowledgeConversationSummary[] };
+      if (!isCurrent()) return;
+      setKnowledgeConversations(listBody.conversations);
+      if (!selectedId) {
+        setKnowledgeConversation(null);
+      } else {
+        const detailResponse = await fetch(`/api/knowledge-conversations/${encodeURIComponent(selectedId)}`);
+        if (!detailResponse.ok) throw new Error(detailResponse.status === 404 ? "找不到这个问答会话" : "问答会话暂时不可用");
+        const detail = await detailResponse.json() as KnowledgeConversationDetail;
+        if (!isCurrent()) return;
+        setKnowledgeConversation(detail);
+      }
+      if (isCurrent()) setKnowledgeQuestionError(null);
+    } catch (cause) {
+      if (!isCurrent()) return;
+      setKnowledgeConversation(null);
+      setKnowledgeQuestionError(cause instanceof Error ? cause.message : "知识问答暂时不可用");
     }
   };
 
@@ -498,7 +576,11 @@ function App() {
   };
 
   useEffect(() => {
-    const onPopState = () => setRoute(readBrowserRoute(window.location));
+    const onPopState = () => {
+      const nextRoute = readBrowserRoute(window.location);
+      routeRef.current = nextRoute;
+      setRoute(nextRoute);
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
@@ -566,6 +648,11 @@ function App() {
       setSettingsError(cause instanceof Error ? cause.message : "系统配置暂时不可用");
     });
   }, [route.name]);
+
+  useEffect(() => {
+    if (route.name !== "questions") return;
+    void refreshKnowledgeQuestions(route.conversationId);
+  }, [route.name === "questions" ? route.conversationId : null]);
 
   async function repositoryCommand(path: string, method: "POST", body?: object) {
     if (route.name !== "paper") return;
@@ -747,16 +834,75 @@ function App() {
   async function askEntry(event: React.FormEvent) {
     event.preventDefault();
     if (!entryQuestion.trim()) return;
-    await submitEntryQuestion({});
+    const pendingQuestion = entryQuestion.trim();
+    navigate("/questions");
+    await submitKnowledgeTurn(pendingQuestion, null);
   }
 
-  async function submitEntryQuestion(extra: Record<string, unknown>) {
-    const response = await fetch("/api/entry-agent/questions", {
+  async function submitKnowledgeTurn(questionText: string, selectedConversationId: string | null) {
+    const pollingGeneration = ++knowledgePollingGeneration.current;
+    const pollDisposition = () => knowledgePollingDisposition(pollingGeneration,
+      knowledgePollingGeneration.current, routeRef.current, selectedConversationId);
+    setKnowledgeQuestionError(null);
+    const path = selectedConversationId
+      ? `/api/knowledge-conversations/${encodeURIComponent(selectedConversationId)}/turns`
+      : "/api/knowledge-conversations/turns";
+    const response = await fetch(path, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ question: entryQuestion, ...extra }),
+      headers: { "content-type": "application/json", "idempotency-key": crypto.randomUUID() },
+      body: JSON.stringify({ question: questionText }),
     });
-    if (response.ok) setEntryAnswer(await response.json() as EntryAnswer);
+    const body = await response.json() as { attempt?: KnowledgeAttempt; code?: string };
+    if (!response.ok || !body.attempt) {
+      if (pollDisposition() === "present") {
+        setKnowledgeQuestionError(body.code === "knowledge-question-unavailable"
+          ? "Knowledge Question Agent 当前不可用。" : "问题未能提交，请重试。");
+      }
+      return;
+    }
+    if (pollDisposition() === "stale") return;
+    if (pollDisposition() === "present") setEntryQuestion("");
+    setKnowledgeAttempt(body.attempt);
+    for (let count = 0; count < 900; count += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      if (pollDisposition() === "stale") return;
+      const attemptResponse = await fetch(`/api/knowledge-question-attempts/${encodeURIComponent(body.attempt.id)}`);
+      if (!attemptResponse.ok) {
+        if (pollDisposition() === "stale") return;
+        setKnowledgeAttempt(null);
+        if (pollDisposition() === "present") setKnowledgeQuestionError("无法读取回答进度，请刷新页面。");
+        return;
+      }
+      const attempt = await attemptResponse.json() as KnowledgeAttempt;
+      if (pollDisposition() === "stale") return;
+      setKnowledgeAttempt(attempt);
+      if (attempt.state === "running") continue;
+      if (attempt.state === "succeeded" && attempt.conversationId) {
+        if (pollDisposition() === "present") {
+          navigate(`/questions/${encodeURIComponent(attempt.conversationId)}`, true);
+          await refreshKnowledgeQuestions(attempt.conversationId);
+        }
+      } else if (attempt.state === "canceled") {
+        if (pollDisposition() === "present") setKnowledgeQuestionError(null);
+      } else {
+        if (pollDisposition() === "present") {
+          setKnowledgeQuestionError(attempt.state === "interrupted"
+            ? "应用重启中断了这次回答，请重新提交。" : "回答生成失败，请重新提交。");
+        }
+      }
+      return;
+    }
+    if (pollDisposition() !== "stale") setKnowledgeAttempt(null);
+    if (pollDisposition() === "present") setKnowledgeQuestionError("回答等待超时，请稍后重新提交。");
+  }
+
+  async function cancelKnowledgeAttempt() {
+    if (!knowledgeAttempt || knowledgeAttempt.state !== "running") return;
+    const key = knowledgeCancelKeys.current.get(knowledgeAttempt.id) ?? crypto.randomUUID();
+    knowledgeCancelKeys.current.set(knowledgeAttempt.id, key);
+    const response = await fetch(`/api/knowledge-question-attempts/${encodeURIComponent(knowledgeAttempt.id)}/cancel`,
+      { method: "POST", headers: { "idempotency-key": key } });
+    if (!response.ok) setKnowledgeQuestionError("这次回答已经结束，无法取消。");
   }
 
   async function importPaper(event: React.FormEvent) {
@@ -845,6 +991,7 @@ function App() {
       <a className="brand" href="/" onClick={(event) => routeClick(event, "/")}>ScholarLoom</a>
       <nav aria-label="主要导航">
         <NavLink href="/" active={route.name === "home"} onClick={routeClick}>研究首页</NavLink>
+        <NavLink href="/questions" active={route.name === "questions"} onClick={routeClick}>知识问答</NavLink>
         <NavLink href="/papers" active={route.name === "papers" || route.name === "paper-organization"}
           onClick={routeClick}>论文库</NavLink>
         <NavLink href="/reviews" active={route.name === "reviews"} onClick={routeClick}>
@@ -869,13 +1016,24 @@ function App() {
     </form>}
 
     {route.name === "home" && <ResearchHome papers={papers} papersError={papersError} processingPapers={processingPapers}
-      attentionPapers={attentionPapers} pendingReviews={pendingReviews} entryQuestion={entryQuestion} entryAnswer={entryAnswer}
+      attentionPapers={attentionPapers} pendingReviews={pendingReviews} entryQuestion={entryQuestion}
       onEntryQuestion={setEntryQuestion} onAskEntry={askEntry}
-      onResolveEntry={(snapshotHash, groups) => submitEntryQuestion({
-        resolutionSelection: { snapshotHash, groups },
-      })}
-      onBypassEntry={() => submitEntryQuestion({ resolutionMode: "off" })}
       onNavigate={navigate} onImport={() => setImportOpen(true)} />}
+    {route.name === "questions" && <KnowledgeQuestionPage
+      conversations={knowledgeConversations}
+      conversation={knowledgeConversation}
+      selectedConversationId={route.conversationId}
+      question={entryQuestion}
+      attempt={knowledgeAttempt}
+      error={knowledgeQuestionError}
+      onQuestion={setEntryQuestion}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (entryQuestion.trim()) void submitKnowledgeTurn(entryQuestion.trim(), route.conversationId);
+      }}
+      onCancel={() => void cancelKnowledgeAttempt()}
+      onNavigate={navigate}
+      onNew={() => { setEntryQuestion(""); setKnowledgeAttempt(null); setKnowledgeQuestionError(null); navigate("/questions"); }} />}
     {route.name === "papers" && <PaperLibrary papers={papers} directions={directions} hierarchy={hierarchy} route={route}
       loading={papersLoading} error={papersError} onNavigate={navigate} onToggleStar={togglePaperStar} />}
     {route.name === "paper-organization" &&
@@ -947,56 +1105,18 @@ function ResearchHome(props: {
   attentionPapers: Paper[];
   pendingReviews: ReviewProposal[];
   entryQuestion: string;
-  entryAnswer: EntryAnswer | null;
   onEntryQuestion(value: string): void;
   onAskEntry(event: React.FormEvent): void;
-  onResolveEntry(snapshotHash: string, groups: Record<string, string>): Promise<void>;
-  onBypassEntry(): Promise<void>;
   onNavigate(href: string): void;
   onImport(): void;
 }) {
-  const [resolutionSelections, setResolutionSelections] = useState<Record<string, string>>({});
-  useEffect(() => { setResolutionSelections({}); }, [props.entryAnswer && "snapshotHash" in props.entryAnswer.resolution
-    ? props.entryAnswer.resolution.snapshotHash : null]);
-  const ambiguous = props.entryAnswer?.resolution.state === "ambiguous" ? props.entryAnswer.resolution : null;
-  const allGroupsSelected = Boolean(ambiguous && ambiguous.groups.length > 0 &&
-    ambiguous.groups.every((group) => resolutionSelections[group.id]));
   return <main className="app page home">
     <header className="home-intro"><span className="eyebrow">PRIVATE RESEARCH WORKSPACE</span><h1>今天，从哪里继续？</h1>
-      <p>检索已确认知识，继续阅读，或处理需要你判断的事项。</p></header>
-    <section className="entry-agent entry-agent-primary"><div className="section-heading"><span>CURATED ONLY</span><h2>向知识库提问</h2></div>
+      <p>提出研究问题，继续阅读，或处理需要你判断的事项。</p></header>
+    <section className="entry-agent entry-agent-primary"><div className="section-heading"><span>KNOWLEDGE QUESTION</span><h2>向知识库提问</h2></div>
       <form onSubmit={props.onAskEntry}><input aria-label="Knowledge question" value={props.entryQuestion}
-        onChange={(event) => props.onEntryQuestion(event.target.value)} /><button>检索已确认知识</button></form>
-      {props.entryAnswer && <div className="entry-result">{props.entryAnswer.projection.stale && <div className="stale">
-        {props.entryAnswer.projection.notice} · {props.entryAnswer.projection.lastSuccessfulAt ?? "尚无成功索引"}</div>}
-        {props.entryAnswer.resolution.state === "resolved" && <div className="entry-resolution-banner">
-          <div><b>已按 Paper 身份检索</b>{props.entryAnswer.resolution.matches.map((match) =>
-            <span key={`${match.paperId}-${match.text}`}>{match.text} → {match.canonicalTitle}</span>)}</div>
-          <button onClick={() => void props.onBypassEntry()}>忽略 Paper 身份，检索全部已确认知识</button>
-        </div>}
-        <p>{props.entryAnswer.answer}</p><div className="source-list">{props.entryAnswer.sources.map((source) => <button className="source-card"
-          key={`${source.sourceType}-${source.sourceId}`} onClick={() => {
-            void fetch(`/api/entry-agent/sources/${source.sourceType}/${encodeURIComponent(source.sourceId)}/open`,
-              { method: "POST" });
-            props.onNavigate(source.href ?? paperHref(source.paperId));
-          }}>{source.sourceType === "topic-knowledge" ? "Topic 知识" : source.sourceType} · {source.title}</button>)}</div>
-        {ambiguous && ambiguous.groups.length > 0 && <div className="entry-resolution-groups">
-          {ambiguous.groups.map((group) => <fieldset key={group.id}><legend>“{group.matchedText}” 指哪篇 Paper？</legend>
-            {group.candidates.map((candidate) => <label key={candidate.paperId}>
-              <input type="radio" name={group.id} value={candidate.paperId}
-                checked={resolutionSelections[group.id] === candidate.paperId}
-                onChange={() => setResolutionSelections((current) => ({ ...current,
-                  [group.id]: candidate.paperId }))} />
-              <span><b>{candidate.canonicalTitle}</b><small>{candidate.authors.join(", ")} · {candidate.year}
-                {candidate.primaryDirection ? ` · ${candidate.primaryDirection.title}` : ""}</small>
-                <small>匹配 {candidate.matchKind}: {candidate.matchedText}</small></span>
-            </label>)}
-          </fieldset>)}
-          <button disabled={!allGroupsSelected} onClick={() => ambiguous && void props.onResolveEntry(
-            ambiguous.snapshotHash, resolutionSelections)}>按所选 Paper 检索</button>
-          <button className="text-button" onClick={() => void props.onBypassEntry()}>不选择，检索全部已确认知识</button>
-        </div>}
-      </div>}
+        placeholder="提出一个研究问题…" onChange={(event) => props.onEntryQuestion(event.target.value)} />
+        <button disabled={!props.entryQuestion.trim()}>开始提问</button></form>
     </section>
 
     <div className="home-grid">
@@ -1017,6 +1137,145 @@ function ResearchHome(props: {
       </aside>
     </div>
   </main>;
+}
+
+function KnowledgeQuestionPage(props: {
+  conversations: KnowledgeConversationSummary[];
+  conversation: KnowledgeConversationDetail | null;
+  selectedConversationId: string | null;
+  question: string;
+  attempt: KnowledgeAttempt | null;
+  error: string | null;
+  onQuestion(value: string): void;
+  onSubmit(event: React.FormEvent): void;
+  onCancel(): void;
+  onNavigate(href: string): void;
+  onNew(): void;
+}) {
+  const [selectedReceipt, setSelectedReceipt] = useState<KnowledgeConversationDetail["messages"][number]["evidenceReceipts"][number] | null>(null);
+  const attemptMatchesRoute = props.selectedConversationId
+    ? props.attempt?.conversationId === props.selectedConversationId
+    : props.attempt?.conversationId === null;
+  const running = props.attempt?.state === "running" && attemptMatchesRoute;
+  const navigate = (event: React.MouseEvent<HTMLAnchorElement>, href: string) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    props.onNavigate(href);
+  };
+  return <main className="knowledge-question-page">
+    <aside className="knowledge-conversation-sidebar">
+      <button className="knowledge-new-conversation" disabled={running} onClick={props.onNew}>＋ 新建对话</button>
+      <div><span className="eyebrow">最近对话</span>
+        {props.conversations.length === 0
+          ? <p className="knowledge-empty-list">成功回答后，对话会保存在这里。</p>
+          : <nav aria-label="Knowledge Conversations">{props.conversations.map((conversation) => {
+            const href = `/questions/${encodeURIComponent(conversation.id)}`;
+            return <a key={conversation.id} href={href}
+              aria-current={props.selectedConversationId === conversation.id ? "page" : undefined}
+              onClick={(event) => navigate(event, href)}>
+              <b>{conversation.title}</b><small>{conversation.messageCount / 2} 轮</small>
+            </a>;
+          })}</nav>}
+      </div>
+    </aside>
+    <section className="knowledge-question-workspace">
+      <header className="knowledge-question-header">
+        <div><span className="eyebrow">KNOWLEDGE QUESTION</span>
+          <h1>{props.conversation?.title ?? "向知识库提问"}</h1></div>
+        <small>回答会明确区分当前对话、通用知识与知识库证据。</small>
+      </header>
+      <div className="knowledge-message-timeline" aria-live="polite">
+        {props.conversation?.messages.map((message) => <article key={message.id}
+          className={`knowledge-message ${message.role}`}>
+          <div className="knowledge-avatar">{message.role === "user" ? "你" : "SL"}</div>
+          <div className="knowledge-message-body">
+            {message.role === "assistant" && <div className="knowledge-answer-label">
+              {message.answerBasis === "curated-evidence"
+                ? `知识库回答 · ${knowledgeCoverageLabel(message.coverage)}`
+                : message.answerBasis === "model-knowledge"
+                  ? message.answer?.retrievalSummary.searched ? "通用回答 · 知识库未找到可用证据" : "通用回答 · 未使用知识库证据"
+                  : "基于当前对话"}
+            </div>}
+            <ConversationMessageBody role={message.role} content={message.content} pageCount={0} onOpenEvidence={() => {}} />
+            {message.role === "assistant" && message.answer?.claims.length ? <section className="knowledge-answer-claims">
+              <h3>关键判断</h3><ul>{message.answer.claims.map((claim, index) =>
+                <li key={`${index}-${claim.text}`}><span>{knowledgeClaimLabel(claim.status)}</span>
+                  {claim.text}{claim.citationOrdinals.map((ordinal) => {
+                    const receipt = message.evidenceReceipts.find((candidate) => candidate.ordinal === ordinal);
+                    return receipt ? <button key={ordinal} className="knowledge-citation-marker"
+                      aria-label={`查看来源 ${ordinal}`} onClick={() => setSelectedReceipt(receipt)}>[{ordinal}]</button> : null;
+                  })}</li>)}</ul>
+            </section> : null}
+            {message.role === "assistant" && message.answer && (message.answer.unknowns.length > 0 ||
+              message.answer.disagreements.length > 0) && <details className="knowledge-answer-details">
+              <summary>边界与未知</summary>
+              {message.answer.disagreements.map((item) => <p key={item}>{item}</p>)}
+              {message.answer.unknowns.map((item) => <p key={item}>{item}</p>)}
+            </details>}
+            {message.role === "assistant" && message.answer?.retrievalSummary.searched &&
+              <details className="knowledge-retrieval-summary"><summary>检索详情</summary>
+                <p>执行 {message.answer.retrievalSummary.queryCount} 次检索 · 召回 {message.answer.retrievalSummary.candidateCount} 个候选 ·
+                  打开 {message.answer.retrievalSummary.openedSourceCount} 个来源 · 使用 {message.answer.retrievalSummary.usedSourceCount} 个来源</p>
+                {message.answer.retrievalSummary.budgetExhausted && <p>本轮已达到检索预算，回答按部分覆盖处理。</p>}
+                {message.answer.retrievalSummary.projectionStale && <p>知识索引正在更新；当前结果基于上次成功索引
+                  {message.answer.retrievalSummary.lastSuccessfulAt ? `（${formatKnowledgeTime(message.answer.retrievalSummary.lastSuccessfulAt)}）` : ""}。</p>}
+              </details>}
+          </div>
+        </article>)}
+        {running && <article className="knowledge-message assistant running">
+          <div className="knowledge-avatar">SL</div><div className="knowledge-message-body">
+            <div className="knowledge-answer-label">Codex 正在生成回答…</div>
+            <p>本次问题尚未保存。取消后不会创建消息。</p>
+            <button className="text-button danger-text" onClick={props.onCancel}>取消</button>
+          </div>
+        </article>}
+        {props.error && <p className="inline-alert">{props.error}</p>}
+      </div>
+      <form className="knowledge-question-composer" onSubmit={props.onSubmit}>
+        <textarea aria-label="继续提问" value={props.question} disabled={running}
+          onChange={(event) => props.onQuestion(event.target.value)}
+          placeholder={props.conversation ? "继续追问…" : "向你的研究知识提出问题…"} />
+        <div><small>回答会明确标注是否有知识库证据。</small>
+          <button disabled={running || !props.question.trim()}>{running ? "回答中" : "发送"}</button></div>
+      </form>
+    </section>
+    {selectedReceipt && <div className="knowledge-source-backdrop" role="presentation"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedReceipt(null); }}>
+      <aside className="knowledge-source-drawer" role="dialog" aria-modal="true" aria-label={`来源 ${selectedReceipt.ordinal}`}>
+        <header><div><span className="eyebrow">SOURCE {selectedReceipt.ordinal}</span><h2>{selectedReceipt.title}</h2></div>
+          <button aria-label="关闭来源" onClick={() => setSelectedReceipt(null)}>×</button></header>
+        <dl><dt>来源类型</dt><dd>{knowledgeSourceTypeLabel(selectedReceipt.sourceType)}</dd>
+          <dt>可信标记</dt><dd>{selectedReceipt.trustLabel === "user-confirmed" ? "用户已确认" : "由原始论文生成"}</dd>
+          <dt>版本</dt><dd><code>{selectedReceipt.revisionId}</code></dd>
+          <dt>位置</dt><dd>第 {selectedReceipt.locator.lineStart}–{selectedReceipt.locator.lineEnd} 行</dd></dl>
+        <section><h3>逐字引文</h3><blockquote>{selectedReceipt.quote}</blockquote></section>
+        <section><h3>为什么使用</h3><p>{selectedReceipt.whySelected}</p></section>
+        {selectedReceipt.available && selectedReceipt.href
+          ? <a className="knowledge-source-open" href={selectedReceipt.href}
+              onClick={(event) => navigate(event, selectedReceipt.href!)}>打开知识来源 →</a>
+          : <span className="knowledge-source-unavailable">来源当前不可跳转</span>}
+      </aside>
+    </div>}
+  </main>;
+}
+
+function knowledgeCoverageLabel(coverage: KnowledgeConversationDetail["messages"][number]["coverage"]): string {
+  return coverage === "supported" ? "证据覆盖" : coverage === "partial" ? "部分覆盖" :
+    coverage === "conflicting" ? "来源存在分歧" : "无证据覆盖";
+}
+
+function knowledgeClaimLabel(status: string): string {
+  return status === "source-supported" ? "来源支持" : status === "source-consensus" ? "来源一致" :
+    status === "agent-inference" ? "Agent 推断" : "证据不足";
+}
+
+function knowledgeSourceTypeLabel(sourceType: "summary" | "takeaway" | "topic-knowledge"): string {
+  return sourceType === "summary" ? "Paper Summary" : sourceType === "takeaway" ? "Confirmed Takeaway" : "Topic Knowledge";
+}
+
+function formatKnowledgeTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function StatusSummary({ label, title, count, empty, onOpen }: { label: string; title: string; count: number; empty: string; onOpen(): void }) {
@@ -1098,6 +1357,7 @@ function PaperOrganizationWorkspace(props: {
       onChanged={async () => { await props.onDirectionsChanged(); await load(); }}
       onNavigate={props.onNavigate} />
     <DirectionCreator directions={props.directions} hierarchy={props.hierarchy}
+      initialDirectionId={props.route.direction}
       onCreated={async () => { await props.onDirectionsChanged(); await load(); }} />
     <form className="paper-catalog-search" onSubmit={(event) => {
       event.preventDefault();
@@ -1824,17 +2084,21 @@ function paperLibraryStatus(paper: Paper): { label: string; tone: "ready" | "pro
   return { label: "等待处理", tone: "muted" };
 }
 
-function DirectionCreator({ directions, hierarchy, onCreated }: {
+function DirectionCreator({ directions, hierarchy, initialDirectionId, onCreated }: {
   directions: ResearchDirection[];
   hierarchy: DirectionHierarchyModel;
+  initialDirectionId: string | null;
   onCreated(): Promise<void>;
 }) {
   const idempotencyKey = useRef(crypto.randomUUID());
+  const detailsRef = useRef<HTMLDetailsElement>(null);
   const [id, setId] = useState("");
   const [title, setTitle] = useState("");
   const [scope, setScope] = useState("");
   const [status, setStatus] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedId] = useState(
+    directions.some((direction) => direction.id === initialDirectionId) ? initialDirectionId ?? "" : "",
+  );
   const [editTitle, setEditTitle] = useState("");
   const [editAliases, setEditAliases] = useState("");
   const [editScope, setEditScope] = useState("");
@@ -1848,15 +2112,22 @@ function DirectionCreator({ directions, hierarchy, onCreated }: {
   const selectedDomain = hierarchy.domains.find((domain) => domain.id === selectedDomainId) ?? null;
   const selected = directions.find((direction) => direction.id === selectedId) ?? null;
   useEffect(() => {
+    if (initialDirectionId && directions.some((direction) => direction.id === initialDirectionId)) {
+      setSelectedId(initialDirectionId);
+    }
+  }, [initialDirectionId, directions]);
+  useEffect(() => {
     if (!selected) return;
     setEditTitle(selected.title);
     setEditAliases(selected.aliases.join(", "));
     setEditScope(selected.scope);
     setMergeTargetId("");
     setMergePreview(null);
-    setKnowledgeOpen(false);
-  }, [selectedId, selected?.revisionId]);
-  return <details className="direction-creator"><summary><span><b>研究方向管理</b>
+    const openKnowledge = selected.id === initialDirectionId && window.location.hash === "#topic-knowledge";
+    setKnowledgeOpen(openKnowledge);
+    if (openKnowledge && detailsRef.current) detailsRef.current.open = true;
+  }, [initialDirectionId, selectedId, selected?.revisionId]);
+  return <details ref={detailsRef} className="direction-creator"><summary><span><b>研究方向管理</b>
     <small>创建、重命名、合并与 Domain 维护</small></span></summary>
     <section className="hierarchy-manager"><div><b>Domain → Direction</b><small>
       {hierarchy.enabled ? "已启用" : `未启用 · ${hierarchy.directionCount}/${hierarchy.threshold} 个方向`}</small></div>
@@ -1993,8 +2264,10 @@ function DirectionCreator({ directions, hierarchy, onCreated }: {
         <button type="button" className="direction-knowledge-open" onClick={() => setKnowledgeOpen(true)}>
           编辑 Topic 知识
         </button>
-        {knowledgeOpen && <TopicKnowledgeEditor direction={selected} domains={hierarchy.domains} onChanged={onCreated}
-          onClose={() => setKnowledgeOpen(false)} />}
+        {knowledgeOpen && <div id="topic-knowledge"><TopicKnowledgeEditor direction={selected}
+          domains={hierarchy.domains} onChanged={onCreated}
+          onClose={() => setKnowledgeOpen(false)} />
+        </div>}
         <form className="direction-merge-form" onSubmit={async (event) => {
           event.preventDefault();
           if (!mergeTargetId) return;

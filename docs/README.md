@@ -11,6 +11,7 @@ PRD、architecture、data model 和已接受 ADR 的顺序核对，并同步修�
 - [SQLite schema](sqlite-schema.sql)
 - [前端信息架构](frontend-information-architecture.md)
 - [Paper Organization 功能设计](paper-organization-feature-design.md)
+- [Knowledge Question 功能设计](knowledge-question-feature-design.md)
 - [领域术语](../CONTEXT.md)
 - [架构决策记录](adr/)
 

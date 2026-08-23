@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { paperHref, paperOrganizationHref, papersHref, readBrowserRoute } from "../src/web/browser-navigation.js";
+import { isCurrentKnowledgeRequest, knowledgePollingDisposition, paperHref, paperOrganizationHref, papersHref,
+  readBrowserRoute } from "../src/web/browser-navigation.js";
 
 describe("browser navigation", () => {
   it("restores a Paper reading view from a direct URL", () => {
@@ -47,6 +48,12 @@ describe("browser navigation", () => {
 
   it("recognizes every top-level destination and rejects unknown paths", () => {
     expect(readBrowserRoute({ pathname: "/", search: "" })).toEqual({ name: "home" });
+    expect(readBrowserRoute({ pathname: "/questions", search: "" })).toEqual({
+      name: "questions", conversationId: null,
+    });
+    expect(readBrowserRoute({ pathname: "/questions/knowledge%3Aone", search: "" })).toEqual({
+      name: "questions", conversationId: "knowledge:one",
+    });
     expect(readBrowserRoute({ pathname: "/papers", search: "" })).toEqual({
       name: "papers",
       view: "all",
@@ -60,6 +67,23 @@ describe("browser navigation", () => {
     expect(readBrowserRoute({ pathname: "/reviews", search: "" })).toEqual({ name: "reviews" });
     expect(readBrowserRoute({ pathname: "/settings", search: "" })).toEqual({ name: "settings" });
     expect(readBrowserRoute({ pathname: "/missing", search: "" })).toEqual({ name: "not-found" });
+  });
+
+  it("rejects stale Knowledge Question responses after generation or route changes", () => {
+    const route = { name: "questions", conversationId: "knowledge:two" } as const;
+    expect(isCurrentKnowledgeRequest(2, 2, route, "knowledge:two")).toBe(true);
+    expect(isCurrentKnowledgeRequest(1, 2, route, "knowledge:two")).toBe(false);
+    expect(isCurrentKnowledgeRequest(2, 2, route, "knowledge:one")).toBe(false);
+    expect(isCurrentKnowledgeRequest(2, 2, { name: "home" }, null)).toBe(false);
+  });
+
+  it("keeps observing a Knowledge turn off-route until a newer submission replaces it", () => {
+    expect(knowledgePollingDisposition(4, 4,
+      { name: "questions", conversationId: "knowledge:one" }, "knowledge:one")).toBe("present");
+    expect(knowledgePollingDisposition(4, 4,
+      { name: "questions", conversationId: "knowledge:two" }, "knowledge:one")).toBe("observe");
+    expect(knowledgePollingDisposition(4, 5,
+      { name: "questions", conversationId: "knowledge:one" }, "knowledge:one")).toBe("stale");
   });
 
   it("restores Paper Library organization filters from the URL", () => {

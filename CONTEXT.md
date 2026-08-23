@@ -105,6 +105,17 @@ _Avoid_: Code Summary inside the Paper Summary
 A Paper-scoped sequence of Messages whose meaning is fixed by one or more Context Snapshots.
 _Avoid_: Knowledge, chat memory
 
+**Knowledge Conversation**:
+A global-curated sequence of successful user and Agent Messages. Each new turn may
+search the current eligible curated corpus, while prior Messages remain immutable and
+retain the exact Evidence Receipts used when they were created.
+_Avoid_: Conversation, Entry query, chat memory
+
+**Knowledge Answer Basis**:
+The declared basis of one Knowledge Conversation answer: curated evidence,
+conversation-context clarification, or model knowledge without knowledge-base evidence.
+_Avoid_: confidence score, source type, grounding status
+
 **Context Snapshot**:
 The immutable Paper Version, Summary Revision, Extraction Run, Repository Snapshots, and Knowledge Corpus Manifest available to a Conversation.
 _Avoid_: Current context

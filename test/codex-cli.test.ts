@@ -449,6 +449,129 @@ process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({ answer: 
     } finally { process.env.PATH = originalPath; }
   });
 
+  it("registers invocation-local curated tools and accepts a citation-free model fallback", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-fake-curated-mcp-"));
+    const layout = initializeDataRoot(join(directory, "data"));
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+const configs = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
+if (!configs.includes('approval_policy="never"')) process.exit(71);
+const curated = configs.find((value) => value.startsWith("mcp_servers.curated="));
+if (!curated || !curated.includes("curated-knowledge-mcp-server.ts") || !curated.includes("command=")) process.exit(72);
+if (!configs.some((value) => value.includes("shell_environment_policy.exclude=") &&
+  value.includes("*SCHOLARLOOM_CURATED*"))) process.exit(73);
+if (process.env.SCHOLARLOOM_CURATED_BINDING_FILE) process.exit(74);
+const bindingMatch = /env=\\{SCHOLARLOOM_CURATED_BINDING_FILE=("(?:[^"\\\\]|\\\\.)*")\\}/.exec(curated);
+if (!bindingMatch) process.exit(75);
+const binding = JSON.parse(bindingMatch[1]);
+if (!fs.existsSync(binding)) process.exit(76);
+const parsed = JSON.parse(fs.readFileSync(binding, "utf8"));
+if (parsed.attemptId !== "attempt:curated" || parsed.jobRunId !== "job:curated" || parsed.runEpoch !== 1) process.exit(77);
+const commandMatch = /command=("(?:[^"\\\\]|\\\\.)*")/.exec(curated);
+const argsMatch = /args=(\\[[^\\]]*\\])/.exec(curated);
+if (!commandMatch || !argsMatch) process.exit(78);
+const mcp = spawn(JSON.parse(commandMatch[1]), JSON.parse(argsMatch[1]), {
+  cwd: args[args.indexOf("--cd") + 1],
+  env: { ...process.env, SCHOLARLOOM_CURATED_BINDING_FILE: binding },
+  stdio: ["pipe", "pipe", "pipe"],
+});
+let buffer = "";
+let stderr = "";
+const pending = new Map();
+mcp.stdout.on("data", (chunk) => {
+  buffer += chunk.toString();
+  const lines = buffer.split("\\n");
+  buffer = lines.pop();
+  for (const line of lines) {
+    if (!line) continue;
+    const response = JSON.parse(line);
+    pending.get(response.id)?.(response);
+    pending.delete(response.id);
+  }
+});
+mcp.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+function request(id, method, params) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("mcp-timeout:" + stderr)), 5_000);
+    pending.set(id, (response) => { clearTimeout(timer); resolve(response); });
+    mcp.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\\n");
+  });
+}
+const output = args[args.indexOf("--output-last-message") + 1];
+process.stdin.resume();
+process.stdin.on("end", async () => {
+  try {
+    const initialized = await request(1, "initialize", { protocolVersion: "2024-11-05", capabilities: {},
+      clientInfo: { name: "fixture-codex", version: "1" } });
+    if (initialized.error) throw new Error("mcp-initialize-failed");
+    mcp.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\\n");
+    const listed = await request(2, "tools/list", {});
+    const names = listed.result?.tools?.map((tool) => tool.name).sort();
+    if (JSON.stringify(names) !== JSON.stringify([
+      "open_curated_source", "search_curated_knowledge", "verify_curated_citation",
+    ])) throw new Error("mcp-tools-missing");
+    mcp.kill("SIGTERM");
+    fs.writeFileSync(output, JSON.stringify({
+      answerBasis: "model-knowledge", coverage: "none", directAnswer: "知识库没有可用证据，这是通用回答。",
+      claims: [], disagreements: [], unknowns: [], citations: [],
+      retrievalSummary: { searched: false, queryCount: 0, candidateCount: 0, openedSourceCount: 0,
+        usedSourceCount: 0, budgetExhausted: false, projectionStale: false, lastSuccessfulAt: null }
+    }));
+  } catch (error) {
+    mcp.kill("SIGTERM");
+    process.stderr.write(String(error));
+    process.exit(79);
+  }
+});
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      const runner = new CodexCliRunner({ canaries: false, runtimeRoot: layout.tmpRoot, storageLayout: layout });
+      await expect(runner.answer({
+        question: "uncovered", conversation: [], attemptId: "attempt:curated", jobRunId: "job:curated",
+        runEpoch: 1, signal: new AbortController().signal,
+      })).resolves.toMatchObject({ answerBasis: "model-knowledge", citations: [],
+        retrievalSummary: { searched: false } });
+      expect(runner.runtimeStatus().capabilityChecks.agenticCurated.status).toBe("passed");
+      await expect(readdir(join(layout.tmpRoot, "curated-bindings"))).resolves.toEqual([]);
+    } finally { process.env.PATH = originalPath; }
+  }, 10_000);
+
+  it("fails closed before generation when invocation-local curated tools cannot start", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scholarloom-curated-capability-failure-"));
+    const layout = initializeDataRoot(join(directory, "data"));
+    const executable = join(directory, "codex");
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--version") { process.stdout.write("codex-cli 0.145.0\\n"); process.exit(0); }
+const output = args[args.indexOf("--output-last-message") + 1];
+process.stdin.resume();
+process.stdin.on("end", () => fs.writeFileSync(output, JSON.stringify({
+  answerBasis: "model-knowledge", coverage: "none", directAnswer: "不应生成", claims: [],
+  disagreements: [], unknowns: [], citations: [], retrievalSummary: { searched: false, queryCount: 0,
+    candidateCount: 0, openedSourceCount: 0, usedSourceCount: 0, budgetExhausted: false,
+    projectionStale: false, lastSuccessfulAt: null }
+})));
+`, "utf8");
+    await chmod(executable, 0o700);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    try {
+      const runner = new CodexCliRunner({ canaries: false, storageLayout: layout,
+        curatedKnowledgeLimits: { searchCalls: 9 } });
+      await expect(runner.answer({ question: "ADEPT", conversation: [], attemptId: "attempt:invalid-limit",
+        jobRunId: "job:invalid-limit", runEpoch: 1, signal: new AbortController().signal }))
+        .rejects.toThrow("curated-mcp-capability-unavailable");
+      expect(runner.runtimeStatus().capabilityChecks.agenticCurated.status).toBe("failed");
+    } finally { process.env.PATH = originalPath; }
+  }, 10_000);
+
   it("accepts a newer Codex CLI after running the launch canary through the same native permission profile", async () => {
     const directory = await mkdtemp(join(tmpdir(), "scholarloom-sandbox-codex-path-"));
     const workspace = join(directory, "workspace");

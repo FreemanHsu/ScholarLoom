@@ -1,4 +1,4 @@
--- ScholarLoom SQLite target schema v1.1
+-- ScholarLoom SQLite target schema v1.2
 -- This is the reviewed target model. Slice migrations introduce only the tables they use.
 -- Designed for SQLite 3.37+ (STRICT tables) with FTS5/trigram enabled.
 -- Timestamps are application-supplied ISO-8601 UTC strings unless a default is used.
@@ -502,6 +502,148 @@ CREATE TABLE messages (
 CREATE UNIQUE INDEX messages_one_assistant_reply
     ON messages(in_reply_to_message_id)
     WHERE role = 'assistant' AND in_reply_to_message_id IS NOT NULL;
+
+-- Global Knowledge Conversations are independent from Paper-scoped conversations.
+-- Only a successfully validated turn creates knowledge_messages.
+CREATE TABLE knowledge_conversations (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT
+) STRICT;
+
+CREATE INDEX idx_knowledge_conversations_activity
+    ON knowledge_conversations(status, updated_at DESC, id);
+
+CREATE TABLE knowledge_messages (
+    id TEXT PRIMARY KEY,
+    knowledge_conversation_id TEXT NOT NULL REFERENCES knowledge_conversations(id) ON DELETE RESTRICT,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    reply_to_message_id TEXT REFERENCES knowledge_messages(id) ON DELETE RESTRICT,
+    content TEXT NOT NULL,
+    answer_basis TEXT CHECK (
+        answer_basis IS NULL OR answer_basis IN ('curated-evidence', 'conversation-context', 'model-knowledge')
+    ),
+    coverage TEXT CHECK (
+        coverage IS NULL OR coverage IN ('supported', 'partial', 'none', 'conflicting')
+    ),
+    structured_answer_json TEXT CHECK (
+        structured_answer_json IS NULL OR json_valid(structured_answer_json)
+    ),
+    created_at TEXT NOT NULL,
+    UNIQUE (knowledge_conversation_id, ordinal),
+    CHECK (
+        (role = 'user' AND reply_to_message_id IS NULL AND answer_basis IS NULL
+            AND coverage IS NULL AND structured_answer_json IS NULL)
+        OR
+        (role = 'assistant' AND reply_to_message_id IS NOT NULL AND answer_basis IS NOT NULL
+            AND coverage IS NOT NULL AND structured_answer_json IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TRIGGER knowledge_messages_reply_owner
+BEFORE INSERT ON knowledge_messages
+WHEN NEW.role = 'assistant' AND NOT EXISTS (
+    SELECT 1 FROM knowledge_messages parent
+    WHERE parent.id = NEW.reply_to_message_id
+      AND parent.knowledge_conversation_id = NEW.knowledge_conversation_id
+      AND parent.role = 'user'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge-message-reply-invalid');
+END;
+
+CREATE TRIGGER knowledge_messages_no_update
+BEFORE UPDATE ON knowledge_messages
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge-message-immutable');
+END;
+
+CREATE TRIGGER knowledge_messages_no_delete
+BEFORE DELETE ON knowledge_messages
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge-message-immutable');
+END;
+
+CREATE TABLE knowledge_turn_attempts (
+    id TEXT PRIMARY KEY,
+    job_run_id TEXT NOT NULL UNIQUE REFERENCES job_runs(id) ON DELETE RESTRICT,
+    knowledge_conversation_id TEXT REFERENCES knowledge_conversations(id) ON DELETE RESTRICT,
+    submission_id TEXT NOT NULL UNIQUE,
+    cancel_idempotency_key TEXT UNIQUE,
+    question_hash TEXT NOT NULL,
+    run_epoch INTEGER NOT NULL DEFAULT 0 CHECK (run_epoch >= 0),
+    state TEXT NOT NULL CHECK (state IN ('running', 'succeeded', 'failed', 'canceled', 'interrupted')),
+    user_message_id TEXT REFERENCES knowledge_messages(id) ON DELETE RESTRICT,
+    assistant_message_id TEXT REFERENCES knowledge_messages(id) ON DELETE RESTRICT,
+    error_code TEXT,
+    error_detail TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    CHECK (
+        (state = 'succeeded' AND knowledge_conversation_id IS NOT NULL
+            AND user_message_id IS NOT NULL AND assistant_message_id IS NOT NULL)
+        OR
+        (state <> 'succeeded' AND user_message_id IS NULL AND assistant_message_id IS NULL)
+    )
+) STRICT;
+
+CREATE INDEX idx_knowledge_turn_attempts_conversation
+    ON knowledge_turn_attempts(knowledge_conversation_id, created_at DESC);
+
+-- Immutable, invocation-verified curated evidence committed with a successful answer.
+CREATE TABLE knowledge_evidence_receipts (
+    id TEXT PRIMARY KEY,
+    assistant_message_id TEXT NOT NULL REFERENCES knowledge_messages(id) ON DELETE RESTRICT,
+    job_run_id TEXT NOT NULL REFERENCES job_runs(id) ON DELETE RESTRICT,
+    run_epoch INTEGER NOT NULL CHECK (run_epoch >= 1),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 20),
+    source_type TEXT NOT NULL CHECK (source_type IN ('summary', 'takeaway', 'topic-knowledge')),
+    source_id TEXT NOT NULL,
+    source_revision_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+    source_title TEXT NOT NULL,
+    trust_label TEXT NOT NULL CHECK (trust_label IN ('generated-from-primary-source', 'user-confirmed')),
+    locator_json TEXT NOT NULL CHECK (json_valid(locator_json)),
+    quote_text TEXT NOT NULL,
+    why_selected TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (assistant_message_id, ordinal),
+    UNIQUE (job_run_id, run_epoch, ordinal)
+) STRICT;
+
+CREATE INDEX idx_knowledge_evidence_receipts_source
+    ON knowledge_evidence_receipts(source_type, source_id, source_revision_id);
+
+CREATE TRIGGER knowledge_evidence_receipts_assistant_owner
+BEFORE INSERT ON knowledge_evidence_receipts
+WHEN NOT EXISTS (
+    SELECT 1 FROM knowledge_turn_attempts attempt
+    JOIN knowledge_messages message ON message.id = attempt.assistant_message_id
+    WHERE attempt.job_run_id = NEW.job_run_id
+      AND attempt.assistant_message_id = NEW.assistant_message_id
+      AND attempt.run_epoch = NEW.run_epoch
+      AND attempt.state = 'succeeded'
+      AND message.role = 'assistant'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge-evidence-receipt-owner-invalid');
+END;
+
+CREATE TRIGGER knowledge_evidence_receipts_no_update
+BEFORE UPDATE ON knowledge_evidence_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge-evidence-receipt-immutable');
+END;
+
+CREATE TRIGGER knowledge_evidence_receipts_no_delete
+BEFORE DELETE ON knowledge_evidence_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge-evidence-receipt-immutable');
+END;
 
 CREATE TABLE conversation_turn_attempts (
     job_run_id TEXT PRIMARY KEY REFERENCES job_runs(id),

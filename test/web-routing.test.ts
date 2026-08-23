@@ -8,7 +8,7 @@ import { createApp } from "../src/app.js";
 import { initializeDataRoot } from "../src/storage/layout.js";
 
 describe("browser route delivery", () => {
-  it("serves the SPA shell for a direct Paper URL without masking unknown API routes", async () => {
+  it("serves the SPA shell for direct Paper and Knowledge Question URLs without masking unknown API routes", async () => {
     const root = await mkdtemp(join(tmpdir(), "scholarloom-web-routing-"));
     const webRoot = join(root, "web");
     await mkdir(webRoot);
@@ -27,6 +27,9 @@ describe("browser route delivery", () => {
     expect(page.statusCode).toBe(200);
     expect(page.headers["content-type"]).toContain("text/html");
     expect(page.body).toContain("ScholarLoom route shell");
+    const questions = await app.inject({ method: "GET", url: "/questions/knowledge%3Afixture" });
+    expect(questions.statusCode).toBe(200);
+    expect(questions.body).toContain("ScholarLoom route shell");
 
     const api = await app.inject({ method: "GET", url: "/api/not-real" });
     expect(api.statusCode).toBe(404);

@@ -1,11 +1,12 @@
 # ScholarLoom v1 System Architecture
 
 - Status: Accepted for implementation
-- Date: 2026-07-19
+- Date: 2026-08-22
 - Product contract: [`PRD.md`](PRD.md)
 - Data contract: [`data-model.md`](data-model.md)
 - SQLite design: [`sqlite-schema.sql`](sqlite-schema.sql)
 - First slice: [`plans/implementation-slice-001.md`](plans/implementation-slice-001.md)
+- Accepted Knowledge Question extension: [`knowledge-question-feature-design.md`](knowledge-question-feature-design.md)
 
 ## 1. Architectural outcome
 
@@ -50,7 +51,7 @@ module with a small interface, not a separately deployed service.
 | Database | SQLite in WAL mode through `better-sqlite3` | Local durability, transactions, FTS5, no database daemon |
 | Migrations | Ordered raw SQL migrations | The reviewed SQL contract remains authoritative; no ORM schema shadow |
 | PDF | Server-side PDF.js extraction plus Chromium native viewer | Preserve native selection, search, print, accessibility, and cached Range delivery |
-| Search | Separate curated and working SQLite FTS5 projections | Entry Agent cannot accidentally query Paper-working rows |
+| Search | Separate curated and working SQLite FTS5 projections | Knowledge Question tools cannot accidentally query Paper-working rows |
 | AI runtime | Installed Codex CLI through `codex exec` | Matches the product constraint and reuses local Codex authentication |
 | Progress | Server-Sent Events | One-way job and conversation progress without WebSocket complexity |
 | Tests | Vitest + temporary SQLite/filesystem; Playwright for one browser journey | Test through the same module and HTTP interfaces used by callers |
@@ -109,7 +110,7 @@ flowchart TD
     HTTP --> PW["PaperWorkspace"]
     HTTP --> PC["PaperConversation"]
     HTTP --> KR["KnowledgeReview"]
-    HTTP --> EA["EntryAgent"]
+    HTTP --> KQ["KnowledgeConversation"]
 
     PI --> JE["JobEngine"]
     PI --> PL["PaperLibrary"]
@@ -122,8 +123,11 @@ flowchart TD
     TD --> PR
     KR --> PR
     KR --> KW["KnowledgeWriter"]
-    EA --> SI["SearchIndex"]
-    EA --> CR
+    KQ --> JE
+    KQ --> KAR["KnowledgeAnswerRunner"]
+    KAR --> CKR["CuratedKnowledgeReader"]
+    CKR --> SI["SearchIndex"]
+    KAR --> CR
 
     JE --> AS["ArtifactStore"]
     JE --> CR
@@ -286,17 +290,46 @@ The production adapter is Codex CLI and the deterministic adapter powers fixture
 The user-facing capability remains disabled until the committed quality evaluation
 report records a passing blind grade.
 
-### 4.5 EntryAgent
+### 4.5 KnowledgeConversation
 
 Interface:
 
 ```ts
-ask(input: { question: string }): AsyncIterable<EntryAgentEvent>
+submit(input: {
+  conversationId?: string;
+  question: string;
+  idempotencyKey: string;
+}): KnowledgeAttemptHandle
+cancel(attemptId: string): Promise<void>
+read(conversationId: string): KnowledgeConversationReadModel
+list(view: "active" | "archived"): KnowledgeConversationSummary[]
+rename(conversationId: string, title: string): void
+archive(conversationId: string): void
+restore(conversationId: string): void
 ```
 
-In v1 it can search only `global-curated`: active Summary Revisions and confirmed
-Takeaway/Knowledge Revisions. It returns source IDs with every material answer. It
-has no interface for raw PDF, Message, Annotation, Conversation Digest, or code.
+This deep module replaces the browser's one-shot Entry Agent flow. It owns turn
+admission, bounded successful context, Job/Agent execution, automatic retry epochs,
+successful-turn-only Message/Receipt commit, archive lifecycle, and read models.
+Paper-scoped Conversation remains a separate module with frozen Context Snapshot
+semantics.
+
+`KnowledgeAnswerRunner` is an internal seam with production Codex CLI and deterministic
+fixture adapters. One execution epoch exposes only invocation-local
+`search_curated_knowledge`, `open_curated_source`, and `verify_curated_citation` tools.
+Codex decides whether and how to search; the host does not implement a ReAct loop,
+fixed query decomposition, or a fixed source count.
+The invocation launch descriptor owns the absolute TypeScript loader, private binding
+environment, and Codex MCP configuration as one unit. Before generation it starts the
+same local server contract and requires an exact `initialize` / `tools/list` handshake;
+the response must confirm the negotiated protocol, server identity, capabilities, and
+the exact three-tool list. A malformed response or missing curated tool is a retryable
+execution failure, never a no-result fallback.
+
+`CuratedKnowledgeReader` is the authority seam for those tools. Its production adapter
+queries only `global-curated` and verifies canonical Markdown hashes; its fixture
+adapter uses real temporary SQLite/filesystem data. It has no interface for raw PDF,
+Paper Message, Annotation, Conversation Digest, code, Proposal, or operational rows.
 
 ### 4.6 JobEngine
 
@@ -321,6 +354,14 @@ Initial concurrency policy:
 - KnowledgeWriter: exactly 1.
 
 Limits are configuration, not interface.
+
+Knowledge Question uses one Job submission with one initial execution epoch and at
+most three automatic retry epochs. Only retryable subprocess, timeout, curated-reader,
+or validated-output failures advance the epoch. Invocation-local curated MCP startup
+failures are treated as retryable subprocess failures. User cancellation, static Codex
+capability failure, and data-root failure terminate immediately. Because the pending
+question body is not durable before success, startup marks an abandoned execution
+interrupted and never silently redispatches it.
 
 ### 4.7 ArtifactStore
 
@@ -351,9 +392,10 @@ An index failure marks the projection stale; it does not roll back valid Markdow
 
 ### 4.9 SearchIndex
 
-`EntryAgentSearch` is separate from Discussion evidence exploration. It has no corpus
-parameter and queries only the curated projection. Discussion builds a frozen,
-content-addressed Evidence Workspace and lets one Codex process explore it natively.
+`CuratedKnowledgeReader` is separate from Discussion evidence exploration. It has no
+caller-selectable corpus parameter and queries only the curated projection. Discussion
+builds a frozen, content-addressed Evidence Workspace and lets one Codex process
+explore it natively.
 
 Interface:
 
@@ -375,6 +417,8 @@ Only dependencies that genuinely vary receive exposed internal ports.
 |---|---|---|
 | `PaperSource` | arXiv and safe direct-PDF adapters | deterministic fixture adapters |
 | `AgenticEvidenceRunner` | sandboxed Codex CLI JSONL subprocess | deterministic fake |
+| `CuratedKnowledgeReader` | eligible SQLite FTS5 rows plus canonical vault Markdown | seeded real temporary SQLite/vault data root |
+| `KnowledgeAnswerRunner` | sandboxed Codex CLI with invocation-local curated MCP tools | deterministic adaptive fixture runner |
 | `Clock` | system clock | fixed clock |
 | `IdGenerator` | UUIDv7 generator | deterministic sequence |
 
@@ -388,14 +432,15 @@ The command surface and native permission profiles were verified against
 `codex-cli 0.144.6`. This is a minimum tested version, not an exact allowlist:
 newer versions are accepted automatically only after the application-owned capability
 canaries pass. An older or unparseable version, or any canary failure, fails closed.
-Structured one-shot and Agentic Evidence capability checks are recorded separately;
-the aggregate status is `partial` until both profiles have passed in the current
-process. A successful check for one profile must not imply that the other passed.
+Structured one-shot, Agentic Evidence, and Agentic Curated capability checks are
+recorded separately and shown separately in Settings; the aggregate status is `partial`
+until all required profiles have passed in the current process. A successful check for
+one profile must not imply that another passed.
 
 An application-owned Agent Configuration Registry is the single source for both
 execution and the read-only `/settings` snapshot. Every launch explicitly passes its
 model and `model_reasoning_effort`: Paper Summary, Paper Version Diff, and Paper
-Taxonomy use `gpt-5.6-sol`/`high`; Agentic Evidence, Entry Agent, Paper Organization,
+Taxonomy use `gpt-5.6-sol`/`high`; Agentic Evidence, Knowledge Question, Entry Agent compatibility, Paper Organization,
 Takeaway Selection, and legacy Paper Chat use `gpt-5.6-sol`/`medium`. Agent Run
 lineage records these values, the observed Codex version, and the configuration
 version when available; historical unknowns are not inferred.
@@ -405,7 +450,8 @@ CodexRunner accepts a typed task rather than an arbitrary shell command:
 ```ts
 type CodexTask<T> = {
   kind: "paper-summary" | "paper-version-diff" | "agentic-evidence" | "entry-answer" |
-    "paper-organization" | "paper-taxonomy" | "takeaway-distillation" | "paper-chat";
+    "knowledge-answer" | "paper-organization" | "paper-taxonomy" |
+    "takeaway-distillation" | "paper-chat";
   contextManifest: ContextManifest;
   instructions: string;
   outputSchema: JsonSchema<T>;
@@ -513,8 +559,13 @@ The Web module exposes use-case-shaped endpoints rather than CRUD for every tabl
 | POST | `/api/proposals/:id/diff/retry` | Idempotently reserve and retry the best-effort semantic version digest |
 | POST | `/api/proposals/:id/decisions` | Accept, edit, or reject |
 | POST | `/api/proposals/:id/open-source` | Record source-open and return a fixed external arXiv URL or canonical local PDF Artifact URL |
-| POST | `/api/entry-agent/questions` | Query global-curated knowledge |
-| POST | `/api/entry-agent/sources/:type/:id/open` | Record an Entry result source-open event |
+| GET | `/api/knowledge-conversations?view=active|archived` | List Knowledge Conversations |
+| POST | `/api/knowledge-conversations/turns` | Submit a first turn without precreating an empty Conversation |
+| GET | `/api/knowledge-conversations/:id` | Restore successful Messages, Receipts, and source availability |
+| POST | `/api/knowledge-conversations/:id/turns` | Submit a follow-up turn |
+| GET | `/api/knowledge-question-attempts/:id` | Poll sanitized Attempt state |
+| POST | `/api/knowledge-question-attempts/:id/cancel` | Cancel without committing a Knowledge Message |
+| POST | `/api/entry-agent/sources/:type/:id/open` | Legacy source-open telemetry retained for historical Takeaway quality metrics |
 | GET | `/api/metrics/takeaway-distillation` | Read Selection, review, duplicate, coverage, retry, and source-open metrics |
 
 Commands accept an `Idempotency-Key`. Errors use stable problem codes such as
@@ -632,7 +683,7 @@ may cover several revisions, while byte-exact Markdown content hashes remain ide
 
 The index outbox incrementally updates both the working and curated projections. A
 full curated-projection rebuild from active Summary and confirmed knowledge revisions
-is required from day one. If the curated outbox is behind, Entry Agent answers include
+is required from day one. If the curated outbox is behind, Knowledge Question answers include
 the last successful projection timestamp and a staleness notice. A revision activation
 enqueues removal of its superseded curated row in the same metadata transaction.
 
@@ -678,7 +729,7 @@ knowledge policy.
 - multi-process workers and distributed queues;
 - vector retrieval and reranking;
 - automatic discovery and recommendation;
-- entry Agent downward retrieval;
+- Knowledge Question retrieval below `global-curated` into PDF, Paper Messages, or code;
 - sandboxed execution of paper code;
 - cloud sync and multi-user authorization;
 - automatic cross-Paper conflict synthesis.

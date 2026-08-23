@@ -1,12 +1,13 @@
 # ScholarLoom Frontend Information Architecture
 
 - Status: Accepted baseline
-- Date: 2026-07-20
-- Scope: Browser information architecture and page logic after implementation slice 001
+- Date: 2026-08-22
+- Scope: Browser information architecture including the accepted Knowledge Question extension
 - Product contract: [`PRD.md`](PRD.md)
 - Data contract: [`data-model.md`](data-model.md)
 - System architecture: [`architecture.md`](architecture.md)
 - Accepted extension: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
+- Accepted Knowledge Question extension: [`knowledge-question-feature-design.md`](knowledge-question-feature-design.md)
 
 ## 1. Purpose
 
@@ -29,7 +30,8 @@ The v1 top-level destinations are:
 
 | Destination | Canonical URL | Responsibility |
 |---|---|---|
-| Research Home | `/` | Global question, continue reading, background work, and pending-review entry points |
+| Research Home | `/` | Start a Knowledge Question, continue reading, background work, and pending-review entry points |
+| Knowledge Question | `/questions` | New and saved global Knowledge Conversations, adaptive curated retrieval, sources, and follow-up |
 | Paper Library | `/papers` | Search, filter, sort, and open all Papers |
 | Review Center | `/reviews` | Review Proposals across Papers and Proposal types |
 
@@ -47,6 +49,8 @@ URLs combine stable domain-object paths with recoverable view state:
 
 | Purpose | URL shape |
 |---|---|
+| Knowledge Question landing/new draft | `/questions` |
+| Saved Knowledge Conversation | `/questions/:knowledgeConversationId` |
 | Paper Workspace | `/papers/:paperId` |
 | Paper Conversation | `/papers/:paperId/conversations/:conversationId` |
 | Proposal detail | `/reviews/:proposalId` |
@@ -92,7 +96,7 @@ enumeration. Historical run values that were not recorded remain explicitly unkn
 
 The Home is an action-oriented research overview. Its priority order is:
 
-1. Global Entry Agent question input and latest result.
+1. Knowledge Question input that enters the dedicated Conversation flow.
 2. Continue reading recent Papers.
 3. Background imports and processing that are running or need attention.
 4. Pending review summary and entry to Review Center.
@@ -101,24 +105,30 @@ The Home does not duplicate the complete Paper Library or Review Center. Empty
 sections should collapse or show one concise action rather than leave dashboard
 chrome with no content.
 
-### 4.1 Entry Agent behavior
+### 4.1 Knowledge Question entry behavior
 
-The v1 Entry Agent performs a single research query at a time. It may preserve a
-recent-query list, but it does not create an implicit global Conversation or carry
-hidden context from one question to the next.
+Research Home contains a concise input, not an embedded result workspace. Submit
+navigates to `/questions`, starts a transient first turn, and replaces the route with
+`/questions/:knowledgeConversationId` only after a successful answer commit. The other
+accepted new-Conversation entry is the `新建对话` action on `/questions`. Paper, Topic,
+Summary, and Review pages do not start Knowledge Conversations in this release.
 
-Its retrieval boundary remains `global-curated` only:
+The Knowledge Question page carries visible successful context from one turn to the
+next. Codex decides per turn whether to:
 
-- active Summary Revisions;
-- confirmed Takeaway Revisions;
-- active confirmed Knowledge Revisions when those types are implemented.
+- clarify or transform existing Conversation content without search;
+- search the current `global-curated` corpus iteratively;
+- answer from model knowledge when the knowledge base has no useful evidence.
 
-Each answer distinguishes sources and Agent inference, displays source cards and
-uncovered scope, and links back to the relevant Summary, Takeaway, or eligible
-Topic knowledge revision. A stale curated
-projection may serve the last reliable result, but the UI must disclose staleness and
-the last successful projection time. Saving a high-value answer always creates a
-Proposal; the answer itself is not confirmed knowledge.
+The browser never claims that a no-search general answer is grounded. It displays
+`通用回答 · 无知识库证据`, has no source marker, and retains uncertainty. Grounded
+answers distinguish source support, multi-source agreement, Agent inference,
+disagreement, and uncovered scope. A stale curated projection may serve the last
+reliable result, but the UI discloses staleness and the last successful projection
+time.
+
+Successful Messages are process history, not confirmed knowledge. Saving a high-value
+answer creates a Proposal; the answer itself is not confirmed knowledge.
 
 ## 5. Paper Library
 
@@ -237,7 +247,7 @@ states require browser confirmation. Removed links disappear from the current li
 retain historical identity and snapshot data, and may be restored only by manually
 adding the canonical URL again. When available, the fixed Repository Snapshot is a
 source only for Conversations created afterward; the drawer explicitly states that old
-frozen Conversations do not change. Code never enters the v1 Entry Agent corpus.
+frozen Conversations do not change. Code never enters the Knowledge Question curated corpus.
 
 ## 8. Import and background processing
 
@@ -294,7 +304,7 @@ localize errors**.
 - Repository failure preserves Summary reading and discussion that does not require
   code.
 - SSE loss shows reconnecting state while durable reads remain available.
-- Curated-index staleness preserves last-good Entry Agent results with disclosure.
+- Curated-index staleness preserves last-good Knowledge Question search results with disclosure.
 - A blocking error page is reserved for first load without usable content, missing
   objects, authorization/access failure, or a scoped integrity incident.
 
@@ -302,7 +312,7 @@ Empty states identify why the collection is empty and provide one relevant actio
 
 - no Papers: invoke Import;
 - no pending reviews: return to reading or Discussion;
-- no recent queries: ask the first global question;
+- no Knowledge Conversations: ask the first global question;
 - no confirmed Takeaways: start or continue a Paper Conversation;
 - no explicit repository link: explain the limitation without claiming code does not
   exist.
@@ -310,7 +320,7 @@ Empty states identify why the collection is empty and provide one relevant actio
 ## 11. Responsive and private-deployment scope
 
 The complete experience is laptop-first, targeting approximately 1280 px and wider.
-Narrower windows retain Home, Library, Review, and single-column Summary behavior.
+Narrower windows retain Home, Knowledge Question, Library, Review, and single-column Summary behavior.
 PDF verification switches between Summary and PDF rather than forcing an unreadable
 split view.
 
@@ -320,15 +330,16 @@ complete Workspace are not mobile commitments. Native mobile applications, offli
 reading, public access, and multi-user behavior remain out of scope. Tailscale Serve
 latency and reconnects must not erase local drafts or misrepresent durable state.
 
-## 12. Next frontend vertical slice
+## 12. Implemented Research Navigation baseline
 
-The next accepted slice is **Recoverable Research Navigation**.
+The implemented baseline is **Recoverable Research Navigation**. The next accepted
+Knowledge Question work is defined by Slices 014–016.
 
 ### Included
 
 - real routes and global navigation for `/`, `/papers`, `/papers/:paperId`, and
   `/reviews`;
-- a Research Home with prominent Entry Agent access and concise continue-reading,
+- a Research Home with prominent Knowledge Question access and concise continue-reading,
   processing, and pending-review entry points;
 - a global Import command that navigates to the resolved Paper while work continues
   in the background;
@@ -389,3 +400,38 @@ Missing derived images are rebuilt from the frozen PDF. A renderer/settings mism
 is shown as `renderer-unavailable`; a rebuilt hash mismatch is shown as `render-drift`.
 Both states fail closed and must not display the image as verified. Visual Activity
 and verified Visual Evidence use distinct labels and styling.
+
+## 14. Knowledge Question extension
+
+The top navigation order is `研究首页 / 知识问答 / 论文库 / 审核中心`; Settings remains
+secondary. `/questions` uses a two-column laptop layout:
+
+- left: new Conversation, recent active list, and archived-list entry;
+- right: Conversation title/actions, Message timeline, structured answer, retrieval
+  disclosure, and persistent composer.
+
+The answer surface leads with a direct answer and may include route comparison,
+disagreement, and unknown sections. Claim rows use explicit labels for source support,
+source consensus, Agent inference, or insufficient evidence. Source markers open a
+right-side drawer containing the exact verified Receipt and a canonical-source action.
+The retrieval summary stays collapsed by default and shows query/candidate/open/used
+counts rather than a fixed source target.
+
+New Conversation is initially browser-local. A successful first turn creates its
+stable route; cancel/final failure leaves the user on the unsaved new state. Follow-up
+success appends both Messages. While a turn runs, the composer offers cancel and
+sanitized progress. After the initial execution, up to three automatic retries occur
+without creating duplicate visible Messages; exhaustion shows one error and a manual
+resubmit action.
+
+Rename, archive, archived-list, and restore remain planned for Slice 016. Hard delete is absent.
+After that lifecycle lands, archived Conversations are read-only until restored. Missing/purged/integrity-withheld
+sources remain visible as gray non-buttons. Superseded but retained historical sources
+remain openable. The page never shows an evidence-update banner or rewrites an old
+answer after knowledge changes.
+
+At narrow widths the Conversation sidebar becomes a drawer, title actions collapse to
+icons with accessible labels, claim rows stack, the source drawer becomes full-screen,
+and the composer remains reachable. The primary mobile commitment is reading,
+follow-up, source inspection, cancel, archive, and restore; dense side-by-side source
+comparison is laptop-first.

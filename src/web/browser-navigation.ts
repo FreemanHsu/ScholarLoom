@@ -15,7 +15,10 @@ export type PaperOrganizationViewState = {
   query: string;
 };
 
-export type BrowserRoute = { name: "home" | "reviews" | "settings" | "not-found" } | ({
+export type BrowserRoute = { name: "home" | "reviews" | "settings" | "not-found" } | {
+  name: "questions";
+  conversationId: string | null;
+} | ({
   name: "papers";
 } & PaperLibraryViewState) | {
   name: "paper-organization";
@@ -40,6 +43,18 @@ export type PaperViewState = Pick<Extract<BrowserRoute, { name: "paper" }>, "pdf
   repositoriesOpen?: boolean;
   returnTo?: string | null;
 };
+
+export function isCurrentKnowledgeRequest(requestGeneration: number, currentGeneration: number,
+  route: BrowserRoute, selectedConversationId: string | null): boolean {
+  return requestGeneration === currentGeneration && route.name === "questions"
+    && route.conversationId === selectedConversationId;
+}
+
+export function knowledgePollingDisposition(pollGeneration: number, currentGeneration: number,
+  route: BrowserRoute, submittedConversationId: string | null): "stale" | "observe" | "present" {
+  if (pollGeneration !== currentGeneration) return "stale";
+  return route.name === "questions" && route.conversationId === submittedConversationId ? "present" : "observe";
+}
 
 export function paperHref(paperId: string, view: PaperViewState = { pdfOpen: false, page: 1, anchor: null }): string {
   const query = new URLSearchParams();
@@ -83,6 +98,11 @@ export function paperOrganizationHref(view: PaperOrganizationViewState): string 
 
 export function readBrowserRoute(location: BrowserLocation): BrowserRoute {
   if (location.pathname === "/") return { name: "home" };
+  const questionMatch = /^\/questions(?:\/([^/]+))?$/.exec(location.pathname);
+  if (questionMatch) return {
+    name: "questions",
+    conversationId: questionMatch[1] ? decodeURIComponent(questionMatch[1]) : null,
+  };
   if (location.pathname === "/papers") {
     const query = new URLSearchParams(location.search);
     const view = query.get("view");

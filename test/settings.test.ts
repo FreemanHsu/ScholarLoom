@@ -38,6 +38,7 @@ describe("read-only Settings", () => {
           capabilityChecks: {
             structured: { status: "not-run", checkedAt: null },
             agenticEvidence: { status: "not-run", checkedAt: null },
+            agenticCurated: { status: "not-run", checkedAt: null },
           },
           checkedAt: "2026-07-30T08:00:00.000Z",
         }),
@@ -52,7 +53,7 @@ describe("read-only Settings", () => {
       loadedAt: "2026-07-30T08:05:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v7",
+        configurationVersion: "agent-configuration.v9",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: layout.root,
         codex: {
@@ -63,6 +64,7 @@ describe("read-only Settings", () => {
           capabilityChecks: {
             structured: { status: "not-run", checkedAt: null },
             agenticEvidence: { status: "not-run", checkedAt: null },
+            agenticCurated: { status: "not-run", checkedAt: null },
           },
           checkedAt: "2026-07-30T08:00:00.000Z",
         },
@@ -78,6 +80,8 @@ describe("read-only Settings", () => {
         { taskKind: "agentic-evidence", status: "enabled",
           configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
         { taskKind: "entry-answer", status: "enabled",
+          configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
+        { taskKind: "knowledge-answer", status: "enabled",
           configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
         { taskKind: "paper-organization", status: "enabled",
           configured: { model: "gpt-5.6-sol", reasoningEffort: "medium" } },
@@ -248,7 +252,7 @@ describe("read-only Settings", () => {
         model: "gpt-5.6-sol",
         reasoningEffort: "high",
         codexVersion: "0.145.0",
-        configurationVersion: "agent-configuration.v7",
+        configurationVersion: "agent-configuration.v9",
       });
     await app.close();
   });

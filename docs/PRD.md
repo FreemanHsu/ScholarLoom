@@ -1,8 +1,8 @@
 # ScholarLoom 产品需求文档
 
 - 状态：MVP 设计已固化，可进入实现
-- 版本：0.5
-- 日期：2026-07-19
+- 版本：0.6
+- 日期：2026-08-22
 - 目标用户：单一知识库所有者
 - 首期运行环境：Mac mini 本地服务；其他 Mac 通过 Tailscale Serve 的 tailnet 私有 HTTPS 地址在浏览器中访问
 - AI 执行环境：Codex CLI；允许将论文、代码和对话上下文发送给云端模型
@@ -10,6 +10,7 @@
 - v1 系统架构：[`docs/architecture.md`](architecture.md)
 - 第一条实现切片：[`docs/plans/implementation-slice-001.md`](plans/implementation-slice-001.md)
 - 前端信息架构：[`docs/frontend-information-architecture.md`](frontend-information-architecture.md)
+- Knowledge Question 功能设计：[`docs/knowledge-question-feature-design.md`](knowledge-question-feature-design.md)
 
 ## 1. 产品摘要
 
@@ -59,7 +60,8 @@ Wiki 式主题索引和全局 Agent 问答连接为一个持续演化的闭环�
 5. 将 Summary 和讨论中的稳定观点提炼为结构化知识，而非仅保存聊天记录。
 6. 同时维护显式引用关系和带证据、置信度的语义关系，形成可审查的知识图谱。
 7. 建立领域 → 方向 → 概念/问题 → 论文/讨论的分层索引，支持大规模知识检索。
-8. 提供一个全局 Agent 入口，以原文、摘要、历史讨论、代码和结构化知识为信源回答问题。
+8. 提供一个可连续追问的全局 Knowledge Question 入口；MVP 以 active Summary 与已确认知识
+   为可引用信源，并明确区分知识库证据、会话上下文和模型知识。
 
 ### 3.2 非目标
 
@@ -95,6 +97,10 @@ Wiki 式主题索引和全局 Agent 问答连接为一个持续演化的闭环�
   检索流程在数据层级完成设计后另行定义。
 - 入口 Agent 使用独立的已确认知识 FTS 投影；索引暂时落后时仍可回答，但必须提示
   “知识索引更新中”及最后成功更新时间。
+- 全局问答使用独立 Knowledge Conversation，不复用或放宽 Paper-scoped Conversation 的
+  Context Snapshot 约束。每轮由 Codex CLI 按需决定是否检索以及如何迭代检索。
+- 没有 curated evidence 时允许 Codex 正常回答，但必须标记为“通用回答 · 无知识库证据”，
+  且不得显示来源标记。
 - 外部 Markdown 编辑被保留并进入待确认的 reconciliation Proposal；与应用中写入竞争时
   才标记为冲突。未处理 30 天后从待处理队列归档，但永久保留且可重新打开。
 
@@ -137,9 +143,11 @@ Takeaway、Insight、问题、关系或概念”候选，保留来源消息和�
 
 ### 场景 E：跨论文和全局问答
 
-用户从知识库首页提出问题。MVP Agent 只检索 Paper Summary 和已确认的 Takeaway、
-Insight 及其他长期知识，给出带来源和不确定性的回答。PDF 原文、完整历史讨论和代码
-暂不进入入口 Agent 的检索范围；向下检索的层级与路由在完整数据层级确定后另行设计。
+用户从 Research Home 或独立的 Knowledge Question 页面开始一个可继续追问的
+Knowledge Conversation。Codex CLI 按问题复杂度决定复用上下文、检索 active Paper
+Summary/confirmed knowledge，或在没有知识库覆盖时给出清楚标记的通用回答。PDF 原文、
+完整历史讨论和代码暂不进入检索范围；每个成功的 grounded answer 固定实际使用来源，
+但后续 turn 使用当前 curated projection，不重写旧回答。
 
 ## 6. User Stories
 
@@ -213,8 +221,18 @@ Insight 及其他长期知识，给出带来源和不确定性的回答。PDF �
 48. 作为用户，我希望回答区分共识、分歧、个人历史观点和 Agent 新推断，以便正确理解结论性质。
 49. 作为用户，我希望查看回答实际使用了哪些材料以及为什么选择它们，以便评估检索质量。
 50. 作为用户，我希望把高价值回答保存为 Question、Concept 或 Synthesis，以便反哺知识库。
-51. 作为用户，我希望选择时间、主题、论文集合或信源类型作为查询范围，以便控制上下文。
-52. 作为用户，我希望系统在证据不足时明确说不知道并建议下一步检索或阅读，以免得到虚假确定性。
+51. 作为用户，我希望系统自动规划查询范围，并把我在自然语言中给出的时间、主题、Paper 或
+    信源要求作为约束或提示，以便知识库扩大后仍能正确路由。
+52. 作为用户，我希望系统在 curated evidence 不足时明确说明覆盖缺口，并可继续给出带
+    `无知识库证据` 标签的通用回答，以免把模型知识误认为个人知识库结论。
+53. 作为用户，我希望全局问答可以持续追问并保存成功历史，以便围绕同一研究问题逐步深入。
+54. 作为用户，我希望 Codex 自主判断是否需要检索，而不是每个简单问题都强制执行知识库搜索。
+55. 作为用户，我希望宽泛问题可以由 Codex 拆成多个检索子题并补充搜索，以免固定候选数量遗漏关键材料。
+56. 作为用户，我希望知识库没有结果时仍能获得 Codex 的通用回答，同时清楚知道它没有知识库证据。
+57. 作为用户，我希望取消或最终失败的 turn 不进入 Conversation 历史，以免留下不完整记录。
+58. 作为用户，我希望重命名、归档和恢复 Knowledge Conversation，以便管理长期问答历史。
+59. 作为用户，我希望失效来源保留为灰色历史标记但不可跳转，以便理解旧答案而不进入错误页面。
+60. 作为用户，我希望知识更新不自动改写或提示旧回答，以便历史回答保持当时语义。
 
 ## 7. 功能需求
 
@@ -324,16 +342,27 @@ Insight 及其他长期知识，给出带来源和不确定性的回答。PDF �
 - 系统生成区与用户编辑区需要明确边界，以防重建覆盖手工内容。
 - 索引更新应增量执行，并提供全量重建与一致性检查。
 
-### FR-11 MVP 入口 Agent
+### FR-11 Knowledge Question
 
 - 检索语料只包括 Paper Summary 和已确认的 Takeaway、Insight、Concept、Topic、Question、
   Synthesis 等长期知识。
 - 未确认候选、PDF 原文块、完整历史会话和 GitHub 代码不进入 MVP 入口 Agent 的检索语料。
 - 入口 Agent 只访问独立的 curated FTS 投影；不接受可切换到 `paper-working` 的检索参数。
 - 当 curated 投影有未处理 outbox 时，答案保留最后可靠结果并显示索引更新提示与时间戳。
-- 回答展示所用 Summary 或已确认知识，并区分作者主张、用户确认观点与 Agent 新推断。
+- Research Home 和独立 `知识问答` 页面是第一版仅有的两个新建入口；Home 提交后进入同一
+  Knowledge Conversation 流程。
+- 每轮由一个长期存活的 Codex CLI execution epoch 自主选择 context-only、curated search
+  或 model-knowledge，并可迭代调用受控的 search/open/verify 工具。
+- 应用不实现固定 query decomposition、host-side ReAct loop 或固定八来源候选规则；召回、
+  打开和最终 Receipt 数量只受配置型安全预算约束。
+- 回答展示所用 Summary 或已确认知识，并区分来源支持、多来源一致、Agent 推断、分歧与证据不足。
 - 用户可以沿回答来源进入对应 Paper Summary 或知识节点。
-- 数据层级、索引层级和向下检索流程完成专项设计前，不实现自动下钻。
+- 没有 curated evidence 时允许 `model-knowledge` 回答，但必须显示无知识库证据且没有来源标记。
+- 成功 turn 保存为独立 Knowledge Conversation；取消、最终失败和重启中断不保存该 turn 的
+  question/answer/source 内容。
+- 每次提交首次执行后最多自动重试三次；穷尽后显示错误并允许新的手动提交。
+- Knowledge Conversation 支持重命名、归档与恢复；第一版不提供 hard delete。
+- 数据层级、索引层级和向 PDF/Message/code 下钻流程完成专项设计前，不实现自动下钻。
 - 用户可把高价值回答送入新的 Takeaway/Insight 候选流程；仍需一键确认后才进入长期知识。
 
 ### FR-12 自动发现
@@ -409,9 +438,13 @@ archive 生命周期与 lineage 独立，legacy Conversation 保留 lineage 与�
 
 ### 9.5 全局问答
 
-- MVP 检索 Paper Summary 和已确认长期知识。
-- 回答主体之外展示“使用了哪些 Summary/知识”和“没有覆盖什么”。
+- 顶栏提供独立 `知识问答` destination；Research Home 提交问题后进入同一页面和 Conversation。
+- Codex 每轮按需决定复用上下文、检索 Paper Summary/已确认长期知识或给出通用回答。
+- Codex 可拆分子题并迭代检索；应用只提供 curated-only 工具、预算、引用校验和持久化。
+- 回答主体之外展示实际检索次数、候选/打开/使用来源数，以及“没有覆盖什么”。
 - 用户可沿引用进入 Summary 或对应知识节点。
+- 无检索结果时明确说明，并将继续回答标记为无知识库证据。
+- 只有成功 turn 进入历史；Conversation 可重命名、归档和恢复。
 - 高价值回答形成 Takeaway/Insight 候选，经一键确认后进入长期知识。
 - PDF、完整历史消息和代码的下钻检索明确延后，不在此阶段假定路由策略。
 
@@ -443,7 +476,8 @@ archive 生命周期与 lineage 独立，legacy Conversation 保留 lineage 与�
 
 - 粘贴 arXiv 链接后 2 秒内返回身份识别和任务状态。
 - 常规论文的可读解析结果目标在 2 分钟内可用，完整 Summary 目标在 5 分钟内可用。
-- 已建立索引的全局查询，首个答案反馈目标在 5 秒内出现。
+- 已建立索引的全局查询在 1 秒内显示排队/检索/回答活动；完整回答延迟按实际 Codex 与
+  检索轮次校准，不以牺牲证据覆盖换取固定 5 秒完成。
 - PDF 页面切换和证据跳转不应被后台模型任务阻塞。
 
 ### 11.3 可靠性
@@ -524,15 +558,17 @@ archive 生命周期与 lineage 独立，legacy Conversation 保留 lineage 与�
 - 手动添加或确认 detected candidate 后物化 GitHub 仓库，固定 commit，建立只读代码索引，
   使其可用于未来 Conversation。
 - 手动确认 Summary/讨论中的 Takeaway 与 Insight，并写入 Markdown 知识结构。
-- 一个最小入口 Agent，可检索 Paper Summary、已确认 Takeaway/Insight 及其来源。
-- 入口 Agent 不检索 PDF 原文、完整历史对话或代码；这些内容仅在 Paper-scoped Agent 中可用。
+- 一个最小 one-shot Entry Agent tracer，可检索 Paper Summary、已确认 Takeaway/Insight 及其来源。
+- Entry Agent tracer 不检索 PDF 原文、完整历史对话或代码；这些内容仅在 Paper-scoped Agent 中可用。
 - 基础全文/向量检索及可重建索引；完整图谱和 Wiki 不作为 Phase 1 验收前置条件。
 
 ### Phase 2：跨论文知识与全局 Agent
 
 - 显式引用图谱和可审核的语义关系。
 - Concept、Topic、Question、Synthesis 的自动候选与更新工作流。
-- 在数据层级专项设计完成后，再定义入口 Agent 的分层检索和检索轨迹。
+- 按 [`knowledge-question-feature-design.md`](knowledge-question-feature-design.md) 将 one-shot
+  Entry Agent 升级为独立 Knowledge Conversation 与 Codex-native curated tool loop；核心问答与
+  检索已交付，归档/恢复等剩余生命周期由 Slice 016 完成。
 - Wiki 导航、图谱浏览、知识质量检查。
 
 ### Phase 3：主动发现与持续演化
@@ -654,15 +690,15 @@ Phase 1 的范围已经确认以单篇论文深读闭环为中心；Phase 2 和 
 4. **历史对话隐私**：是否需要“保存但不参与全局检索”的会话或消息？
 5. **现有资产迁移**：是否已有 Zotero、Obsidian、PDF 文件夹或聊天记录需要首期导入？
 6. **成本与速度**：详细技术精读更偏向最高质量，还是需要为单篇论文设置时间/token 预算？
-7. **数据与检索层级**：在设计入口 Agent 下钻前，需要先确认 Artifact、Summary、Conversation、
-   Takeaway、Insight 与结构化知识之间的完整层级、生命周期和权威性。
+7. **向下检索层级**：Knowledge Question 的 curated-only Agent loop 已确认；未来若允许下钻
+   PDF、Paper Message 或代码，必须另行确认来源预算、隐私、冻结与 Evidence Receipt 语义。
 
 ## 18. Further Notes
 
 - “自动发现”与“知识库问答”共享 Interest、Topic 和 Retrieval 能力，但候选论文不应在
   用户确认前进入正式知识图谱，否则推荐噪声会变成知识噪声。
-- 完整聊天记录值得保留，但它与 Summary、Takeaway、Insight 的权威性和索引层级尚未
-  最终确定；入口 Agent 是否以及如何下钻到原始消息留待数据层级专项设计。
+- Paper Conversation 与 Knowledge Conversation 都是过程历史，不自动成为 curated
+  knowledge；入口 Agent 是否以及如何下钻到原始 Message 仍留待单独设计。
 - 论文间“传承、借鉴、同一路线”不是客观元数据。它们需要以可解释 Relation 的形式
   存储证据和置信度，并允许用户纠正。
 - GitHub 仓库会变化。任何依赖代码的回答都需要固定 commit SHA，否则未来无法复现

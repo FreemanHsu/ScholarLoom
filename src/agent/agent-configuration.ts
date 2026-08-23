@@ -1,4 +1,4 @@
-export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v7";
+export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v9";
 export const MINIMUM_CODEX_VERSION = "0.144.6";
 export const CODEX_SOL_MODEL = "gpt-5.6-sol";
 
@@ -7,6 +7,7 @@ export type AgentTaskKind =
   | "paper-version-diff"
   | "agentic-evidence"
   | "entry-answer"
+  | "knowledge-answer"
   | "paper-organization"
   | "paper-taxonomy"
   | "takeaway-distillation"
@@ -22,6 +23,7 @@ export type CodexRuntimeStatus = {
   capabilityChecks: {
     structured: { status: "passed" | "failed" | "not-run"; checkedAt: string | null };
     agenticEvidence: { status: "passed" | "failed" | "not-run"; checkedAt: string | null };
+    agenticCurated: { status: "passed" | "failed" | "not-run"; checkedAt: string | null };
   };
   checkedAt: string;
 };
@@ -43,7 +45,7 @@ export type AgentConfiguration = {
   execution: {
     timeoutMs: number;
     concurrency: number | null;
-    mode: "structured-one-shot" | "agentic-evidence";
+    mode: "structured-one-shot" | "agentic-evidence" | "agentic-curated-knowledge";
     network: "denied";
     workspace: "ephemeral-read-only" | "frozen-evidence";
     tools: readonly string[];
@@ -58,11 +60,18 @@ const configurations: readonly AgentConfiguration[] = [
   configuration("paper-version-diff", "Paper Version Diff", "high", 300_000, 1),
   configuration("agentic-evidence", "Discussion / Agentic Evidence", "medium", 180_000, 2, true),
   configuration("entry-answer", "Entry Agent", "medium", 600_000, null),
+  knowledgeConfiguration(),
   configuration("paper-organization", "Paper Organization Agent", "medium", 180_000, 1),
   configuration("paper-taxonomy", "Paper Taxonomy Agent", "high", 300_000, 1),
   configuration("takeaway-distillation", "Takeaway Selection", "medium", 180_000, 1),
   configuration("paper-chat", "Legacy Paper Chat", "medium", 120_000, null),
 ];
+
+function knowledgeConfiguration(): AgentConfiguration {
+  const base = configuration("knowledge-answer", "Knowledge Question", "medium", 180_000, 2);
+  return { ...base, execution: { ...base.execution, mode: "agentic-curated-knowledge",
+    tools: ["search_curated_knowledge", "open_curated_source", "verify_curated_citation"] } };
+}
 
 function configuration(taskKind: AgentTaskKind, displayName: string, reasoningEffort: ReasoningEffort,
   timeoutMs: number, concurrency: number | null, agentic = false): AgentConfiguration {

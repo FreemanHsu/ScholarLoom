@@ -17,7 +17,7 @@ import { AgentRunCoordinator } from "./storage/agent-run-coordinator.js";
 import type { TakeawaySelectionRunner } from "./agent/takeaway-distillation.js";
 import { TakeawayDistillationCoordinator } from "./storage/takeaway-distillation.js";
 import { buildSettingsSnapshot, type SettingsRuntime } from "./settings/settings-snapshot.js";
-import type { AgentExecutionMetadataProvider } from "./agent/agent-configuration.js";
+import { getAgentConfiguration, type AgentExecutionMetadataProvider } from "./agent/agent-configuration.js";
 import { PaperOrganizationValidationError } from "./domain/paper-organization.js";
 import { PaperOrganizationStoreError } from "./storage/paper-organization-store.js";
 import type { PaperOrganizationRunner } from "./agent/paper-organization.js";
@@ -26,13 +26,15 @@ import type { PaperTaxonomyRunner } from "./agent/paper-taxonomy.js";
 import { PaperTaxonomyCoordinator } from "./storage/paper-taxonomy-coordinator.js";
 import { PaperOrganizationBatchCoordinator } from "./storage/paper-organization-batch-coordinator.js";
 import { DirectionMergeCoordinator } from "./storage/direction-merge-coordinator.js";
-import { PaperResolverError, type PaperResolverMode } from "./storage/paper-resolver.js";
+import type { PaperResolverMode } from "./storage/paper-resolver.js";
 import {
   PaperOrganizationAutomation,
   PaperOrganizationAutoAcceptCoordinator,
 } from "./storage/paper-organization-automation.js";
 import { sendPdfArtifact } from "./pdf-http-response.js";
 import type { PdfLinearizationTool } from "./storage/pdf-delivery-optimizer.js";
+import type { KnowledgeAnswerRunner } from "./agent/knowledge-answer.js";
+import { KnowledgeConversationCoordinator } from "./storage/knowledge-conversation.js";
 
 export type ResolvedPaper = {
   arxivId: string;
@@ -71,6 +73,7 @@ export type CreateAppOptions = {
   paperTaxonomyRunner?: PaperTaxonomyRunner;
   settingsRuntime?: SettingsRuntime;
   agentExecutionMetadata?: AgentExecutionMetadataProvider;
+  knowledgeAnswerRunner?: KnowledgeAnswerRunner;
   entryResolverMode?: PaperResolverMode;
   pdfOptimization?: { strategy: "lossless-linearization"; tool?: PdfLinearizationTool };
 };
@@ -157,6 +160,13 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     new PaperOrganizationAutomation(options.storageLayout, store, now),
   );
   const chatControllers = new Set<AbortController>();
+  const knowledgeConversations = options.knowledgeAnswerRunner
+    ? KnowledgeConversationCoordinator.open(options.storageLayout, options.knowledgeAnswerRunner, {
+      ...(options.clock ? { now: () => options.clock!.now() } : {}),
+      ...(options.agentExecutionMetadata ? { agentExecutionMetadata: options.agentExecutionMetadata } : {}),
+      ...(options.agentMessageTimeoutMs !== undefined ? { hardTimeoutMs: options.agentMessageTimeoutMs } : {}),
+      maximumConcurrency: getAgentConfiguration("knowledge-answer").execution.concurrency ?? 1,
+    }) : null;
   const settingsRuntime: SettingsRuntime = {
     ...(options.settingsRuntime ?? {
     host: "127.0.0.1",
@@ -172,6 +182,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
       capabilityChecks: {
         structured: { status: "not-run", checkedAt: null },
         agenticEvidence: { status: "not-run", checkedAt: null },
+        agenticCurated: { status: "not-run", checkedAt: null },
       },
       checkedAt: new Date().toISOString(),
     }),
@@ -182,6 +193,7 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   app.addHook("onClose", async () => {
     for (const controller of chatControllers) controller.abort(new Error("application-closing"));
     await Promise.allSettled(backgroundTasks);
+    await knowledgeConversations?.close();
     await agentCoordinator?.close();
     await distillationCoordinator?.close();
     await paperTaxonomyCoordinator?.close();
@@ -205,6 +217,70 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   };
 
   app.get("/api/settings", async () => buildSettingsSnapshot(options.storageLayout, settingsRuntime));
+
+  const knowledgeError = (error: unknown) => {
+    const code = error instanceof Error ? error.message : String(error);
+    if (code === "knowledge-conversation-not-found" || code === "knowledge-attempt-not-found") {
+      return { status: 404 as const, body: { code } };
+    }
+    if (code === "knowledge-conversation-archived") return { status: 409 as const, body: { code } };
+    if (code === "idempotency-key-conflict") return { status: 409 as const, body: { code } };
+    if (["knowledge-question-invalid", "idempotency-key-invalid"].includes(code)) {
+      return { status: 400 as const, body: { code } };
+    }
+    return { status: 500 as const, body: { code: "knowledge-question-failed" } };
+  };
+  const idempotencyKey = (header: string | string[] | undefined) =>
+    (Array.isArray(header) ? header[0] : header)?.trim() ?? "";
+
+  app.get<{ Querystring: { view?: string } }>("/api/knowledge-conversations", async (request, reply) => {
+    if (!knowledgeConversations) return reply.code(503).send({ code: "knowledge-question-unavailable" });
+    if (request.query.view !== undefined && !["active", "archived"].includes(request.query.view)) {
+      return reply.code(400).send({ code: "knowledge-conversation-view-invalid" });
+    }
+    return { conversations: knowledgeConversations.list(request.query.view === "archived" ? "archived" : "active") };
+  });
+  app.post<{ Body: { question?: unknown } }>("/api/knowledge-conversations/turns", async (request, reply) => {
+    if (!knowledgeConversations) return reply.code(503).send({ code: "knowledge-question-unavailable" });
+    const key = idempotencyKey(request.headers["idempotency-key"]);
+    if (!key) return reply.code(400).send({ code: "idempotency-key-required" });
+    if (typeof request.body?.question !== "string") return reply.code(400).send({ code: "knowledge-question-required" });
+    try { return reply.code(202).send({ attempt: knowledgeConversations.submit({ question: request.body.question, idempotencyKey: key }) }); }
+    catch (error) { const failure = knowledgeError(error); return reply.code(failure.status).send(failure.body); }
+  });
+  app.get<{ Params: { id: string } }>("/api/knowledge-conversations/:id", async (request, reply) => {
+    if (!knowledgeConversations) return reply.code(503).send({ code: "knowledge-question-unavailable" });
+    try { return knowledgeConversations.read(request.params.id); }
+    catch (error) { const failure = knowledgeError(error); return reply.code(failure.status).send(failure.body); }
+  });
+  app.post<{ Params: { id: string }; Body: { question?: unknown } }>(
+    "/api/knowledge-conversations/:id/turns", async (request, reply) => {
+      if (!knowledgeConversations) return reply.code(503).send({ code: "knowledge-question-unavailable" });
+      const key = idempotencyKey(request.headers["idempotency-key"]);
+      if (!key) return reply.code(400).send({ code: "idempotency-key-required" });
+      if (typeof request.body?.question !== "string") return reply.code(400).send({ code: "knowledge-question-required" });
+      try { return reply.code(202).send({ attempt: knowledgeConversations.submit({ conversationId: request.params.id,
+        question: request.body.question, idempotencyKey: key }) }); }
+      catch (error) { const failure = knowledgeError(error); return reply.code(failure.status).send(failure.body); }
+    });
+  app.get<{ Params: { id: string } }>("/api/knowledge-question-attempts/:id", async (request, reply) => {
+    if (!knowledgeConversations) return reply.code(503).send({ code: "knowledge-question-unavailable" });
+    try { return knowledgeConversations.readAttempt(request.params.id); }
+    catch (error) { const failure = knowledgeError(error); return reply.code(failure.status).send(failure.body); }
+  });
+  app.post<{ Params: { id: string } }>("/api/knowledge-question-attempts/:id/cancel", async (request, reply) => {
+    if (!knowledgeConversations) return reply.code(503).send({ code: "knowledge-question-unavailable" });
+    const key = idempotencyKey(request.headers["idempotency-key"]);
+    if (!key) return reply.code(400).send({ code: "idempotency-key-required" });
+    try {
+      return knowledgeConversations.cancel(request.params.id, key)
+        ? reply.code(202).send({ state: "canceled" })
+        : reply.code(409).send({ code: "knowledge-attempt-not-running" });
+    } catch (error) {
+      const failure = knowledgeError(error);
+      return reply.code(failure.status).send(failure.body);
+    }
+  });
 
   const startImport = (execution: { paper: import("./storage/import-store.js").StoredPaper; arxivId?: string; version: number;
     importRequest: { id: string }; job: { id: string }; pdfBytes?: Uint8Array; candidateProposalId?: string }) => {
@@ -1387,38 +1463,6 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
     return source ? reply.code(201).send(source) : reply.code(404).send({ code: "proposal-source-not-found" });
   });
 
-  app.post<{ Body: { question?: unknown; resolutionMode?: unknown; resolutionSelection?: unknown } }>(
-    "/api/entry-agent/questions", async (request, reply) => {
-    if (typeof request.body?.question !== "string" || !request.body.question.trim()) return reply.code(400).send({ code: "question-required" });
-    if (!options.codexRunner?.runEntry) return reply.code(503).send({ code: "codex-runner-unavailable" });
-    if (request.body.resolutionMode !== undefined && !["auto", "off"].includes(String(request.body.resolutionMode))) {
-      return reply.code(400).send({ code: "entry-resolution-mode-invalid" });
-    }
-    let resolutionSelection: import("./storage/import-store.js").EntryResolutionRequest["resolutionSelection"];
-    if (request.body.resolutionSelection !== undefined) {
-      const value = request.body.resolutionSelection as { snapshotHash?: unknown; groups?: unknown };
-      if (!value || typeof value !== "object" || typeof value.snapshotHash !== "string" ||
-          !value.groups || typeof value.groups !== "object" || Array.isArray(value.groups) ||
-          Object.values(value.groups).some((paperId) => typeof paperId !== "string")) {
-        return reply.code(400).send({ code: "entry-paper-resolution-invalid" });
-      }
-      resolutionSelection = { snapshotHash: value.snapshotHash,
-        groups: value.groups as Record<string, string> };
-    }
-    try {
-      return await store.answerEntry(request.body.question,
-        (context) => options.codexRunner!.runEntry!(context), {
-          mode: options.entryResolverMode ?? "enabled",
-          ...(request.body.resolutionMode ? {
-            resolutionMode: request.body.resolutionMode as "auto" | "off",
-          } : {}),
-          ...(resolutionSelection ? { resolutionSelection } : {}),
-        });
-    } catch (error) {
-      if (error instanceof PaperResolverError) return reply.code(409).send({ code: error.code });
-      throw error;
-    }
-  });
   app.post<{ Params: { sourceType: "summary" | "takeaway" | "topic-knowledge"; sourceId: string } }>(
     "/api/entry-agent/sources/:sourceType/:sourceId/open", async (request, reply) =>
       store.recordEntrySourceOpen(request.params.sourceType, request.params.sourceId)

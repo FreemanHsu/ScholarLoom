@@ -21,6 +21,7 @@ import { PDF_RENDERER_LIMITS, PDF_RENDER_SETTINGS } from "../storage/pdf-page-re
 import { VISUAL_EVIDENCE_LIMITS } from "../storage/visual-evidence-shim.js";
 import { PAPER_RESOLVER_VERSION, type PaperResolverMode } from "../storage/paper-resolver.js";
 import { PAPER_LOOKUP_NORMALIZATION_VERSION } from "../domain/paper-organization.js";
+import { knowledgeAnswerSchema } from "../agent/knowledge-answer.js";
 
 export type SettingsRuntime = {
   host: "127.0.0.1" | "::1";
@@ -65,7 +66,7 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
     execution: {
       ...configuration.execution,
       timeoutMs: runtime.agentMessageTimeoutMs !== undefined &&
-        ["agentic-evidence", "takeaway-distillation", "paper-chat"].includes(configuration.taskKind)
+        ["agentic-evidence", "knowledge-answer", "takeaway-distillation", "paper-chat"].includes(configuration.taskKind)
         ? runtime.agentMessageTimeoutMs : configuration.execution.timeoutMs,
     },
   }));
@@ -114,7 +115,8 @@ export function buildSettingsSnapshot(layout: StorageLayout, runtime: SettingsRu
         } : null,
         outputSchema: {
           sourcePath: configuration.taskKind === "takeaway-distillation"
-            ? "src/agent/takeaway-distillation.ts" : "src/agent/output-contracts.ts",
+            ? "src/agent/takeaway-distillation.ts" : configuration.taskKind === "knowledge-answer"
+              ? "src/agent/knowledge-answer.ts" : "src/agent/output-contracts.ts",
           schema: outputSchema(configuration.taskKind),
         },
       },
@@ -227,6 +229,7 @@ function outputSchema(taskKind: ReturnType<typeof listAgentConfigurations>[numbe
   else if (taskKind === "paper-version-diff") schema = createVersionDiffSchema(null);
   else if (taskKind === "agentic-evidence") schema = agenticEvidenceSchema;
   else if (taskKind === "entry-answer") schema = entrySchema;
+  else if (taskKind === "knowledge-answer") schema = knowledgeAnswerSchema;
   else if (taskKind === "paper-organization") {
     schema = createPaperOrganizationSchema({ requestedSections: ["alias", "primary", "secondary"] }, null);
   }

@@ -32,7 +32,8 @@ export function SettingsPage({ snapshot, error }: { snapshot: SettingsSnapshot |
           detail={`最低兼容 ${overview.codex.minimumVersion} · 检查于 ${formatDate(overview.codex.checkedAt)}`}
           status={`${codexStatusLabel(overview.codex.versionStatus, overview.codex.capabilityStatus)} · ` +
             `Structured ${capabilityCheckLabel(overview.codex.capabilityChecks.structured.status)} · ` +
-            `Agentic ${capabilityCheckLabel(overview.codex.capabilityChecks.agenticEvidence.status)}`} />
+            `Agentic ${capabilityCheckLabel(overview.codex.capabilityChecks.agenticEvidence.status)} · ` +
+            `Curated ${capabilityCheckLabel(overview.codex.capabilityChecks.agenticCurated.status)}`} />
         <OverviewCard label="服务监听" value={`${overview.listener.host}:${overview.listener.port}`}
           detail="仅允许 loopback，由 Tailscale Serve 提供远程入口" />
         <OverviewCard label="数据根目录" value={overview.dataRoot}

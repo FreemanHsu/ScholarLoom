@@ -12,7 +12,7 @@ describe("SettingsPage", () => {
       loadedAt: "2026-07-30T08:00:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v7",
+        configurationVersion: "agent-configuration.v9",
         startedAt: "2026-07-30T08:00:00.000Z",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: "/tmp/scholarloom-settings-fixture",
@@ -31,6 +31,7 @@ describe("SettingsPage", () => {
           capabilityChecks: {
             structured: { status: "passed", checkedAt: "2026-07-30T08:00:00.000Z" },
             agenticEvidence: { status: "passed", checkedAt: "2026-07-30T08:00:00.000Z" },
+            agenticCurated: { status: "passed", checkedAt: "2026-07-30T08:00:00.000Z" },
           },
           checkedAt: "2026-07-30T08:00:00.000Z",
         },
@@ -95,13 +96,14 @@ describe("SettingsPage", () => {
     expect(html).toContain("high");
     expect(html).toContain("0.145.0");
     expect(html).toContain("能力检查通过");
+    expect(html).toContain("Curated 通过");
     expect(html).toContain("0.1.0");
     expect(html).toContain("Takeaway Quality V2");
     expect(html).not.toContain("PDF.js Reader");
     expect(html).not.toContain("PDF.js Range-first");
     expect(html).toContain("Lossless PDF Delivery 未启用");
     expect(html).toContain("vault-markdown-yaml");
-    expect(html).toContain("agent-configuration.v7");
+    expect(html).toContain("agent-configuration.v9");
     expect(html).toContain("job:summary");
     expect(html).toContain("环境变量最小化");
     expect(html).toContain("Direct first → Proxy fallback");

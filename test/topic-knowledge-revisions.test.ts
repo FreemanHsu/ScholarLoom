@@ -29,7 +29,6 @@ async function waitForImport(app: FastifyInstance, id: string): Promise<void> {
 describe("Topic KnowledgeRevision", () => {
   it("promotes only attested substantive knowledge with current provenance and rebuilds deterministically", async () => {
     const layout = initializeDataRoot(join(await mkdtemp(join(tmpdir(), "scholarloom-topic-knowledge-")), "data"));
-    const entryCalls: Array<{ sources: Array<{ sourceType: string; sourceId: string }> }> = [];
     const app = await createApp({
       storageLayout: layout,
       paperSource: {
@@ -44,14 +43,6 @@ describe("Topic KnowledgeRevision", () => {
           claims: [{ voice: "authors-claim" as const, claim: "Generation transfers to perception.",
             sourceHandle: "pdf-page:1" }], readStatus: "read" as const,
         }; },
-        async runEntry(context) {
-          entryCalls.push(context);
-          return context.sources.length > 0
-            ? { answerStatus: "answered" as const, answer: "来自已确认来源。",
-              sourceHandles: context.sources.map((source) => source.handle), uncertainty: null }
-            : { answerStatus: "insufficient_evidence" as const, answer: "当前没有可用来源。",
-              sourceHandles: [], uncertainty: "来源已经失效。" };
-        },
       },
     });
     const imported = await app.inject({ method: "POST", url: "/api/imports",
@@ -131,15 +122,6 @@ describe("Topic KnowledgeRevision", () => {
     expect(old.history_path).toContain("topic%3Avision-representation-learning");
     await access(join(layout.vaultRoot, old.history_path));
 
-    const resolved = await app.inject({ method: "POST", url: "/api/entry-agent/questions",
-      payload: { question: "GenCeption 的表征能力是什么？" } });
-    expect(resolved.statusCode, resolved.body).toBe(200);
-    expect(entryCalls.at(-1)!.sources.map((source) => source.sourceType)).toContain("topic-knowledge");
-    expect(resolved.json().sources).toEqual(expect.arrayContaining([
-      expect.objectContaining({ sourceType: "topic-knowledge",
-        sourceId: "topic:vision-representation-learning" }),
-    ]));
-
     expect((await app.inject({ method: "POST", url: "/api/diagnostics/rebuild-curated" })).json())
       .toMatchObject({ count: 2 });
     database = new Database(layout.databasePath, { readonly: true });
@@ -150,9 +132,8 @@ describe("Topic KnowledgeRevision", () => {
     database = new Database(layout.databasePath);
     database.prepare("UPDATE summary_revisions SET status='superseded' WHERE id=?").run(summary.sourceId);
     database.close();
-    const invalidatedEntry = await app.inject({ method: "POST", url: "/api/entry-agent/questions",
-      payload: { question: "这个方向还有哪些开放问题？" } });
-    expect(invalidatedEntry.statusCode, invalidatedEntry.body).toBe(200);
+    expect((await app.inject({ method: "POST", url: "/api/diagnostics/rebuild-curated" })).json())
+      .toMatchObject({ count: 0 });
     database = new Database(layout.databasePath);
     expect(database.prepare(`SELECT count(*) FROM curated_search_documents
       WHERE source_type='topic-knowledge'`).pluck().get()).toBe(0);

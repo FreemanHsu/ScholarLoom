@@ -211,13 +211,6 @@ describe("paper ingestion lifecycle", () => {
               { sourceHandle: summaryHandle, locator: "overview" }],
           };
         },
-        async runEntry(context) {
-          expect(context.sources).toHaveLength(1);
-          expect(context.sources.map((source) => source.body).join(" ")).not.toContain("WORKING_ONLY_SENTINEL");
-          return { answerStatus: "answered" as const,
-            answer: "已确认结论与 active Summary 都支持可追溯阅读。",
-            sourceHandles: context.sources.map((source) => source.handle), uncertainty: null };
-        },
       },
     });
     const imported = await app.inject({ method: "POST", url: "/api/imports", payload: { arxivUrl: "https://arxiv.org/abs/2401.12345v2" } });
@@ -271,18 +264,24 @@ describe("paper ingestion lifecycle", () => {
     const frontmatter = (markdown: string) => parse(markdown.split("---")[1]!) as Record<string, unknown>;
     expect(frontmatter(summaryMarkdown)).toMatchObject({ summary_revision_id: workspace.json().summary.id, paper_version_id: workspace.json().paper.versionId });
 
-    const entry = await app.inject({ method: "POST", url: "/api/entry-agent/questions", payload: { question: "fixture 可追溯证据" } });
-    expect(entry.statusCode).toBe(200);
-    expect(entry.json()).toMatchObject({
-      answer: "已确认结论与 active Summary 都支持可追溯阅读。",
-      sources: [{ sourceType: "summary" }],
-      projection: { stale: false },
-    });
-    expect(JSON.stringify(entry.json())).not.toContain("WORKING_ONLY_SENTINEL");
+    let curatedDatabase = new Database(storageLayout.databasePath, { readonly: true });
+    const curatedBeforeRebuild = curatedDatabase.prepare(`SELECT source_type,source_id,title,body
+      FROM curated_search_documents ORDER BY source_type,source_id`).all();
+    curatedDatabase.close();
+    expect(curatedBeforeRebuild).toEqual([expect.objectContaining({ source_type: "summary" })]);
+    expect(JSON.stringify(curatedBeforeRebuild)).not.toContain("WORKING_ONLY_SENTINEL");
     const rebuilt = await app.inject({ method: "POST", url: "/api/diagnostics/rebuild-curated" });
     expect(rebuilt.json()).toMatchObject({ count: 1 });
-    const afterRebuild = await app.inject({ method: "POST", url: "/api/entry-agent/questions", payload: { question: "fixture 可追溯证据" } });
-    expect(afterRebuild.json().sources).toEqual(entry.json().sources);
+    curatedDatabase = new Database(storageLayout.databasePath, { readonly: true });
+    const curatedAfterRebuild = curatedDatabase.prepare(`SELECT source_type,source_id,title,body
+      FROM curated_search_documents ORDER BY source_type,source_id`).all();
+    curatedDatabase.close();
+    expect(curatedAfterRebuild).toEqual([expect.objectContaining({
+      source_type: "summary",
+      source_id: (curatedBeforeRebuild[0] as { source_id: string }).source_id,
+      title: (curatedBeforeRebuild[0] as { title: string }).title,
+    })]);
+    expect(JSON.stringify(curatedAfterRebuild)).not.toContain("WORKING_ONLY_SENTINEL");
     await app.close();
   });
 

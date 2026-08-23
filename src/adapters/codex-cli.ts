@@ -47,13 +47,24 @@ import {
   type PaperTaxonomyResult,
   type PaperTaxonomyRunner,
 } from "../agent/paper-taxonomy.js";
+import {
+  knowledgeAnswerSchema,
+  validateKnowledgeAnswer,
+  type KnowledgeAnswer,
+  type KnowledgeAnswerRunner,
+} from "../agent/knowledge-answer.js";
+import { preflightCuratedKnowledgeAnswer } from "../agent/curated-knowledge-answer-preflight.js";
+import { createCuratedKnowledgeMcpLaunch } from "../agent/curated-knowledge-mcp-launch.js";
+import { SqliteCuratedKnowledgeReader } from "../storage/curated-knowledge-reader.js";
+import { CURATED_TOOL_LIMITS, type CuratedRetrievalSummary, type CuratedToolCitation,
+  type CuratedToolLimits } from "../storage/curated-knowledge-tools.js";
 
 const Ajv = createRequire(import.meta.url)("ajv") as new (options: { allErrors: boolean }) => {
   compile(schema: object): ((value: unknown) => boolean) & { errors?: unknown };
 };
 const SHELL_ENVIRONMENT_INHERIT = 'shell_environment_policy.inherit="core"';
 const SHELL_ENVIRONMENT_EXCLUDE =
-  'shell_environment_policy.exclude=["*PROXY*","*proxy*","*KEY*","*key*","*SECRET*","*secret*","*TOKEN*","*token*","*SCHOLARLOOM_VISUAL*"]';
+  'shell_environment_policy.exclude=["*PROXY*","*proxy*","*KEY*","*key*","*SECRET*","*secret*","*TOKEN*","*token*","*SCHOLARLOOM_VISUAL*","*SCHOLARLOOM_CURATED*"]';
 
 function agentExecutionArgs(taskKind: AgentTaskKind): string[] {
   const configuration = getAgentConfiguration(taskKind);
@@ -61,19 +72,22 @@ function agentExecutionArgs(taskKind: AgentTaskKind): string[] {
 }
 
 export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, TakeawaySelectionRunner,
-  PaperOrganizationRunner, PaperTaxonomyRunner {
+  PaperOrganizationRunner, PaperTaxonomyRunner, KnowledgeAnswerRunner {
   readonly #skill = readFileSync(join(process.cwd(), "skills/paper-reading/SKILL.md"), "utf8");
   readonly #organizationSkill = readFileSync(join(process.cwd(), "skills/paper-organization/SKILL.md"), "utf8");
   readonly #taxonomySkill = readFileSync(join(process.cwd(), "skills/paper-taxonomy/SKILL.md"), "utf8");
   readonly #canaries: boolean;
   readonly #runtimeRoot: string | undefined;
   readonly #storageLayout: StorageLayout | undefined;
+  readonly #curatedKnowledgeLimits: Partial<CuratedToolLimits>;
   #runtimeStatus: CodexRuntimeStatus;
 
-  constructor(options: { canaries?: boolean; runtimeRoot?: string; storageLayout?: StorageLayout } = {}) {
+  constructor(options: { canaries?: boolean; runtimeRoot?: string; storageLayout?: StorageLayout;
+    curatedKnowledgeLimits?: Partial<CuratedToolLimits> } = {}) {
     this.#canaries = options.canaries ?? true;
     this.#runtimeRoot = options.runtimeRoot;
     this.#storageLayout = options.storageLayout;
+    this.#curatedKnowledgeLimits = options.curatedKnowledgeLimits ?? {};
     this.#runtimeStatus = inspectCodexRuntimeStatus();
   }
 
@@ -115,6 +129,55 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
       renderAgentPrompt("entry-answer", { context }));
     validateEntryOutput(result, allowedHandles);
     return result;
+  }
+
+  async answer(input: Parameters<KnowledgeAnswerRunner["answer"]>[0]) {
+    if (!this.#storageLayout) throw new Error("knowledge-answer-storage-layout-required");
+    const bindingRoot = join(this.#storageLayout.tmpRoot, "curated-bindings");
+    mkdirSync(bindingRoot, { recursive: true, mode: 0o700 });
+    const bindingPath = join(bindingRoot, `curated-binding-${randomUUID()}.json`);
+    const statePath = join(bindingRoot, `curated-state-${randomUUID()}.json`);
+    writeFileSync(statePath, JSON.stringify({ summary: { searched: false, queryCount: 0, candidateCount: 0,
+      openedSourceCount: 0, usedSourceCount: 0, budgetExhausted: false, projectionStale: false,
+      lastSuccessfulAt: null }, verified: [] }), { encoding: "utf8", mode: 0o600 });
+    writeFileSync(bindingPath, JSON.stringify({ dataRoot: this.#storageLayout.root, statePath,
+      limits: { ...CURATED_TOOL_LIMITS, ...this.#curatedKnowledgeLimits },
+      attemptId: input.attemptId, jobRunId: input.jobRunId, runEpoch: input.runEpoch }),
+    { encoding: "utf8", mode: 0o600 });
+    try {
+      const serverPath = fileURLToPath(new URL("../agent/curated-knowledge-mcp-server.ts", import.meta.url));
+      const mcpLaunch = createCuratedKnowledgeMcpLaunch(serverPath, bindingPath);
+      try {
+        await mcpLaunch.assertAvailable(input.signal);
+        this.#runtimeStatus = recordCapabilityCheck(this.#runtimeStatus, "agenticCurated", "passed");
+      } catch (error) {
+        if (!input.signal.aborted) {
+          this.#runtimeStatus = recordCapabilityCheck(this.#runtimeStatus, "agenticCurated", "failed");
+        }
+        throw error;
+      }
+      const result = await this.#run<KnowledgeAnswer>("knowledge-answer", knowledgeAnswerSchema,
+        renderAgentPrompt("knowledge-answer", {
+          context: { question: input.question, conversation: input.conversation },
+        }), input.signal, {
+          configs: ['approval_policy="never"', mcpLaunch.codexConfig],
+        });
+      try {
+        const snapshot = JSON.parse(readFileSync(statePath, "utf8")) as {
+          summary: CuratedRetrievalSummary; verified: CuratedToolCitation[];
+        };
+        const reader = SqliteCuratedKnowledgeReader.open(this.#storageLayout);
+        try { return preflightCuratedKnowledgeAnswer(result, snapshot, reader); }
+        finally { reader.close(); }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.startsWith("knowledge-answer-")) throw error;
+        throw new Error("curated-reader-failed", { cause: error });
+      }
+    } finally {
+      rmSync(bindingPath, { force: true });
+      rmSync(statePath, { force: true });
+    }
   }
 
   async analyze(input: Parameters<PaperOrganizationRunner["analyze"]>[0]): Promise<PaperOrganizationAgentResult> {
@@ -246,7 +309,8 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
     }
   }
 
-  async #run<T>(task: AgentTaskKind, schema: object, prompt: string, signal?: AbortSignal): Promise<T> {
+  async #run<T>(task: AgentTaskKind, schema: object, prompt: string, signal?: AbortSignal,
+    launch: { configs?: string[]; environment?: NodeJS.ProcessEnv } = {}): Promise<T> {
     const configuration = getAgentConfiguration(task);
     const executionRoot = this.#runtimeRoot ?? tmpdir();
     if (this.#canaries && this.#runtimeRoot) assertPrivateRuntimeRoot(this.#runtimeRoot);
@@ -277,7 +341,9 @@ export class CodexCliRunner implements CodexRunner, AgenticEvidenceRunner, Takea
           "-c", structuredPermissionProfileConfig(directory),
           "-c", SHELL_ENVIRONMENT_INHERIT,
           "-c", SHELL_ENVIRONMENT_EXCLUDE,
-          "--output-schema", schemaPath, "--output-last-message", outputPath, "--color", "never"], { stdio: ["pipe", "pipe", "pipe"] });
+          ...(launch.configs?.flatMap((config) => ["-c", config]) ?? []),
+          "--output-schema", schemaPath, "--output-last-message", outputPath, "--color", "never"],
+        { stdio: ["pipe", "pipe", "pipe"], env: codexProcessEnvironment(launch.environment ?? process.env, directory) });
         let error = "";
         let events = "";
         const terminate = () => child.kill("SIGTERM");
@@ -451,6 +517,7 @@ function emptyCapabilityChecks(): CodexRuntimeStatus["capabilityChecks"] {
   return {
     structured: { status: "not-run", checkedAt: null },
     agenticEvidence: { status: "not-run", checkedAt: null },
+    agenticCurated: { status: "not-run", checkedAt: null },
   };
 }
 

@@ -20,6 +20,8 @@ import { PdfPageRenderer } from "./storage/pdf-page-renderer.js";
 import { VisualEvidenceShim } from "./storage/visual-evidence-shim.js";
 import { VisualEvidenceStore } from "./storage/visual-evidence-store.js";
 import { MINIMUM_CODEX_VERSION } from "./agent/agent-configuration.js";
+import { FixtureCuratedKnowledgeRunner } from "./agent/fixture-curated-knowledge-runner.js";
+import { SqliteCuratedKnowledgeReader } from "./storage/curated-knowledge-reader.js";
 
 const fixture = process.env.SCHOLARLOOM_FIXTURE === "1";
 const pdfOptimization = process.env.SCHOLARLOOM_PDF_OPTIMIZATION === "lossless-linearization";
@@ -130,6 +132,8 @@ assertDataRootWritable(layout);
 const releaseRuntimeLock = acquireRuntimeLock(layout);
 try {
   const fixtureRepository = fixture ? prepareFixtureRepository(layout.tmpRoot) : null;
+  const fixtureKnowledgeReader = fixture ? SqliteCuratedKnowledgeReader.open(layout) : null;
+  const fixtureKnowledgeRunner = fixtureKnowledgeReader ? new FixtureCuratedKnowledgeRunner(fixtureKnowledgeReader, 450) : null;
   const productionCodex = fixture ? null : new CodexCliRunner({ runtimeRoot: layout.tmpRoot, storageLayout: layout });
   const app = await createApp({ paperSource, directPdfSource, storageLayout: layout,
     entryResolverMode,
@@ -154,6 +158,7 @@ try {
         capabilityChecks: {
           structured: { status: "not-run", checkedAt: null },
           agenticEvidence: { status: "not-run", checkedAt: null },
+          agenticCurated: { status: "not-run", checkedAt: null },
         },
         checkedAt: startedAt,
       },
@@ -184,6 +189,7 @@ try {
           sourceHandles: context.sources.map((source) => source.handle), uncertainty: null }; },
       },
       agenticEvidenceRunner: fixtureAgenticRunner(layout), takeawaySelectionRunner: fixtureSelectionRunner,
+      knowledgeAnswerRunner: fixtureKnowledgeRunner!,
       paperOrganizationRunner: {
         async analyze(input) {
           const firstDirection = input.directions[0]?.topicId ?? null;
@@ -226,13 +232,14 @@ try {
       },
     } : { repositoryAdapter: new GitRepositoryAdapter(), codexRunner: productionCodex!,
       agenticEvidenceRunner: productionCodex!, paperOrganizationRunner: productionCodex!,
-      paperTaxonomyRunner: productionCodex!,
+      paperTaxonomyRunner: productionCodex!, knowledgeAnswerRunner: productionCodex!,
       ...(takeawayQualityReleased ? { takeawaySelectionRunner: productionCodex! } : {}) }) });
   let closing = false;
   const shutdown = async () => {
     if (closing) return;
     closing = true;
     await app.close();
+    fixtureKnowledgeReader?.close();
     releaseRuntimeLock();
   };
   process.once("SIGINT", () => void shutdown());

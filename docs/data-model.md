@@ -1,19 +1,26 @@
 # ScholarLoom v1 Data Model
 
 - Status: Accepted baseline
-- Version: 1.1
-- Accepted: 2026-07-19
-- Scope: single-Paper deep-reading MVP
+- Version: 1.2
+- Accepted: 2026-08-22
+- Scope: single-Paper deep-reading MVP plus global Knowledge Conversation
 - Vocabulary: [`CONTEXT.md`](../CONTEXT.md)
 - SQLite design: [`sqlite-schema.sql`](sqlite-schema.sql)
 - Accepted extension: [`paper-organization-feature-design.md`](paper-organization-feature-design.md)
+- Accepted Knowledge Question extension: [`knowledge-question-feature-design.md`](knowledge-question-feature-design.md)
+
+The Knowledge Conversation entities below are the accepted target contract for
+Slices 014–016. Migration 035 implements Slice 014's Conversation, Message, and Attempt
+tables; migration 036 implements Slice 015's immutable curated Evidence Receipts. Both
+are reflected in [`sqlite-schema.sql`](sqlite-schema.sql).
 
 ## 1. Purpose
 
 This document is the v1 data contract for ScholarLoom. It defines identity,
 authority, versioning, provenance, lifecycle, storage ownership, review boundaries,
-and index visibility. It deliberately does not define the future global Agent's
-downward retrieval algorithm or the automatic paper-discovery model.
+and index visibility. It defines Codex-native retrieval inside `global-curated` but
+deliberately does not define downward retrieval into Paper working material or the
+automatic paper-discovery model.
 
 The model must preserve a complete chain from an answer or confirmed idea back to
 the exact Paper Version, PDF region, Message, or code commit that informed it.
@@ -35,10 +42,16 @@ the exact Paper Version, PDF region, Message, or code commit that informed it.
 10. Provenance Link and Semantic Relation are different domain concepts.
 11. Long-term knowledge is human-readable; operational state may use structured storage.
 12. Indexes and navigation views are disposable projections.
-13. The MVP entry Agent cannot search raw PDF, full Messages, Annotation, or code.
+13. Knowledge Question cannot search raw PDF, full Messages, Annotation, or code.
 14. Parallel jobs cannot directly perform concurrent long-term knowledge writes.
-15. The MVP Entry Agent queries only a curated-only projection, never the shared
+15. Knowledge Question queries only a curated-only projection, never the shared
     Paper working corpus.
+16. Knowledge Conversation and Paper-scoped Conversation are different aggregates;
+    neither may weaken the other's context semantics through nullable scope fields.
+17. A Knowledge Question turn persists user/assistant Messages only after a validated
+    successful answer; cancel, final failure, and interruption create no Message.
+18. A grounded Knowledge Answer freezes its exact source revision/hash/locator in
+    Evidence Receipts; later knowledge changes never rewrite the old answer.
 
 ## 3. Layer map
 
@@ -63,7 +76,7 @@ flowchart TD
 | L2 Immutable sources | SourcePDF, supplementary asset, repository files | Primary source |
 | L3 Extraction | ExtractionRun, DocumentElement, EvidenceAnchor, CodeElement, RepositoryDigest | Replaceable derived material |
 | L4 Single-source derivation | SummaryRevision, SummarySection, SummaryClaim, CodeAnalysis, ConversationDigest | AI-derived material |
-| L5 Reading and interaction | Conversation, ContextSnapshot, Message, Annotation | User and interaction history |
+| L5 Reading and interaction | Conversation, ContextSnapshot, Message, KnowledgeConversation, KnowledgeMessage, Annotation | User and interaction history |
 | L6 Confirmed knowledge | Takeaway, TakeawayRevision, KnowledgeNode, KnowledgeRevision | User-confirmed knowledge |
 | L7 Connections | ProvenanceLink, SemanticRelation | Traceability and reviewable interpretation |
 | L8 Projections | Search entries, vector index, graph projection, Wiki navigation | Rebuildable view |
@@ -298,7 +311,7 @@ after becoming a confirmed Takeaway or Knowledge Revision.
 
 Conversation Digest compresses a bounded Message range for Paper-scoped context.
 It records the Context Snapshot and generation revision. It is derived process data,
-not confirmed knowledge, and is never searched by the MVP entry Agent.
+not confirmed knowledge, and is never searched by Knowledge Question.
 
 ## 8. Reading and interaction
 
@@ -340,7 +353,7 @@ their historical Context Diff is explicitly unavailable.
 
 Messages form immutable process history. They may be archived and are available to
 the relevant Paper-scoped Agent, but they are not accepted personal knowledge and
-are not searched by the MVP entry Agent.
+are not searched by Knowledge Question.
 
 Each user Message has a stable ordinal and one or more turn attempts. Attempt state
 lives in `job_runs`; `conversation_turn_attempts` supplies retry lineage. At most one
@@ -360,6 +373,48 @@ Annotation is a user highlight or note on an Evidence Anchor, Summary Section, o
 Summary Claim. It is available to Paper-scoped work but not global search. Promotion
 to Takeaway or Knowledge Node requires a Proposal and Review Decision. Migration to
 a new Paper Version or Summary Revision is never silent.
+
+### 8.4 Knowledge Conversation
+
+Knowledge Conversation is a global-curated sequence of successful Knowledge Messages.
+It is not Paper-scoped, has no Context Snapshot, and is never included in
+`global-curated`. Each new turn may query the current eligible curated projection,
+while prior Messages retain the exact curated Evidence Receipts committed with their
+answer.
+
+The first transient question does not create an empty Knowledge Conversation. A
+successful first turn atomically creates the Conversation, user Message, assistant
+Message, Agent Run, and any curated Receipts. A successful follow-up atomically appends
+its Message pair. Cancel, final failure, timeout, or restart interruption commits no
+Knowledge Message and does not advance ordinals.
+
+Knowledge Message is immutable process history. Assistant Messages record two
+orthogonal classifications:
+
+- `answer_basis`: `curated-evidence | conversation-context | model-knowledge`;
+- `coverage`: `supported | partial | none | conflicting`.
+
+`model-knowledge` is allowed when the curated corpus has no useful result, but it owns
+no curated Receipt and is never presented as a user-confirmed or source-supported
+claim. `conversation-context` may clarify or transform already visible content but may
+not introduce a new source-supported research claim without opening/verifying curated
+material.
+
+Knowledge Turn Attempt extends Job Run with an optional existing Knowledge
+Conversation identity, submission identity, question hash, and execution epoch. It
+does not store the pending question body. One submission has one initial execution and
+at most three automatic retry epochs. On successful commit it links to the new user
+and assistant Messages; otherwise it remains operational audit only.
+
+Curated Evidence Receipt fixes a successful Knowledge Message to source type, source
+ID, immutable revision, content hash, locator, and bounded exact quote. Source
+availability is resolved at read time. Missing, purged, or integrity-withheld sources
+render gray and non-navigable; superseded but retained historical sources remain
+openable. No availability change mutates the Receipt or Message and no knowledge-update
+notice is added to old answers.
+
+Knowledge Conversation supports `active | archived` and restore. Hard deletion is not
+part of the accepted first release.
 
 ## 9. Confirmed knowledge
 
@@ -515,6 +570,15 @@ For Paper Summary output, every structured claim references exactly one opaque s
 handle enumerated by its immutable Context Snapshot; the application resolves that
 handle to an Evidence Anchor before activating the Summary.
 
+Knowledge Question Agent Runs have no Context Snapshot. Their invocation binding
+freezes Job Run ID, run epoch, data-root identity, tool budgets, and application
+Prompt/Schema hashes. The pending question body and curated source bodies remain
+ephemeral until a validated success; Agent Activity stores only sanitized event types,
+counts, and opaque handles. Successful output is committed with Knowledge Messages and
+Curated Evidence Receipts. Automatic retry advances the run epoch under the same
+submission identity; restart cannot resume because the question body was intentionally
+not persisted.
+
 ### 11.3 Write coordination
 
 Read, download, parsing, code indexing, Agent generation, and Proposal generation may
@@ -565,19 +629,22 @@ The data boundary is fixed even though future downward retrieval is not designed
 
 ### global-curated
 
-Searchable by the MVP entry Agent:
+Searchable by Knowledge Question:
 
 - active Summary Revisions, marked `generated-from-primary-source`;
 - confirmed Takeaway Revisions, marked `user-confirmed`;
 - active confirmed knowledge-ready Topic Revisions, marked `user-confirmed`.
 
-This corpus has its own FTS projection in the same SQLite database. `EntryAgentSearch`
-is its sole query interface; it cannot query the shared working-corpus FTS. The
+This corpus has its own FTS projection in the same SQLite database.
+`CuratedKnowledgeReader` is its sole query/open/verify interface; it cannot query the
+shared working-corpus FTS. Codex accesses that reader only through invocation-local
+curated tools and decides the queries, iterations, and final source selection. The
+host does not preassemble a fixed eight-source manifest or implement a ReAct loop. The
 projection is updated from the outbox and can be deterministically rebuilt from
 canonical active Summary and confirmed knowledge Markdown. Rebuild reads the vault
 files and verifies their recorded hashes; SQLite structured columns are operational
 metadata and cannot silently replace the knowledge authority. When the outbox is behind,
-the Entry Agent may answer from the last good projection but must display an indexing
+Knowledge Question may answer from the last good projection but must display an indexing
 staleness notice and its last successful update time.
 
 When a new Takeaway or Knowledge Revision becomes active, the same metadata/outbox
@@ -604,7 +671,8 @@ Never Agent-searchable:
 
 Every index entry records the precise source ID/revision, content hash, corpus,
 visibility scope, indexer version, and active/superseded state. Index separation does
-not decide future routing or ranking.
+not decide future routing or ranking. Search results and tool Activity are not
+evidence; only final verified curated Receipts support a grounded Knowledge Message.
 
 ## 13. Retention, deletion, and backup
 
@@ -633,7 +701,14 @@ Archive is the default. Hard deletion performs a dependency check. If a confirme
 revision depends only on deleted Messages, the user must delete it, retain it with
 `provenance-missing`, or cancel. A content-free tombstone may preserve audit identity.
 
-### 13.3 Paper deletion
+### 13.3 Knowledge Conversation deletion
+
+Archive and restore are the accepted first-release lifecycle. No hard-delete command,
+route, or browser action exists. A later deletion design must account for durable
+Knowledge Messages, curated Evidence Receipts, and any accepted knowledge derived from
+an answer; it cannot reuse Paper Conversation deletion without that dependency review.
+
+### 13.4 Paper deletion
 
 Paper supports three levels:
 
@@ -676,6 +751,11 @@ KnowledgeNode
 ├── KnowledgeRevision[]
 └── type: Insight | Concept | Topic | Question | Synthesis
 
+KnowledgeConversation
+├── KnowledgeMessage[]
+├── KnowledgeTurnAttempt[]
+└── CuratedEvidenceReceipt[]
+
 Cross-cutting
 ├── Artifact lineage
 ├── EvidenceAnchor
@@ -696,7 +776,8 @@ state while preserving the Message and immutable receipt metadata.
 ## 15. Explicitly deferred
 
 - DiscoverySource, InterestProfile, DiscoveryRun, recommendation ranking, and feedback model.
-- Entry Agent retrieval below Summary and confirmed knowledge.
+- Knowledge Question retrieval below Summary and confirmed knowledge into PDF,
+  Paper Messages, Annotation, or code.
 - Automatic conflict clustering and synthesis across Paper Takeaways.
 - Sandbox execution and experimental reproduction of repository code.
 - Cloud sync, multiple writers, and multi-user permissions.
