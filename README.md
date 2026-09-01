@@ -123,11 +123,11 @@ ScholarLoom 是本地优先应用，但不是完全离线应用。论文、代�
 | `SCHOLARLOOM_DATA_ROOT` | `$HOME/ScholarLoomData` | 选择已初始化的数据根 |
 | `SCHOLARLOOM_HOST` | `127.0.0.1` | 监听地址，仅接受 `127.0.0.1` 或 `::1` |
 | `SCHOLARLOOM_PORT` | `3000` | 本地服务端口 |
-| `SCHOLARLOOM_PDF_PROXY` | 未设置 | 无凭据的 loopback HTTP CONNECT proxy |
+| `SCHOLARLOOM_PDF_PROXY` | 未设置 | arXiv 元数据与 PDF 获取使用的无凭据 loopback HTTP CONNECT proxy |
 | `SCHOLARLOOM_PDF_OPTIMIZATION` | 未设置 | 设为 `lossless-linearization` 启用可选 PDF 优化 |
 | `SCHOLARLOOM_FIXTURE` | `0` | 设为 `1` 运行不访问 arXiv 或 Codex 的开发 fixture |
 
-PDF 下载默认 direct-first。`SCHOLARLOOM_PDF_PROXY` 只接受无凭据的 loopback HTTP proxy；未显式设置时，应用也可以继承满足相同安全约束的 `ALL_PROXY` 或 `all_proxy`。
+arXiv 元数据与 PDF 获取默认 direct-first。`SCHOLARLOOM_PDF_PROXY` 只接受无凭据的 loopback HTTP proxy；未显式设置时，应用也可以继承满足相同安全约束的 `ALL_PROXY` 或 `all_proxy`。只有可重试的连接失败会触发 proxy fallback；HTTP 错误和 TLS 证书错误不会绕过 direct response。
 
 可选 PDF 优化需要预先安装 `qpdf`。原始文件始终保留在 `originals/`，优化失败时继续交付原文件，派生产物可以随时重建。
 

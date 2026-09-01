@@ -101,11 +101,14 @@ const paperSource: PaperSource = fixture ? {
   async resolve(arxivId) { return { arxivId, latestVersion: 2, title: "Fixture Paper", authors: ["Ada Fixture"], year: 2024 }; },
   async fetchPdf() { return createFixturePdf(); },
 } : new ArxivPaperSource({
-  ...(proxyTransport ? { pdfDownloader: new SafePdfDownloader({
-    proxyTransport,
-    directAttemptTimeoutMs: 15_000,
-    totalTimeoutMs: 120_000,
-  }) } : {}),
+  ...(proxyTransport ? {
+    metadataProxyTransport: proxyTransport,
+    pdfDownloader: new SafePdfDownloader({
+      proxyTransport,
+      directAttemptTimeoutMs: 15_000,
+      totalTimeoutMs: 120_000,
+    }),
+  } : {}),
 });
 const directPdfSource = fixture ? {
   async prepare(reference: import("./domain/paper-import-reference.js").DirectPdfReference) {

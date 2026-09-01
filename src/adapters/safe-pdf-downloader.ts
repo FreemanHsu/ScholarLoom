@@ -13,7 +13,8 @@ export type PdfTransportResponse = {
 };
 
 export type PdfTransport = {
-  request(input: { url: URL; address: string; connectTimeoutMs: number; signal: AbortSignal }): Promise<PdfTransportResponse>;
+  request(input: { url: URL; address: string; connectTimeoutMs: number; signal: AbortSignal;
+    headers?: Record<string, string> }): Promise<PdfTransportResponse>;
 };
 
 type PaperSourceErrorDetails = {
@@ -209,7 +210,7 @@ function linkedAttemptSignal(parent: AbortSignal, timeoutMs: number | undefined)
   };
 }
 
-function isRetryableConnectivityError(error: unknown): boolean {
+export function isRetryableConnectivityError(error: unknown): boolean {
   const code = transportErrorCode(error);
   return ["ECONNRESET", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT", "EPIPE"].includes(code);
 }
@@ -243,7 +244,7 @@ function parseSafeUrl(value: string): URL {
   return url;
 }
 
-function isPublicAddress(address: string): boolean {
+export function isPublicAddress(address: string): boolean {
   const mappedTail = address.toLowerCase().match(/^(?:::ffff:|(?:0{1,4}:){5}ffff:)(.+)$/)?.[1];
   if (mappedTail && /^\d+\.\d+\.\d+\.\d+$/.test(mappedTail)) return isPublicAddress(mappedTail);
   const mappedHex = mappedTail?.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
@@ -266,16 +267,18 @@ function isPublicAddress(address: string): boolean {
   return false;
 }
 
-async function resolvePublicAddresses(hostname: string): Promise<string[]> {
+export async function resolvePublicAddresses(hostname: string): Promise<string[]> {
   return (await lookup(hostname, { all: true, verbatim: true })).map((entry) => entry.address);
 }
 
 class HttpsPdfTransport implements PdfTransport {
-  request(input: { url: URL; address: string; connectTimeoutMs: number; signal: AbortSignal }): Promise<PdfTransportResponse> {
+  request(input: { url: URL; address: string; connectTimeoutMs: number; signal: AbortSignal;
+    headers?: Record<string, string> }): Promise<PdfTransportResponse> {
     return new Promise((resolve, reject) => {
       const request = httpsRequest(input.url, {
         method: "GET",
-        headers: { "user-agent": "ScholarLoom/0.1 (personal research ingestion)", accept: "application/pdf, application/octet-stream;q=0.8" },
+        headers: { "user-agent": "ScholarLoom/0.1 (personal research ingestion)",
+          accept: "application/pdf, application/octet-stream;q=0.8", ...input.headers },
         signal: input.signal,
         lookup: (_hostname, options, callback) => {
           const family = isIP(input.address) as 4 | 6;
@@ -303,7 +306,7 @@ export class HttpConnectPdfTransport implements PdfTransport {
   constructor(readonly proxyUrl: URL, readonly options: { ca?: ConnectionOptions["ca"] } = {}) {}
 
   async request(input: { url: URL; address: string; connectTimeoutMs: number;
-    signal: AbortSignal }): Promise<PdfTransportResponse> {
+    signal: AbortSignal; headers?: Record<string, string> }): Promise<PdfTransportResponse> {
     const tunnel = await this.#openTunnel(input);
     const tlsSocket = await this.#openTls(tunnel, input);
     return new Promise((resolve, reject) => {
@@ -319,7 +322,8 @@ export class HttpConnectPdfTransport implements PdfTransport {
         path: `${input.url.pathname}${input.url.search}`,
         method: "GET",
         headers: { "user-agent": "ScholarLoom/0.1 (personal research ingestion)",
-          accept: "application/pdf, application/octet-stream;q=0.8", host: input.url.host, connection: "close" },
+          accept: "application/pdf, application/octet-stream;q=0.8", ...input.headers,
+          host: input.url.host, connection: "close" },
         agent,
         signal: input.signal,
       }, (response) => {

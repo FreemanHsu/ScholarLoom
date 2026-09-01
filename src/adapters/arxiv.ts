@@ -1,5 +1,11 @@
 import type { PaperSource, ResolvedPaper } from "../app.js";
-import { PaperSourceError } from "./safe-pdf-downloader.js";
+import {
+  isPublicAddress,
+  isRetryableConnectivityError,
+  PaperSourceError,
+  resolvePublicAddresses,
+  type PdfTransport,
+} from "./safe-pdf-downloader.js";
 
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const USER_AGENT = "ScholarLoom/0.1 (personal research ingestion)";
@@ -9,11 +15,15 @@ const RETRY_JITTER_MS = 1_000;
 const MAX_RETRY_DELAY_MS = 30_000;
 const METADATA_REQUEST_INTERVAL_MS = 3_000;
 const METADATA_TIMEOUT_MS = 15_000;
+const METADATA_CONNECT_TIMEOUT_MS = 10_000;
+const METADATA_MAX_BYTES = 2 * 1024 * 1024;
 const PDF_TIMEOUT_MS = 120_000;
 
 type ArxivPaperSourceOptions = {
   fetch?: typeof globalThis.fetch;
+  metadataProxyTransport?: PdfTransport;
   pdfDownloader?: { download(input: string): Promise<{ bytes: Uint8Array }> };
+  resolve?: (hostname: string) => Promise<string[]>;
   sleep?: (milliseconds: number) => Promise<void>;
   random?: () => number;
   now?: () => number;
@@ -31,7 +41,9 @@ class ArxivRequestTimeoutError extends Error {
 
 export class ArxivPaperSource implements PaperSource {
   readonly #fetch: typeof globalThis.fetch;
+  readonly #metadataProxyTransport: PdfTransport | undefined;
   readonly #pdfDownloader: { download(input: string): Promise<{ bytes: Uint8Array }> } | undefined;
+  readonly #resolve: (hostname: string) => Promise<string[]>;
   readonly #sleep: (milliseconds: number) => Promise<void>;
   readonly #random: () => number;
   readonly #now: () => number;
@@ -40,7 +52,9 @@ export class ArxivPaperSource implements PaperSource {
 
   constructor(options: ArxivPaperSourceOptions = {}) {
     this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#metadataProxyTransport = options.metadataProxyTransport;
     this.#pdfDownloader = options.pdfDownloader;
+    this.#resolve = options.resolve ?? resolvePublicAddresses;
     this.#sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.#random = options.random ?? Math.random;
     this.#now = options.now ?? Date.now;
@@ -124,11 +138,72 @@ export class ArxivPaperSource implements PaperSource {
   }
 
   async #request(url: string, signal: AbortSignal): Promise<Response> {
-    const response = await this.#fetch(url, { headers: { "user-agent": USER_AGENT }, signal });
+    let response: Response;
+    try {
+      response = await this.#fetch(url, { headers: { "user-agent": USER_AGENT }, signal });
+    } catch (error) {
+      if (!this.#metadataProxyTransport || signal.aborted || !isRetryableFetchConnectivityError(error)) throw error;
+      response = await this.#requestMetadataThroughProxy(new URL(url), signal);
+    }
     if (!response.ok) throw new ArxivHttpError(response.status,
       retryAfterMilliseconds(response.headers.get("retry-after"), this.#now()));
     return response;
   }
+
+  async #requestMetadataThroughProxy(url: URL, signal: AbortSignal): Promise<Response> {
+    let addresses: string[];
+    try { addresses = await this.#resolve(url.hostname); }
+    catch {
+      if (signal.aborted) throw signal.reason;
+      throw new PaperSourceError("paper-source-dns-failed", undefined, { retryable: true });
+    }
+    if (!addresses.length || addresses.some((address) => !isPublicAddress(address))) {
+      throw new PaperSourceError("unsafe-source-url");
+    }
+
+    let lastError: unknown;
+    for (const address of addresses) {
+      try {
+        const result = await this.#metadataProxyTransport!.request({
+          url,
+          address,
+          connectTimeoutMs: METADATA_CONNECT_TIMEOUT_MS,
+          signal,
+          headers: { accept: "application/atom+xml, application/xml;q=0.9, text/xml;q=0.8" },
+        });
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        for await (const chunk of result.body) {
+          size += chunk.byteLength;
+          if (size > METADATA_MAX_BYTES) throw new PaperSourceError("paper-source-too-large");
+          chunks.push(chunk);
+        }
+        const headers = new Headers();
+        for (const [key, value] of Object.entries(result.headers)) if (value !== undefined) headers.set(key, value);
+        return new Response(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))), {
+          status: result.status,
+          headers,
+        });
+      } catch (error) {
+        if (error instanceof PaperSourceError) throw error;
+        if (signal.aborted) throw signal.reason;
+        if (!isRetryableConnectivityError(error)) {
+          throw new PaperSourceError("paper-source-transport-error", undefined, { retryable: false });
+        }
+        lastError = error;
+      }
+    }
+    throw new PaperSourceError("paper-source-transport-error", String(lastError ?? "metadata proxy failed"), {
+      retryable: true,
+    });
+  }
+}
+
+function isRetryableFetchConnectivityError(error: unknown): boolean {
+  if (!(error instanceof TypeError)) return false;
+  if (!("cause" in error) || error.cause === undefined) return true;
+  if (isRetryableConnectivityError(error.cause)) return true;
+  return error.cause instanceof AggregateError && error.cause.errors.some(isRetryableConnectivityError);
 }
 
 function retryAfterMilliseconds(value: string | null, now: number): number | null {

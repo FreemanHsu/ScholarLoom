@@ -160,6 +160,85 @@ describe("ArxivPaperSource", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("falls back to the configured metadata proxy when the direct arXiv connection resets", async () => {
+    const attempts: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>().mockRejectedValue(new TypeError("fetch failed", {
+      cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+    }));
+    const metadataProxyTransport = {
+      async request(input: { url: URL; address: string }) {
+        attempts.push(`proxy:${input.address}:${input.url.pathname}${input.url.search}`);
+        return {
+          status: 200,
+          headers: { "content-type": "application/atom+xml; charset=utf-8" },
+          body: (async function* () {
+            yield new TextEncoder().encode(`
+<feed><entry><id>http://arxiv.org/abs/2607.18236v1</id>
+<title>Patch Policy: Efficient Embodied Control via Dense Visual Representations</title>
+<published>2026-07-20T17:59:41Z</published><author><name>Gaoyue Zhou</name></author></entry></feed>`);
+          })(),
+        };
+      },
+    };
+
+    await expect(new ArxivPaperSource({
+      fetch,
+      metadataProxyTransport,
+      resolve: async () => ["203.0.113.10"],
+      sleep: async () => {},
+      random: () => 0,
+    }).resolve("2607.18236")).resolves.toMatchObject({
+      arxivId: "2607.18236",
+      latestVersion: 1,
+      title: "Patch Policy: Efficient Embodied Control via Dense Visual Representations",
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(attempts).toEqual(["proxy:203.0.113.10:/api/query?id_list=2607.18236"]);
+  });
+
+  it("does not proxy metadata after a direct HTTP response or a TLS certificate failure", async () => {
+    const metadataProxyTransport = { request: vi.fn() };
+    const httpFetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValue(new Response("Service Unavailable", { status: 503 }));
+
+    await expect(new ArxivPaperSource({
+      fetch: httpFetch,
+      metadataProxyTransport,
+      sleep: async () => {},
+      random: () => 0,
+    }).resolve("2607.18236")).rejects.toThrow("paper-source-unavailable:503");
+
+    const tlsFetch = vi.fn<typeof globalThis.fetch>().mockRejectedValue(new TypeError("fetch failed", {
+      cause: Object.assign(new Error("certificate expired"), { code: "CERT_HAS_EXPIRED" }),
+    }));
+    await expect(new ArxivPaperSource({
+      fetch: tlsFetch,
+      metadataProxyTransport,
+      sleep: async () => {},
+      random: () => 0,
+    }).resolve("2607.18236")).rejects.toThrow("fetch failed");
+
+    expect(metadataProxyTransport.request).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unsafe metadata address before opening the proxy tunnel", async () => {
+    const metadataProxyTransport = { request: vi.fn() };
+    const fetch = vi.fn<typeof globalThis.fetch>().mockRejectedValue(new TypeError("fetch failed", {
+      cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+    }));
+
+    await expect(new ArxivPaperSource({
+      fetch,
+      metadataProxyTransport,
+      resolve: async () => ["127.0.0.1"],
+      sleep: async () => {},
+      random: () => 0,
+    }).resolve("2607.18236")).rejects.toMatchObject({ code: "unsafe-source-url" });
+
+    expect(metadataProxyTransport.request).not.toHaveBeenCalled();
+  });
+
   it("bounds each metadata attempt with a timeout", async () => {
     vi.useFakeTimers();
     const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
