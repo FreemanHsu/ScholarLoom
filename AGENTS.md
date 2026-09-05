@@ -49,7 +49,8 @@ The former `HOME.md`, `inbox/`, `library/`, `knowledge/`, `syntheses/`, and
 
 ## Verification
 
-Before completing a change, run:
+For changes to code, dependencies, configuration, schemas, runtime prompts, or
+application Skills, run:
 
 ```bash
 npm test
@@ -58,8 +59,17 @@ npm run build
 git diff --check
 ```
 
-For storage changes, also exercise snapshot verification and restore into a new
-temporary root. For browser changes, complete a real Playwright journey.
+For storage behavior changes, also exercise snapshot verification and restore into a
+new temporary root. For browser behavior changes, complete a real Playwright journey.
+
+For documentation-only changes that do not affect runtime behavior, verify content,
+links, and `git diff --check`; the full runtime checks above are not required.
+Application Skills and runtime prompts are not documentation-only changes merely
+because they are written in Markdown.
+
+If an environment issue blocks a required check, continue all other feasible work,
+report the exact blocker and unverified scope, and do not claim that verification
+passed or that the change is fully verified. A blocked check is not a waived check.
 
 The repository's default working language is Chinese; retain English technical terms
 when translation would reduce precision.

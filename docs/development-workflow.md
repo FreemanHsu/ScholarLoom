@@ -32,9 +32,11 @@ git push -u origin codex/<scope>
 合并以“可安全成为下一生产基线”为标准，而不是仅以代码完成为标准：
 
 1. 变更范围符合已接受的 PRD、architecture 和 ADR，且 review 没有未解决的 hard finding。
-2. `npm test`、`npm run typecheck`、`npm run build` 和 `git diff --check` 全部通过。
-3. Storage 变更完成真实 snapshot verification，并 restore 到新的临时 data root。
-4. Browser 变更完成真实 Playwright journey。
+2. 按 `AGENTS.md` 的 Verification 规则完成适用检查；代码、配置、runtime prompt 和应用 Skill
+   变更须通过 `npm test`、`npm run typecheck`、`npm run build` 和 `git diff --check`。
+   仅不影响运行行为的文档变更可使用其中的文档检查范围；环境阻塞不等于通过。
+3. Storage 行为变更完成真实 snapshot verification，并 restore 到新的临时 data root。
+4. Browser 行为变更完成真实 Playwright journey。
 5. 数据迁移具有已验证的回滚点，生产候选代码启动后 diagnostics 为 healthy。
 6. 分支已吸收最新 `main`，Pull Request 中没有未解决的 review conversation。
 

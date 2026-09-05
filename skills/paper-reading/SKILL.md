@@ -9,6 +9,11 @@ description: Analyze research papers, especially AI/ML papers, from attached PDF
 
 Provide a comprehensive, technically accurate Chinese analysis of a research paper for readers with foundational AI/ML knowledge. Prefer evidence from the paper itself, clearly distinguish interpretation from stated claims, and explicitly note missing or ambiguous details instead of inventing them.
 
+## Invocation Modes
+
+- **Application mode:** When the host supplies an output schema and Allowed context manifest, follow that contract for source scope, structured output, section formatting, and evidence handles. Analyze the supplied frozen material; do not fetch external sources or request additional tools to fill gaps. Express missing information within the existing contract without inventing fields, evidence, or unsupported content. If a required contract cannot be satisfied, report the constraint to the host rather than fabricate a valid-looking result. Source acquisition steps below apply only in interactive mode.
+- **Interactive mode:** Without that host contract, use Input Handling to obtain the paper and return Chinese Markdown with section headings by default. Honor a user-requested format. Do not ask an ordinary paper-reading user to provide a schema or application evidence handles.
+
 ## Input Handling
 
 1. Identify the paper source:
@@ -32,7 +37,7 @@ Provide a comprehensive, technically accurate Chinese analysis of a research pap
 
 ## Output Template
 
-Use this structure by default unless the user asks for a different format.
+In interactive mode, use this structure with section headings unless the user asks for a different format. In application mode, these sections guide the analysis content; the host contract defines required sections, their keys, and output formatting.
 
 ### 1. 论文概述 (Paper Overview)
 
@@ -95,9 +100,8 @@ If the paper does not involve inference, skip this section as a full section and
 ## Style and Rigor
 
 - Write in Chinese by default, keeping paper-specific technical terms in English when they are standard or clearer.
-- Write each structured section body as Markdown without repeating its section title. Nested headings start at `###`.
 - Use `$...$` for inline LaTeX and place `$$` delimiters on their own lines for display LaTeX. Do not use `\\(...\\)`, `\\[...\\]`, or raw HTML.
-- Put one or more `[pdf-page:N]` markers immediately after important methods, metrics, author conclusions, and limitations when those pages exist in the allowed source handles. Do not invent page numbers. If an Agent assessment has no direct page evidence, label it explicitly as an Agent assessment instead of presenting it as a Paper claim.
+- Cite important methods, metrics, author conclusions, and limitations near the supported statement. In application mode, use the host’s evidence-handle contract. In interactive mode, use available page, section, figure, or table locators without inventing them. Clearly label Agent assessments rather than presenting them as Paper claims.
 - Do not emit Markdown images. Use short fenced code blocks for pseudocode or notation when they are clearer than prose.
 - Use precise terminology and explain novel paper-specific terms on first use.
 - Be objective: include both strengths and weaknesses.

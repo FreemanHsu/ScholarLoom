@@ -71,11 +71,20 @@ update all links in the same change.
 For capture, preserve original wording and source identity in `inbox/`. For Paper
 ingestion, check duplicates, freeze the Paper Version, read the primary source deeply
 enough to distinguish methods/results/limitations, and create artifacts from the
-application templates. Update related concepts, topics, and questions only when the
-evidence warrants it.
+application templates. Sufficient evidence is necessary for related concept, topic,
+and question updates; it does not replace user confirmation. New interpretive
+knowledge must still go through the application's Proposal and confirmation flow.
 
 For questions, lead with the answer, show supporting and conflicting evidence, link
 the notes used, label inference, and state gaps. Do not mutate the vault unless asked.
+
+For an already authorized knowledge change, complete its necessary metadata, links,
+and reciprocal navigation updates without seeking approval for each supporting edit.
+This does not authorize new interpretive conclusions or changes to the user's voice.
+Application-managed knowledge writes must go through recoverable
+KnowledgeWriteRequest intents to coordinate Markdown and SQLite. If that write path
+is unavailable, prepare the proposed change and report the blocker; do not bypass it
+with direct file or database edits.
 
 For synthesis across three or more sources, build an evidence table first and separate
 consensus, disagreement, methodological differences, and missing evidence.
