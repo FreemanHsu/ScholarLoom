@@ -129,6 +129,8 @@ ScholarLoom 是本地优先应用，但不是完全离线应用。论文、代�
 
 arXiv 元数据与 PDF 获取默认 direct-first。`SCHOLARLOOM_PDF_PROXY` 只接受无凭据的 loopback HTTP proxy；未显式设置时，应用也可以继承满足相同安全约束的 `ALL_PROXY` 或 `all_proxy`。只有可重试的连接失败会触发 proxy fallback；HTTP 错误和 TLS 证书错误不会绕过 direct response。
 
+当 arXiv 元数据 API 在重试后仍出现连接失败、超时或暂时性 HTTP 错误时，应用会额外尝试一次对应的 `arxiv.org/abs/` 摘要页。备用路径使用 citation 元数据和明确的版本链接，校验论文编号、标题、作者、年份和版本；字段不完整时导入失败，不猜测版本。摘要页请求同样受超时、大小限制及现有代理安全约束保护。API 的 404、TLS 证书错误和安全校验失败不会触发该备用路径。
+
 可选 PDF 优化需要预先安装 `qpdf`。原始文件始终保留在 `originals/`，优化失败时继续交付原文件，派生产物可以随时重建。
 
 ### Tailnet 内访问

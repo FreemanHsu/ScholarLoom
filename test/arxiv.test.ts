@@ -9,6 +9,40 @@ afterEach(() => {
 });
 
 describe("ArxivPaperSource", () => {
+  const abstractHtml = `<html><head>
+<meta content='A &amp; B: &#x3B1;' name='citation_title'>
+<meta name="citation_author" content="Doe, Jane">
+<meta name="citation_author" content="O&#39;Neil, Sam">
+<meta name="citation_date" content="2024/01/02">
+<meta name="citation_arxiv_id" content="2401.00001">
+</head><body><a href="https://arxiv.org/abs/2401.00001v3">this version</a></body></html>`;
+
+  it("resolves the abstract page after API transport retries are exhausted", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url) => {
+      if (String(url).includes("export.arxiv.org")) throw new TypeError("fetch failed");
+      return new Response(abstractHtml);
+    });
+    await expect(new ArxivPaperSource({ fetch, sleep: async () => {} }).resolve("2401.00001"))
+      .resolves.toEqual({ arxivId: "2401.00001", latestVersion: 3, title: "A & B: α",
+        authors: ["Doe, Jane", "O'Neil, Sam"], year: 2024 });
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      ...Array(3).fill("https://export.arxiv.org/api/query?id_list=2401.00001"),
+      "https://arxiv.org/abs/2401.00001",
+    ]);
+  });
+
+  it.each([
+    abstractHtml.replace("2401.00001\"", "2401.00002\""),
+    abstractHtml.replace("2401.00001v3", "2401.00001"),
+    abstractHtml.replace('name="citation_author"', 'name="ignored"').replace('name="citation_author"', 'name="ignored"'),
+    "<html>Challenge: verify you are human</html>",
+  ])("rejects incomplete or mismatched abstract metadata", async (html) => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url) => String(url).includes("export.arxiv.org")
+      ? new Response("unavailable", { status: 503 }) : new Response(html));
+    await expect(new ArxivPaperSource({ fetch, sleep: async () => {} }).resolve("2401.00001"))
+      .rejects.toThrow("paper-source-unavailable:invalid-metadata");
+  });
+
   it("recovers when arXiv metadata is temporarily unavailable", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(new Response("Service Unavailable", { status: 503 }))
@@ -66,8 +100,8 @@ describe("ArxivPaperSource", () => {
       random: () => 0,
     }).resolve("2607.11643")).rejects.toThrow("paper-source-unavailable:503");
 
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(waits).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(waits.every((wait) => wait <= 3_000)).toBe(true);
   });
 
   it("restarts a PDF download after a transient arXiv failure", async () => {
@@ -252,7 +286,7 @@ describe("ArxivPaperSource", () => {
 
     await vi.runAllTimersAsync();
     await rejected;
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
   });
 
   it("times out a stalled PDF body read and restarts the full download", async () => {
@@ -295,7 +329,7 @@ describe("ArxivPaperSource", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("stops after three transient failures", async () => {
+  it("stops after three API failures and one abstract-page attempt", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValue(new Response("Service Unavailable", { status: 503 }));
     const waits: number[] = [];
@@ -308,8 +342,8 @@ describe("ArxivPaperSource", () => {
       now: () => now,
     }).resolve("2607.11643")).rejects.toThrow("paper-source-unavailable:503");
 
-    expect(fetch).toHaveBeenCalledTimes(3);
-    expect(waits).toEqual([3_000, 6_000]);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(waits).toEqual([3_000, 6_000, 3_000]);
   });
 
   it("does not retry an invalid PDF response", async () => {

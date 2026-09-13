@@ -61,6 +61,17 @@ export class ArxivPaperSource implements PaperSource {
   }
 
   async resolve(arxivId: string): Promise<ResolvedPaper> {
+    try { return await this.#resolveApi(arxivId); }
+    catch (error) {
+      if (!canUseAbstractFallback(error)) throw error;
+      return this.#scheduleMetadataRequest(() => this.#withTimeout(METADATA_TIMEOUT_MS, async (signal) => {
+        const response = await this.#request(`https://arxiv.org/abs/${arxivId}`, signal, true);
+        return parseAbstractMetadata(await readMetadataBody(response), arxivId);
+      }));
+    }
+  }
+
+  async #resolveApi(arxivId: string): Promise<ResolvedPaper> {
     return this.#withRetry(() => this.#scheduleMetadataRequest(() => this.#withTimeout(METADATA_TIMEOUT_MS, async (signal) => {
       const response = await this.#request(
         `https://export.arxiv.org/api/query?id_list=${encodeURIComponent(arxivId)}`, signal);
@@ -137,10 +148,10 @@ export class ArxivPaperSource implements PaperSource {
     return scheduled;
   }
 
-  async #request(url: string, signal: AbortSignal): Promise<Response> {
+  async #request(url: string, signal: AbortSignal, abstractPage = false): Promise<Response> {
     let response: Response;
     try {
-      response = await this.#fetch(url, { headers: { "user-agent": USER_AGENT }, signal });
+      response = await this.#fetch(url, { headers: { "user-agent": USER_AGENT }, signal, ...(abstractPage ? { redirect: "error" as const } : {}) });
     } catch (error) {
       if (!this.#metadataProxyTransport || signal.aborted || !isRetryableFetchConnectivityError(error)) throw error;
       response = await this.#requestMetadataThroughProxy(new URL(url), signal);
@@ -169,7 +180,7 @@ export class ArxivPaperSource implements PaperSource {
           address,
           connectTimeoutMs: METADATA_CONNECT_TIMEOUT_MS,
           signal,
-          headers: { accept: "application/atom+xml, application/xml;q=0.9, text/xml;q=0.8" },
+          headers: { accept: "text/html, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8" },
         });
         const chunks: Uint8Array[] = [];
         let size = 0;
@@ -211,4 +222,66 @@ function retryAfterMilliseconds(value: string | null, now: number): number | nul
   if (/^\d+$/.test(value.trim())) return Number.parseInt(value, 10) * 1_000;
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? Math.max(0, timestamp - now) : null;
+}
+
+// Only availability failures qualify; certificates, unsafe addresses and not-found do not.
+function canUseAbstractFallback(error: unknown): boolean {
+  return error instanceof ArxivRequestTimeoutError || isRetryableFetchConnectivityError(error) ||
+    (error instanceof ArxivHttpError && RETRYABLE_STATUS_CODES.has(error.status)) ||
+    (error instanceof PaperSourceError && error.retryable === true);
+}
+
+async function readMetadataBody(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("paper-source-unavailable:invalid-metadata");
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > METADATA_MAX_BYTES) throw new PaperSourceError("paper-source-too-large");
+      chunks.push(value);
+    }
+  } finally { await reader.cancel(); reader.releaseLock(); }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function decodeHtml(value: string): string {
+  const named: Record<string, string> = { amp: "&", quot: '\"', apos: "'", lt: "<", gt: ">", nbsp: " " };
+  return value.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|quot|apos|lt|gt|nbsp);/gi, (entity, key: string) => {
+    if (!key.startsWith("#")) return named[key.toLowerCase()] ?? entity;
+    const code = key[1]?.toLowerCase() === "x" ? Number.parseInt(key.slice(2), 16) : Number.parseInt(key.slice(1), 10);
+    return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : entity;
+  }).replace(/\s+/g, " ").trim();
+}
+
+function parseAbstractMetadata(html: string, arxivId: string): ResolvedPaper {
+  // Restrict citation fields to the head; never infer metadata from page prose.
+  const head = html.match(/<head\b[^>]*>([\s\S]*?)<\/head>/i)?.[1] ?? "";
+  const fields = new Map<string, string[]>();
+  for (const tag of head.matchAll(/<meta\b[^>]*>/gi)) {
+    const attributes = new Map<string, string>();
+    for (const attr of tag[0].matchAll(/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+      attributes.set(attr[1]!.toLowerCase(), decodeHtml(attr[2] ?? attr[3] ?? ""));
+    }
+    const name = attributes.get("name")?.toLowerCase();
+    const content = attributes.get("content");
+    if (name && content) fields.set(name, [...(fields.get(name) ?? []), content]);
+  }
+  const title = fields.get("citation_title")?.[0];
+  const authors = fields.get("citation_author") ?? [];
+  const date = fields.get("citation_date")?.[0] ?? "";
+  const year = /^\d{4}[/-]\d{2}[/-]\d{2}$/.test(date) ? Number(date.slice(0, 4)) : NaN;
+  const identity = fields.get("citation_arxiv_id")?.[0];
+  const versions: number[] = [];
+  for (const link of html.matchAll(/href\s*=\s*["']https:\/\/arxiv\.org\/abs\/([^"']+)["']/gi)) {
+    const version = link[1]!.match(/^(.+)v([1-9]\d*)$/);
+    if (version?.[1] === arxivId && Number.isSafeInteger(Number(version[2]))) versions.push(Number(version[2]));
+  }
+  if (identity !== arxivId || !title || !authors.length || !Number.isInteger(year) || !versions.length) {
+    throw new Error("paper-source-unavailable:invalid-metadata");
+  }
+  return { arxivId, title, authors, year, latestVersion: Math.max(...versions) };
 }

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { ArxivPaperSource } from "../src/adapters/arxiv.js";
+
 import { createApp } from "../src/app.js";
 import { initializeDataRoot } from "../src/storage/layout.js";
 
@@ -8,6 +10,27 @@ async function testLayout() {
 }
 
 describe("POST /api/imports", () => {
+  it("imports a frozen version through the abstract fallback when the API is offline", async () => {
+    const source = new ArxivPaperSource({
+      sleep: async () => {},
+      fetch: async (url) => {
+        if (String(url).includes("export.arxiv.org")) throw new TypeError("fetch failed");
+        return new Response(`<head><meta name="citation_title" content="Fallback Paper">
+          <meta name="citation_author" content="Ada Fixture"><meta name="citation_date" content="2024/01/02">
+          <meta name="citation_arxiv_id" content="2401.12345"></head>
+          <a href="https://arxiv.org/abs/2401.12345v3">this version</a>`);
+      },
+    });
+    const app = await createApp({ storageLayout: await testLayout(), paperSource: { resolve: (id) => source.resolve(id) } });
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/imports",
+        payload: { arxivUrl: "https://arxiv.org/abs/2401.12345" } });
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toMatchObject({ paper: { arxivId: "2401.12345", version: 3, title: "Fallback Paper" },
+        importRequest: { status: "resolved" } });
+    } finally { await app.close(); }
+  });
+
   it("imports an explicit arXiv version without silently upgrading it", async () => {
     const app = await createApp({
       storageLayout: await testLayout(),
