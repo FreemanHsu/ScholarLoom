@@ -12,13 +12,18 @@ execution and Settings read the same application-owned configuration registry.
 
 ## Agent configuration
 
+本表覆盖 Slice 003 的五类任务；完整的当前任务清单以
+[Agent Configuration Registry](../../src/agent/agent-configuration.ts) 为准。
+2026-10-09 的模型升级将所有任务统一为 `gpt-6.1-sol`，配置版本为
+`agent-configuration.v10`。
+
 | Task | Model | Thinking budget | Product status |
 |---|---|---|---|
-| Paper Summary | `gpt-5.6-sol` | `high` | enabled |
-| Discussion / Agentic Evidence | `gpt-5.6-sol` | `medium` | enabled |
-| Entry Agent | `gpt-5.6-sol` | `medium` | enabled |
-| Takeaway Selection | `gpt-5.6-sol` | `medium` | enabled or feature-disabled |
-| Legacy Paper Chat | `gpt-5.6-sol` | `medium` | legacy |
+| Paper Summary | `gpt-6.1-sol` | `high` | enabled |
+| Discussion / Agentic Evidence | `gpt-6.1-sol` | `medium` | enabled |
+| Entry Agent | `gpt-6.1-sol` | `medium` | enabled |
+| Takeaway Selection | `gpt-6.1-sol` | `medium` | enabled or feature-disabled |
+| Legacy Paper Chat | `gpt-6.1-sol` | `medium` | legacy |
 
 Every Codex launch passes the full configured runtime model ID and
 `model_reasoning_effort`; product-family labels such as `sol` are not valid values
@@ -59,8 +64,8 @@ snapshot-level load time; observed values carry their own run identity and time.
 
 ## Acceptance
 
-- Summary executes with `gpt-5.6-sol` and high reasoning; every other configured task
-  executes with `gpt-5.6-sol` and medium reasoning.
+- Summary executes with `gpt-6.1-sol` and high reasoning; the other four tasks in this
+  slice execute with `gpt-6.1-sol` and medium reasoning.
 - Settings and the Codex adapter consume the same registry.
 - All five task kinds are visible with correct enabled, feature-disabled, or legacy
   status.

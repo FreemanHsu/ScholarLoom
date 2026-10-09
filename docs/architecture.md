@@ -438,10 +438,12 @@ until all required profiles have passed in the current process. A successful che
 one profile must not imply that another passed.
 
 An application-owned Agent Configuration Registry is the single source for both
-execution and the read-only `/settings` snapshot. Every launch explicitly passes its
-model and `model_reasoning_effort`: Paper Summary, Paper Version Diff, and Paper
-Taxonomy use `gpt-5.6-sol`/`high`; Agentic Evidence, Knowledge Question, Entry Agent compatibility, Paper Organization,
-Takeaway Selection, and legacy Paper Chat use `gpt-5.6-sol`/`medium`. Agent Run
+execution and the read-only `/settings` snapshot. The current configuration version
+is `agent-configuration.v10`, which selects `gpt-6.1-sol` for all nine task kinds.
+Every launch explicitly passes its model and `model_reasoning_effort`: Paper Summary, Paper Version Diff, and Paper
+Taxonomy use `gpt-6.1-sol`/`high`; Agentic Evidence, Knowledge Question, Entry Agent
+compatibility, Paper Organization, Takeaway Selection, and legacy Paper Chat use
+`gpt-6.1-sol`/`medium`. Agent Run
 lineage records these values, the observed Codex version, and the configuration
 version when available; historical unknowns are not inferred.
 

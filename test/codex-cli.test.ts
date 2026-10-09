@@ -41,7 +41,7 @@ if (model === "sol") {
   process.stderr.write("The 'sol' model is not supported when using Codex with a ChatGPT account.");
   process.exit(1);
 }
-if (model !== "gpt-5.6-sol") process.exit(2);
+if (model !== "gpt-6.1-sol") process.exit(2);
 const outputPath = args[args.indexOf("--output-last-message") + 1];
 process.stdin.resume();
 process.stdin.on("end", () => fs.writeFileSync(outputPath, JSON.stringify({
@@ -172,7 +172,7 @@ if (args[0] === "sandbox") {
 	const outputPath = args[args.indexOf("--output-last-message") + 1];
 	if (!args.includes("--strict-config") || args.includes("--sandbox")) process.exit(35);
 	if (!fs.existsSync(args[args.indexOf("--cd") + 1] + "/CANARY")) process.exit(33);
-	if (args[args.indexOf("--model") + 1] !== "gpt-5.6-sol") process.exit(39);
+	if (args[args.indexOf("--model") + 1] !== "gpt-6.1-sol") process.exit(39);
 	const configValues = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
 	if (!configValues.includes('model_reasoning_effort="high"')) process.exit(40);
 	if (!configValues.includes('default_permissions="scholarloom-structured"')) process.exit(34);
@@ -305,7 +305,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 	if (args[0] !== "exec" || !args.includes("--strict-config") || args.includes("--sandbox")) process.exit(51);
 	const configValues = args.flatMap((arg, index) => args[index - 1] === "-c" ? [arg] : []);
-	if (args[args.indexOf("--model") + 1] !== "gpt-5.6-sol") process.exit(58);
+	if (args[args.indexOf("--model") + 1] !== "gpt-6.1-sol") process.exit(58);
 	if (!configValues.includes('model_reasoning_effort="medium"')) process.exit(59);
 	if (!configValues.includes('default_permissions="scholarloom-evidence"')) process.exit(54);
 if (!configValues.some((value) => value.includes('permissions.scholarloom-evidence=') &&

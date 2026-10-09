@@ -12,7 +12,7 @@ describe("SettingsPage", () => {
       loadedAt: "2026-07-30T08:00:00.000Z",
       overview: {
         applicationVersion: "0.1.0",
-        configurationVersion: "agent-configuration.v9",
+        configurationVersion: "agent-configuration.v10",
         startedAt: "2026-07-30T08:00:00.000Z",
         listener: { host: "127.0.0.1", port: 3000, loopbackOnly: true },
         dataRoot: "/tmp/scholarloom-settings-fixture",
@@ -39,11 +39,11 @@ describe("SettingsPage", () => {
       agents: [{
         taskKind: "paper-summary",
         displayName: "Paper Summary",
-        model: "gpt-5.6-sol",
+        model: "gpt-6.1-sol",
         reasoningEffort: "high",
         status: "enabled",
-        configured: { model: "gpt-5.6-sol", reasoningEffort: "high" },
-        effective: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+        configured: { model: "gpt-6.1-sol", reasoningEffort: "high" },
+        effective: { model: "gpt-6.1-sol", reasoningEffort: "high" },
         observed: {
           runId: "job:summary", completedAt: "2026-07-30T08:00:00.000Z",
           model: "sol", reasoningEffort: "high", codexVersion: "0.145.0",
@@ -92,7 +92,7 @@ describe("SettingsPage", () => {
     expect(html).toContain("系统配置");
     expect(html).toContain("只读");
     expect(html).toContain("Paper Summary");
-    expect(html).toContain("gpt-5.6-sol");
+    expect(html).toContain("gpt-6.1-sol");
     expect(html).toContain("high");
     expect(html).toContain("0.145.0");
     expect(html).toContain("能力检查通过");
@@ -103,7 +103,7 @@ describe("SettingsPage", () => {
     expect(html).not.toContain("PDF.js Range-first");
     expect(html).toContain("Lossless PDF Delivery 未启用");
     expect(html).toContain("vault-markdown-yaml");
-    expect(html).toContain("agent-configuration.v9");
+    expect(html).toContain("agent-configuration.v10");
     expect(html).toContain("job:summary");
     expect(html).toContain("环境变量最小化");
     expect(html).toContain("Direct first → Proxy fallback");

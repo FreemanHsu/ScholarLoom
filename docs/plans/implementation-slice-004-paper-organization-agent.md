@@ -58,7 +58,7 @@ Add `paper-organization` to the application-owned Agent Configuration Registry:
 | Field | Value |
 |---|---|
 | display name | Paper Organization Agent |
-| model | `gpt-5.6-sol` |
+| model | `gpt-6.1-sol` |
 | reasoning effort | `medium` |
 | timeout | 180 seconds |
 | concurrency | 1 |

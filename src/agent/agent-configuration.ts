@@ -1,6 +1,6 @@
-export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v9";
+export const AGENT_CONFIGURATION_VERSION = "agent-configuration.v10";
 export const MINIMUM_CODEX_VERSION = "0.144.6";
-export const CODEX_SOL_MODEL = "gpt-5.6-sol";
+export const CODEX_SOL_MODEL = "gpt-6.1-sol";
 
 export type AgentTaskKind =
   | "paper-summary"
